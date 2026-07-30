@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
+*.egg-info/
+
+# The server's Web Push identity — rotating it silently breaks every
+# existing browser subscription, so it must persist and never be shared.
+vapid_private_key.pem
+
+# Node
+node_modules/
+dist/
+.cache/
+
+# Env files
+.env.local
+.env.production
+*.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# SQLite data — real user content, never committed.
+*.db
+*.db-shm
+*.db-wal
+backend/uploads/
+
+# Test cache
+.pytest_cache/
+
+# Archived pre-rewrite backup, not part of the active app.
+old/

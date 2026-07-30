@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+  <title>TalkEx ⚡</title>
+  <meta name="description" content="TalkEx — Chat • Meetings • Business • Automation"/>
+  <link rel="icon" href="/icon.png"/>
+  <link rel="manifest" href="/manifest.json"/>
+  <link rel="apple-touch-icon" href="/icon.png"/>
+  <meta name="theme-color" content="#2563eb"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-title" content="TalkEx"/>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box;}
+    body{background:#f5f9fc;}
+    /* Thin scrollbars everywhere — Firefox via scrollbar-width, everything
+       else (Chrome/Safari/Edge) via the ::-webkit-scrollbar pseudo-elements. */
+    *{scrollbar-width:thin;scrollbar-color:#8888 transparent;}
+    ::-webkit-scrollbar{width:5px;height:5px;}
+    ::-webkit-scrollbar-track{background:transparent;}
+    ::-webkit-scrollbar-thumb{background:#88888899;border-radius:10px;}
+    ::-webkit-scrollbar-thumb:hover{background:#888888cc;}
+  </style>
+  <script>
+    // Paint the remembered theme's background before React ever mounts, so a
+    // returning dark-mode user does not see a flash of the light background
+    // (or vice versa) while the bundle loads. Kept to one property — anything
+    // more belongs in ui.jsx once React is running.
+    (function () {
+      try {
+        var isDark = localStorage.getItem("ht_theme") === "dark";
+        document.body.style.background = isDark ? "#0b1420" : "#f5f9fc";
+      } catch (e) { /* localStorage blocked — light default stands */ }
+    })();
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.jsx"></script>
+</body>
+</html>

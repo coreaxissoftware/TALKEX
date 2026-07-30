@@ -1,0 +1,14 @@
+{
+  "name": "TalkEx",
+  "short_name": "TalkEx",
+  "description": "Chat • Meetings • Business • Automation",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f5f9fc",
+  "theme_color": "#2563eb",
+  "icons": [
+    { "src": "/icon.png", "sizes": "1254x1254", "type": "image/png", "purpose": "any" },
+    { "src": "/icon.png", "sizes": "1254x1254", "type": "image/png", "purpose": "maskable" }
+  ]
+}

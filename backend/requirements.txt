@@ -1,0 +1,20 @@
+# Versions are floors, not pins. The original file pinned pydantic==2.10.6,
+# which has no wheel for Python 3.14 and tries to compile pydantic-core from
+# Rust source on install — that fails on a machine without a Rust toolchain.
+fastapi>=0.115
+uvicorn[standard]>=0.30
+websockets>=12.0
+python-multipart>=0.0.9
+pydantic>=2.11
+
+# Used by the test suite (fastapi.testclient needs httpx).
+httpx>=0.27
+pytest>=8.0
+
+# Renders the device-linking QR code server-side (SVG, no Pillow needed) —
+# a trusted, spec-correct implementation rather than a hand-rolled encoder.
+qrcode>=7.4
+
+# Sends Web Push notifications (VAPID + the browser Push API), so a message
+# can reach someone whose tab isn't open, not just whoever has a live socket.
+pywebpush>=2.0
