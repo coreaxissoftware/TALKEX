@@ -7,10 +7,26 @@
 //   { type: "particles" }
 //   { type: "none" }
 //   { type: "texture", id: "texture1".."texture6" }
+//   { type: "canvas", id: "bokeh" | "flowlines" }
 //   { type: "custom", dataUrl: "data:image/jpeg;base64,..." }
+//
+// Blur intensity is a separate preference (its own key/event) rather than a
+// field on the object above — it applies uniformly across every wallpaper
+// type, so keeping it independent means picking a new wallpaper never
+// accidentally resets the blur the person already dialed in, and vice versa.
 
 const KEY = "ht_chat_wallpaper";
 const EVENT = "ht-wallpaper-change";
+const BLUR_KEY = "ht_wallpaper_blur";
+const BLUR_EVENT = "ht-wallpaper-blur-change";
+
+// Two more canvas-drawn wallpapers alongside the particle network — always
+// dark (not theme-adaptive like the CSS textures above), same idea as
+// WhatsApp's own fixed-dark wallpaper gallery.
+export const CANVAS_WALLPAPERS = [
+  { id: "bokeh", label: "Bokeh" },
+  { id: "flowlines", label: "Flow Lines" },
+];
 
 // Pure CSS patterns, no image assets — each `css()` takes the live `G`
 // palette object (from ui.jsx) and builds its pattern out of G.text at low
@@ -53,6 +69,23 @@ export function onWallpaperChange(callback) {
   const handler = (event) => callback(event.detail);
   window.addEventListener(EVENT, handler);
   return () => window.removeEventListener(EVENT, handler);
+}
+
+// 0-20px. Applies as a CSS filter over whichever wallpaper is active.
+export function getWallpaperBlur() {
+  const n = parseInt(localStorage.getItem(BLUR_KEY), 10);
+  return Number.isFinite(n) ? Math.min(20, Math.max(0, n)) : 0;
+}
+
+export function setWallpaperBlur(px) {
+  localStorage.setItem(BLUR_KEY, String(px));
+  window.dispatchEvent(new CustomEvent(BLUR_EVENT, { detail: px }));
+}
+
+export function onWallpaperBlurChange(callback) {
+  const handler = (event) => callback(event.detail);
+  window.addEventListener(BLUR_EVENT, handler);
+  return () => window.removeEventListener(BLUR_EVENT, handler);
 }
 
 /**

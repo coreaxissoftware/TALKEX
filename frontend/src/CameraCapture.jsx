@@ -95,7 +95,10 @@ export default function CameraCapture({ onCapture, onClose }) {
         </div>
       </div>
 
-      <div style={{ flex: 1, position: "relative", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{
+        flex: 1, minHeight: 0, minWidth: 0, position: "relative", overflow: "hidden",
+        display: "flex", alignItems: "center", justifyContent: "center",
+      }}>
         {error ? (
           <div style={{ color: "#fff", fontSize: 14, textAlign: "center", padding: 24 }}>{error}</div>
         ) : (

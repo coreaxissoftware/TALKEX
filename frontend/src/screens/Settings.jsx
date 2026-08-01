@@ -6,7 +6,9 @@ import {
 import { ACCENTS, Av, Button, Field, G, I, SRow, Spinner, Toggle, clockTime, whenLabel } from "../ui.jsx";
 import { disablePush, enablePush, getPushSubscription, isPushSupported } from "../push.js";
 import { getAutoDownload, setAutoDownload } from "../mediaPrefs.js";
-import { TEXTURES, getWallpaper, readImageAsWallpaper, setWallpaper } from "../chatWallpaper.js";
+import {
+  TEXTURES, getWallpaper, getWallpaperBlur, readImageAsWallpaper, setWallpaper, setWallpaperBlur,
+} from "../chatWallpaper.js";
 import { disableAppLock, isAppLockEnabled, setAppLockPin } from "../appLock.js";
 import QrScanner from "../QrScanner.jsx";
 import Login from "./Login.jsx";
@@ -51,6 +53,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
   const [activeSection, setActiveSection] = useState(null);
   const [autoDownload, setAutoDownloadState] = useState(getAutoDownload);
   const [wallpaper, setWallpaperState] = useState(getWallpaper);
+  const [blur, setBlurState] = useState(getWallpaperBlur);
   const [appLockOn, setAppLockOn] = useState(isAppLockEnabled);
   const [appLockSheet, setAppLockSheet] = useState(false);
   const [changingPhone, setChangingPhone] = useState(false);
@@ -65,6 +68,11 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
   function changeAutoDownload(value) {
     setAutoDownload(value);
     setAutoDownloadState(value);
+  }
+
+  function changeWallpaperBlur(px) {
+    setWallpaperBlur(px);
+    setBlurState(px);
   }
 
   function changeWallpaper(value) {
@@ -397,6 +405,22 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
                                   "radial-gradient(circle at 70% 60%, #f5a524 0 2.5px, transparent 3.5px)," +
                                   "radial-gradient(circle at 50% 80%, #7dd3fc 0 2px, transparent 3px)",
                               }}/>
+            <WallpaperSwatch label="Bokeh" active={wallpaper.type === "canvas" && wallpaper.id === "bokeh"}
+                              onClick={() => changeWallpaper({ type: "canvas", id: "bokeh" })}
+                              style={{
+                                background: "linear-gradient(160deg,#0b1420,#10192b)",
+                                backgroundImage:
+                                  "radial-gradient(circle at 35% 65%, #7dd3fc55 0 8px, transparent 10px)," +
+                                  "radial-gradient(circle at 65% 30%, #f5a52444 0 6px, transparent 8px)," +
+                                  "radial-gradient(circle at 25% 20%, #7dd3fc33 0 5px, transparent 7px)",
+                              }}/>
+            <WallpaperSwatch label="Flow Lines" active={wallpaper.type === "canvas" && wallpaper.id === "flowlines"}
+                              onClick={() => changeWallpaper({ type: "canvas", id: "flowlines" })}
+                              style={{
+                                background: "linear-gradient(160deg,#0b1420,#10192b)",
+                                backgroundImage:
+                                  "repeating-linear-gradient(100deg, transparent 0 6px, #7dd3fc4d 6px 7px, transparent 7px 16px)",
+                              }}/>
             <WallpaperSwatch label="Plain" active={wallpaper.type === "none"}
                               onClick={() => changeWallpaper({ type: "none" })}
                               style={{ background: G.bg }}/>
@@ -418,6 +442,17 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
               {!(wallpaper.type === "custom" && wallpaper.dataUrl) && I.camera(G.sub, 18)}
             </WallpaperSwatch>
           </div>
+
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            margin: "16px 0 6px",
+          }}>
+            <div style={{ fontSize: 12, color: G.muted }}>Wallpaper blur</div>
+            <div style={{ fontSize: 12, color: G.sub }}>{blur === 0 ? "Off" : `${blur}px`}</div>
+          </div>
+          <input type="range" min={0} max={20} value={blur}
+                 onChange={(event) => changeWallpaperBlur(Number(event.target.value))}
+                 style={{ width: "100%", accentColor: G.accent }}/>
         </div>
       </Section>
 

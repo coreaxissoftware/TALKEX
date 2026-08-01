@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Uploads } from "./api.js";
-import { TEXTURES, getWallpaper, onWallpaperChange } from "./chatWallpaper.js";
+import {
+  TEXTURES, getWallpaper, getWallpaperBlur, onWallpaperBlurChange, onWallpaperChange,
+} from "./chatWallpaper.js";
 
 // Below this width the app is the single-column, phone-shaped layout it was
 // designed around. At or above it there's room for a WhatsApp-Web-style
@@ -165,33 +167,172 @@ export function ParticleNetwork({ fixed = true }) {
  * logic, and ChatWallpaperPicker (the Settings UI) never has to know who's
  * listening.
  */
+const DARK_CANVAS_BG = "linear-gradient(160deg, #0b1420, #10192b 60%, #0b1420)";
+
+/** Soft glowing orbs drifting upward, like light bokeh — a calmer, ambient
+ * alternative to the particle network's connected-dots look. */
+export function BokehCanvas({ fixed = true }) {
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    let width = 0, height = 0, orbs = [], animationId;
+
+    function makeOrbs() {
+      const count = Math.min(28, Math.max(10, Math.floor((width * height) / 45000)));
+      orbs = Array.from({ length: count }, () => ({
+        x: Math.random() * width,
+        y: Math.random() * height,
+        r: Math.random() * 40 + 20,
+        vy: -(Math.random() * 0.25 + 0.08),
+        vx: (Math.random() - 0.5) * 0.15,
+        warm: Math.random() < 0.35,
+        alpha: Math.random() * 0.16 + 0.06,
+        phase: Math.random() * Math.PI * 2,
+      }));
+    }
+
+    function onResize() {
+      width = canvas.width = canvas.offsetWidth;
+      height = canvas.height = canvas.offsetHeight;
+      makeOrbs();
+    }
+
+    function step(time) {
+      ctx.clearRect(0, 0, width, height);
+      for (const o of orbs) {
+        o.y += o.vy;
+        o.x += o.vx + Math.sin(time / 3000 + o.phase) * 0.15;
+        if (o.y < -o.r) { o.y = height + o.r; o.x = Math.random() * width; }
+        if (o.x < -o.r) o.x = width + o.r;
+        if (o.x > width + o.r) o.x = -o.r;
+        const rgb = o.warm ? "245,165,36" : "125,211,252";
+        const gradient = ctx.createRadialGradient(o.x, o.y, 0, o.x, o.y, o.r);
+        gradient.addColorStop(0, `rgba(${rgb},${o.alpha})`);
+        gradient.addColorStop(1, `rgba(${rgb},0)`);
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.arc(o.x, o.y, o.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      animationId = requestAnimationFrame(step);
+    }
+
+    onResize();
+    animationId = requestAnimationFrame(step);
+    window.addEventListener("resize", onResize);
+    return () => {
+      cancelAnimationFrame(animationId);
+      window.removeEventListener("resize", onResize);
+    };
+  }, []);
+
+  return (
+    <div aria-hidden style={{
+      position: fixed ? "fixed" : "absolute", inset: 0, zIndex: 0, overflow: "hidden", background: DARK_CANVAS_BG,
+    }}>
+      <canvas ref={canvasRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}/>
+    </div>
+  );
+}
+
+/** A handful of slow sine-wave lines drifting across a dark background. */
+export function FlowLinesCanvas({ fixed = true }) {
+  const canvasRef = useRef(null);
+  const LINES = 6;
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    let width = 0, height = 0, animationId;
+
+    function onResize() {
+      width = canvas.width = canvas.offsetWidth;
+      height = canvas.height = canvas.offsetHeight;
+    }
+
+    function step(time) {
+      ctx.clearRect(0, 0, width, height);
+      for (let i = 0; i < LINES; i++) {
+        const t = time / 1800 + i * 1.1;
+        const baseY = height * ((i + 0.5) / LINES);
+        ctx.beginPath();
+        for (let x = 0; x <= width; x += 8) {
+          const y = baseY + Math.sin(x / 90 + t) * 18 + Math.sin(x / 240 + t * 0.6) * 10;
+          if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = i % 3 === 0 ? "rgba(245,165,36,0.35)" : "rgba(125,211,252,0.3)";
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+      }
+      animationId = requestAnimationFrame(step);
+    }
+
+    onResize();
+    animationId = requestAnimationFrame(step);
+    window.addEventListener("resize", onResize);
+    return () => {
+      cancelAnimationFrame(animationId);
+      window.removeEventListener("resize", onResize);
+    };
+  }, []);
+
+  return (
+    <div aria-hidden style={{
+      position: fixed ? "fixed" : "absolute", inset: 0, zIndex: 0, overflow: "hidden", background: DARK_CANVAS_BG,
+    }}>
+      <canvas ref={canvasRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}/>
+    </div>
+  );
+}
+
 export function ChatBackdrop({ fixed = false }) {
   const [wallpaper, setWallpaperState] = useState(getWallpaper);
+  const [blur, setBlur] = useState(getWallpaperBlur);
   useEffect(() => onWallpaperChange(setWallpaperState), []);
+  useEffect(() => onWallpaperBlurChange(setBlur), []);
 
-  const base = { position: fixed ? "fixed" : "absolute", inset: 0, zIndex: 0 };
-
-  if (wallpaper.type === "particles") return <ParticleNetwork fixed={fixed}/>;
-
-  if (wallpaper.type === "texture") {
+  let content = null;
+  if (wallpaper.type === "particles") {
+    content = <ParticleNetwork fixed={false}/>;
+  } else if (wallpaper.type === "canvas") {
+    content = wallpaper.id === "flowlines" ? <FlowLinesCanvas fixed={false}/> : <BokehCanvas fixed={false}/>;
+  } else if (wallpaper.type === "texture") {
     const texture = TEXTURES.find((t) => t.id === wallpaper.id) || TEXTURES[0];
-    return (
-      <div aria-hidden style={{
-        ...base, background: G.bg, backgroundImage: texture.css(G), backgroundSize: texture.size,
+    content = (
+      <div style={{
+        position: "absolute", inset: 0, background: G.bg,
+        backgroundImage: texture.css(G), backgroundSize: texture.size,
       }}/>
     );
-  }
-
-  if (wallpaper.type === "custom" && wallpaper.dataUrl) {
-    return (
-      <div aria-hidden style={{
-        ...base, backgroundImage: `url(${wallpaper.dataUrl})`,
+  } else if (wallpaper.type === "custom" && wallpaper.dataUrl) {
+    content = (
+      <div style={{
+        position: "absolute", inset: 0, backgroundImage: `url(${wallpaper.dataUrl})`,
         backgroundSize: "cover", backgroundPosition: "center",
       }}/>
     );
   }
 
-  return null;
+  if (!content) return null;
+
+  // Blurring right at the container edge leaves a faint transparent halo
+  // (the filter samples pixels beyond the element's own bounds, which don't
+  // exist). Rendering the content oversized and clipping it back down with
+  // the outer overflow:hidden gives the blur real pixels to sample instead.
+  const overscan = blur > 0 ? Math.min(blur * 2, 40) : 0;
+
+  return (
+    <div aria-hidden style={{ position: fixed ? "fixed" : "absolute", inset: 0, zIndex: 0, overflow: "hidden" }}>
+      <div style={{
+        position: "absolute", inset: overscan ? -overscan : 0,
+        filter: blur ? `blur(${blur}px)` : undefined,
+      }}>
+        {content}
+      </div>
+    </div>
+  );
 }
 
 // Design system: palette, icons and the small shared components.
