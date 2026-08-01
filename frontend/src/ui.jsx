@@ -619,6 +619,7 @@ export const I = {
   volumeOff: (c = "#fff", s = 22) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>,
   moreVertical: (c = "#fff", s = 22) => <svg width={s} height={s} viewBox="0 0 24 24" fill={c} stroke="none"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>,
   screenShare: (c = G.sub, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/><path d="M9 11l3-3 3 3"/><line x1="12" y1="8" x2="12" y2="14"/></svg>,
+  newChatBox: (c = "#fff", s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 4H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h1v3l3.5-3H18a2 2 0 0 0 2-2v-4"/><line x1="17" y1="3" x2="17" y2="9"/><line x1="14" y1="6" x2="20" y2="6"/></svg>,
 
   // Settings-row and chat-info icons — added to replace raw emoji, which
   // render inconsistently across platforms/fonts and read as placeholder
@@ -697,6 +698,58 @@ export function Toggle({ on, onChange }) {
         position: "absolute", top: 2, left: on ? 20 : 2, width: 20, height: 20,
         borderRadius: "50%", background: "#fff", transition: "left 0.2s",
       }}/>
+    </div>
+  );
+}
+
+/**
+ * A small popup menu anchored near a point (mouse right-click coordinates,
+ * or a touch/long-press point on mobile) rather than a full-width bottom
+ * sheet — this is what both the chat-list row menu and the chat-view
+ * background menu use, so right-clicking behaves the same everywhere.
+ * Clamped to the viewport so a click near an edge doesn't render off-screen.
+ */
+export function ContextMenu({ x, y, items, onClose }) {
+  const ref = useRef(null);
+  const [pos, setPos] = useState({ left: x, top: y, visible: false });
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const { innerWidth, innerHeight } = window;
+    const rect = el.getBoundingClientRect();
+    const left = Math.min(x, innerWidth - rect.width - 8);
+    const top = Math.min(y, innerHeight - rect.height - 8);
+    setPos({ left: Math.max(8, left), top: Math.max(8, top), visible: true });
+  }, [x, y]);
+
+  return (
+    <div onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }} style={{
+      position: "fixed", inset: 0, zIndex: 1200, background: "transparent",
+    }}>
+      <div ref={ref} onClick={(e) => e.stopPropagation()} style={{
+        position: "fixed", left: pos.left, top: pos.top, opacity: pos.visible ? 1 : 0,
+        minWidth: 200, maxWidth: 260, background: G.card, border: `1px solid ${G.border}`,
+        borderRadius: 12, boxShadow: "0 8px 28px #00000033", padding: 6, color: G.text,
+      }}>
+        {items.map((item, i) => item.divider ? (
+          <div key={`d${i}`} style={{ height: 1, background: G.border, margin: "5px 4px" }}/>
+        ) : (
+          <div key={item.label}
+               onClick={() => { if (!item.disabled) { item.onClick(); onClose(); } }}
+               style={{
+                 display: "flex", alignItems: "center", gap: 10, padding: "9px 10px",
+                 borderRadius: 8, cursor: item.disabled ? "default" : "pointer",
+                 opacity: item.disabled ? 0.45 : 1,
+                 color: item.danger ? G.red : G.text,
+               }}
+               onMouseEnter={(e) => !item.disabled && (e.currentTarget.style.background = G.dim)}
+               onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
+            {item.icon}
+            <span style={{ fontSize: 13.5 }}>{item.label}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

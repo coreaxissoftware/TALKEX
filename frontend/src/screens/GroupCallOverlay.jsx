@@ -1,6 +1,67 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { Chats } from "../api.js";
 import { Av, G, I } from "../ui.jsx";
 import { AudioOutputPicker, CallButton, MoreMenu, VideoTag, canPickAudioOutput } from "./CallOverlay.jsx";
+
+/** Any current participant can add people; a chat member already in the
+ * call or already in `existingIds` (the call's own participants) is
+ * filtered out client-side, and the server re-checks calling_permitted()
+ * for each target regardless. */
+function AddPeoplePicker({ chatId, existingIds, onAdd, onClose }) {
+  const [members, setMembers] = useState(null);
+  const [selected, setSelected] = useState([]);
+
+  useEffect(() => {
+    Chats.get(chatId).then((chat) => setMembers(chat.members || [])).catch(() => setMembers([]));
+  }, [chatId]);
+
+  const candidates = (members || []).filter((m) => !existingIds.includes(m.id));
+
+  function toggle(userId) {
+    setSelected((current) =>
+      current.includes(userId) ? current.filter((id) => id !== userId) : [...current, userId]);
+  }
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, zIndex: 1100, background: "#000000aa",
+      display: "flex", alignItems: "flex-end", justifyContent: "center",
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: "100%", maxWidth: 430, background: "#182234", borderTopLeftRadius: 20,
+        borderTopRightRadius: 20, padding: "18px 14px 24px", color: "#fff",
+      }}>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Add people to this call</div>
+        {members === null ? (
+          <div style={{ fontSize: 13, color: "#ffffff88" }}>Loading…</div>
+        ) : candidates.length === 0 ? (
+          <div style={{ fontSize: 13, color: "#ffffff88" }}>Everyone in this chat is already here.</div>
+        ) : (
+          <div style={{ maxHeight: 280, overflowY: "auto", marginBottom: 14 }}>
+            {candidates.map((person) => (
+              <label key={person.id} onClick={(e) => e.stopPropagation()} style={{
+                display: "flex", alignItems: "center", gap: 10, padding: "9px 4px", cursor: "pointer",
+              }}>
+                <input type="checkbox" checked={selected.includes(person.id)}
+                       onChange={() => toggle(person.id)}/>
+                <Av av={person.avatar_letter} color={person.color} size={30}/>
+                <div style={{ fontSize: 13.5 }}>{person.name}</div>
+              </label>
+            ))}
+          </div>
+        )}
+        <button onClick={() => { onAdd(selected); onClose(); }} disabled={selected.length === 0}
+                style={{
+                  width: "100%", padding: 12, borderRadius: 10, border: "none", cursor: "pointer",
+                  background: selected.length ? G.accent : "#ffffff26",
+                  color: "#fff", fontWeight: 600, opacity: selected.length ? 1 : 0.6,
+                }}>
+          {selected.length ? `Add (${selected.length})` : "Select someone to add"}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 /**
  * The group-call counterpart to CallOverlay — same full-screen mount point,
@@ -13,7 +74,8 @@ import { AudioOutputPicker, CallButton, MoreMenu, VideoTag, canPickAudioOutput }
  * reason about for no real benefit.
  */
 export default function GroupCallOverlay({
-  call, onAccept, onDecline, onLeave, onToggleMute, onToggleCamera, onShareScreen,
+  call, myUserId, onAccept, onDecline, onLeave, onToggleMute, onToggleCamera, onShareScreen,
+  onForceMuteAll, onKickParticipant, onAddPeople,
 }) {
   const [sinkId, setSinkId] = useState(undefined);
 
@@ -28,9 +90,10 @@ export default function GroupCallOverlay({
     }}>
       {call.phase === "incoming"
         ? <IncomingGroupCall call={call} onAccept={onAccept} onDecline={onDecline}/>
-        : <ActiveGroupCall call={call} onLeave={onLeave} onToggleMute={onToggleMute}
+        : <ActiveGroupCall call={call} myUserId={myUserId} onLeave={onLeave} onToggleMute={onToggleMute}
                            onToggleCamera={onToggleCamera} onShareScreen={onShareScreen}
-                           sinkId={sinkId} onSinkId={setSinkId}/>}
+                           onForceMuteAll={onForceMuteAll} onKickParticipant={onKickParticipant}
+                           onAddPeople={onAddPeople} sinkId={sinkId} onSinkId={setSinkId}/>}
     </div>
   );
 }
@@ -53,12 +116,17 @@ function IncomingGroupCall({ call, onAccept, onDecline }) {
   );
 }
 
-function ActiveGroupCall({ call, onLeave, onToggleMute, onToggleCamera, onShareScreen, sinkId, onSinkId }) {
+function ActiveGroupCall({
+  call, myUserId, onLeave, onToggleMute, onToggleCamera, onShareScreen,
+  onForceMuteAll, onKickParticipant, onAddPeople, sinkId, onSinkId,
+}) {
   const [showSpeakerPicker, setShowSpeakerPicker] = useState(false);
   const [showMore, setShowMore] = useState(false);
+  const [showAddPeople, setShowAddPeople] = useState(false);
   const others = Object.entries(call.participants);
   const tileCount = others.length + 1; // + yourself
   const columns = tileCount <= 2 ? 1 : 2;
+  const isHost = myUserId != null && call.hostId === myUserId;
 
   return (
     <>
@@ -66,9 +134,10 @@ function ActiveGroupCall({ call, onLeave, onToggleMute, onToggleCamera, onShareS
         flex: 1, display: "grid", gridTemplateColumns: `repeat(${columns}, 1fr)`,
         gap: 2, padding: 2, overflow: "hidden",
       }}>
-        <SelfTile call={call}/>
+        <SelfTile call={call} isHost={isHost}/>
         {others.map(([userId, participant]) => (
-          <ParticipantTile key={userId} participant={participant} sinkId={sinkId}/>
+          <ParticipantTile key={userId} participant={participant} sinkId={sinkId}
+                           canKick={isHost} onKick={() => onKickParticipant(userId)}/>
         ))}
       </div>
 
@@ -83,11 +152,9 @@ function ActiveGroupCall({ call, onLeave, onToggleMute, onToggleCamera, onShareS
       <div style={{ display: "flex", justifyContent: "center", gap: 16, padding: "16px 20px 60px", flexWrap: "wrap" }}>
         <CallButton onClick={onToggleMute} background={call.muted ? "#fff" : "#ffffff26"}
                     icon={call.muted ? I.micOff("#0b1220", 20) : I.mic("#fff", 20)} label="Mute" small/>
-        {call.callKind === "video" && (
-          <CallButton onClick={onToggleCamera} background={call.cameraOff ? "#fff" : "#ffffff26"}
-                      icon={call.cameraOff ? I.videoOff("#0b1220", 20) : I.video("#fff", 20)}
-                      label="Camera" small/>
-        )}
+        <CallButton onClick={onToggleCamera} background={call.cameraOff ? "#fff" : "#ffffff26"}
+                    icon={call.cameraOff ? I.videoOff("#0b1220", 20) : I.video("#fff", 20)}
+                    label={call.callKind === "video" ? "Camera" : "Video"} small/>
         {canPickAudioOutput && (
           <CallButton onClick={() => setShowSpeakerPicker(true)} background="#ffffff26"
                       icon={I.volume("#fff", 20)} label="Speaker" small/>
@@ -109,13 +176,30 @@ function ActiveGroupCall({ call, onLeave, onToggleMute, onToggleCamera, onShareS
             disabled: call.callKind !== "video",
             onClick: onShareScreen,
           },
+          {
+            label: "Add people",
+            icon: I.user("#fff", 18),
+            onClick: () => setShowAddPeople(true),
+          },
+          {
+            label: "Mute everyone",
+            sub: isHost ? undefined : "Only the person who started this call can do that",
+            icon: I.micOff("#fff", 18),
+            disabled: !isHost,
+            onClick: onForceMuteAll,
+          },
         ]}/>
+      )}
+      {showAddPeople && (
+        <AddPeoplePicker chatId={call.chatId}
+                         existingIds={[myUserId, ...Object.keys(call.participants)]}
+                         onAdd={onAddPeople} onClose={() => setShowAddPeople(false)}/>
       )}
     </>
   );
 }
 
-function SelfTile({ call }) {
+function SelfTile({ call, isHost }) {
   const showVideo = call.callKind === "video" && !call.cameraOff && call.localStream;
   return (
     <div style={{
@@ -130,12 +214,12 @@ function SelfTile({ call }) {
       <div style={{
         position: "absolute", bottom: 6, left: 8, fontSize: 11.5, color: "#ffffffcc",
         background: "#00000066", padding: "2px 8px", borderRadius: 8,
-      }}>You{call.muted ? " · muted" : ""}</div>
+      }}>You{isHost ? " · host" : ""}{call.muted ? " · muted" : ""}</div>
     </div>
   );
 }
 
-function ParticipantTile({ participant, sinkId }) {
+function ParticipantTile({ participant, sinkId, canKick, onKick }) {
   const hasVideo = participant.stream?.getVideoTracks().length > 0;
   return (
     <div style={{
@@ -157,6 +241,13 @@ function ParticipantTile({ participant, sinkId }) {
         <div style={{ position: "absolute", top: 6, right: 8, fontSize: 10.5, color: "#ffffff99" }}>
           connecting…
         </div>
+      )}
+      {canKick && (
+        <div onClick={onKick} title="Remove from call" style={{
+          position: "absolute", top: 6, right: 8, width: 22, height: 22, borderRadius: "50%",
+          background: "#00000088", color: "#ff8080", fontSize: 15, lineHeight: "22px",
+          textAlign: "center", cursor: "pointer",
+        }}>×</div>
       )}
     </div>
   );

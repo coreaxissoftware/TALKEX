@@ -6,6 +6,7 @@ const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
 const GROUP_CALL_EVENT_TYPES = new Set([
   "group_call_invite", "group_call_roster", "group_call_participant_joined",
   "group_call_participant_left", "group_call_offer", "group_call_answer", "group_call_ice",
+  "group_call_host_changed", "group_call_force_muted", "group_call_kicked",
   "call_error",
 ]);
 
@@ -150,12 +151,41 @@ export function useGroupCall(events, send, toast) {
     setCall((c) => (c ? { ...c, muted: nowMuted } : c));
   }, []);
 
-  const toggleCamera = useCallback(() => {
+  const toggleCamera = useCallback(async () => {
     const current = callRef.current;
     if (!current?.localStream) return;
-    const nowOff = !current.cameraOff;
-    current.localStream.getVideoTracks().forEach((track) => { track.enabled = !nowOff; });
-    setCall((c) => (c ? { ...c, cameraOff: nowOff } : c));
+
+    const existingTrack = current.localStream.getVideoTracks()[0];
+    if (existingTrack) {
+      const nowOff = !current.cameraOff;
+      existingTrack.enabled = !nowOff;
+      setCall((c) => (c ? { ...c, cameraOff: nowOff } : c));
+      return;
+    }
+
+    // No video track yet — this call started voice-only. Renegotiate with
+    // EVERY peer in the mesh (each is its own RTCPeerConnection), reusing
+    // the existing group_call_offer/answer relay — the receiving handler
+    // already reuses an existing connection when one's there rather than
+    // assuming every offer is a brand new peer, so no server or receiving-
+    // side change was needed for this to work.
+    let videoStream;
+    try {
+      videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
+    } catch (problem) {
+      toastRef.current?.(problem.name === "NotAllowedError"
+        ? "Camera permission was denied" : "No camera is available");
+      return;
+    }
+    const videoTrack = videoStream.getVideoTracks()[0];
+    current.localStream.addTrack(videoTrack);
+    await Promise.all(Object.entries(peersRef.current).map(async ([peerId, pc]) => {
+      pc.addTrack(videoTrack, current.localStream);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      sendRef.current({ type: "group_call_offer", chat_id: current.chatId, to: peerId, sdp: offer });
+    }));
+    setCall((c) => (c ? { ...c, callKind: "video", cameraOff: false } : c));
   }, []);
 
   // Same replaceTrack idea as useCall.js's version, but across every peer in
@@ -193,6 +223,31 @@ export function useGroupCall(events, send, toast) {
     };
   }, []);
 
+  // Host-only actions — the server independently checks the sender really
+  // is this room's host before honoring any of these, so a stale/wrong
+  // isHost on the client can only ever fail closed, never act on someone
+  // else's behalf.
+  const forceMuteAll = useCallback(() => {
+    const current = callRef.current;
+    if (!current) return;
+    sendRef.current({ type: "group_call_force_mute_all", chat_id: current.chatId });
+  }, []);
+
+  const kickParticipant = useCallback((userId) => {
+    const current = callRef.current;
+    if (!current) return;
+    sendRef.current({ type: "group_call_kick", chat_id: current.chatId, target: userId });
+  }, []);
+
+  const addPeople = useCallback((userIds) => {
+    const current = callRef.current;
+    if (!current || userIds.length === 0) return;
+    sendRef.current({
+      type: "group_call_add_people", chat_id: current.chatId,
+      call_kind: current.callKind, targets: userIds,
+    });
+  }, []);
+
   // ── Remote events ────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -225,9 +280,19 @@ export function useGroupCall(events, send, toast) {
           teardown();
           setCall(null);
         } else if (event.type === "group_call_roster") {
+          setCall((c) => (c ? { ...c, hostId: event.host_id } : c));
           for (const participant of event.participants) {
             await connectOutward(event.chat_id, participant);
           }
+        } else if (event.type === "group_call_host_changed") {
+          setCall((c) => (c ? { ...c, hostId: event.host_id } : c));
+        } else if (event.type === "group_call_force_muted") {
+          if (!current.muted) toggleMute();
+          toastRef.current?.("The host muted everyone");
+        } else if (event.type === "group_call_kicked") {
+          toastRef.current?.("You were removed from the call");
+          teardown();
+          setCall(null);
         } else if (event.type === "group_call_participant_joined") {
           addParticipant(event.user_id, {
             name: event.name, avatar: event.avatar_letter, color: event.color, stream: null,
@@ -279,5 +344,8 @@ export function useGroupCall(events, send, toast) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [events, buildPeerConnection, connectOutward, addParticipant]);
 
-  return { call, join, declineIncoming, leave, toggleMute, toggleCamera, shareScreen };
+  return {
+    call, join, declineIncoming, leave, toggleMute, toggleCamera, shareScreen,
+    forceMuteAll, kickParticipant, addPeople,
+  };
 }

@@ -237,11 +237,9 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onShareScreen, 
       <div style={{ display: "flex", justifyContent: "center", gap: 16, padding: "0 20px 60px", flexWrap: "wrap" }}>
         <CallButton onClick={onToggleMute} background={call.muted ? "#fff" : "#ffffff26"}
                     icon={call.muted ? I.micOff("#0b1220", 20) : I.mic("#fff", 20)} label="Mute" small/>
-        {call.callKind === "video" && (
-          <CallButton onClick={onToggleCamera} background={call.cameraOff ? "#fff" : "#ffffff26"}
-                      icon={call.cameraOff ? I.videoOff("#0b1220", 20) : I.video("#fff", 20)}
-                      label="Camera" small/>
-        )}
+        <CallButton onClick={onToggleCamera} background={call.cameraOff ? "#fff" : "#ffffff26"}
+                    icon={call.cameraOff ? I.videoOff("#0b1220", 20) : I.video("#fff", 20)}
+                    label={call.callKind === "video" ? "Camera" : "Video"} small/>
         {canPickAudioOutput && (
           <CallButton onClick={() => setShowSpeakerPicker(true)} background="#ffffff26"
                       icon={I.volume("#fff", 20)} label="Speaker" small/>

@@ -1091,7 +1091,7 @@ function EmailSheet({ currentEmail, onClose, onChanged, toast }) {
   );
 }
 
-function AppLockSetupSheet({ onClose, onSet }) {
+export function AppLockSetupSheet({ onClose, onSet }) {
   const [step, setStep] = useState("choose"); // choose | confirm
   const [pin, setPin] = useState("");
   const [confirmPin, setConfirmPin] = useState("");

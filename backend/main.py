@@ -3973,6 +3973,10 @@ def mark_calls_seen(user: dict = Depends(current_user)):
 # server's only job is deciding who is allowed to say something to whom.
 CALL_SIGNAL_TYPES = {
     "call_invite", "call_answer", "call_ice", "call_reject", "call_end", "call_busy",
+    # A voice call adding video mid-call — the original offer/answer never
+    # negotiated a video m-line, so this is a full second offer/answer round
+    # trip on the same connection, not just another ICE candidate.
+    "call_upgrade_offer", "call_upgrade_answer",
 }
 
 # One-to-many relay types for a mesh group call: each new joiner connects
@@ -3987,6 +3991,12 @@ GROUP_CALL_SIGNAL_TYPES = {"group_call_offer", "group_call_answer", "group_call_
 # to get out of sync with reality after a server restart mid-call.
 _group_calls: dict[str, dict[str, dict]] = {}
 
+# chat_id -> user_id of whoever started that room. Not a durable role —
+# purely "who gets the moderation buttons for as long as this specific call
+# runs." Reassigned to whoever's still in the room if the host leaves,
+# rather than ending the call for everyone.
+_group_call_hosts: dict[str, str] = {}
+
 
 def _participant_info(user_id: str) -> dict:
     row = db.query_one("SELECT name, avatar_letter, color FROM users WHERE id = ?", (user_id,))
@@ -3996,6 +4006,26 @@ def _participant_info(user_id: str) -> dict:
         "avatar_letter": row["avatar_letter"] if row else "?",
         "color": row["color"] if row else "#6366f1",
     }
+
+
+async def _reassign_host_if_needed(chat_id: str, leaving_user_id: str, remaining: dict[str, dict]):
+    """
+    If the person who just left was the host, hand the role to whoever's
+    still there (arbitrary but deterministic — dict insertion order, so
+    effectively "whoever joined earliest of those remaining"). Tells
+    everyone left in the room who the new host is, the same event a normal
+    join sends, so no client needs a special "host changed" case.
+    """
+    if _group_call_hosts.get(chat_id) != leaving_user_id:
+        return
+    if not remaining:
+        _group_call_hosts.pop(chat_id, None)
+        return
+    new_host = next(iter(remaining))
+    _group_call_hosts[chat_id] = new_host
+    await hub.send_to_chat(chat_id, {
+        "type": "group_call_host_changed", "chat_id": chat_id, "host_id": new_host,
+    })
 
 
 async def _leave_all_group_calls(user_id: str):
@@ -4009,8 +4039,10 @@ async def _leave_all_group_calls(user_id: str):
             await hub.send_to_chat(chat_id, {
                 "type": "group_call_participant_left", "chat_id": chat_id, "user_id": user_id,
             })
+            await _reassign_host_if_needed(chat_id, user_id, participants)
         else:
             del _group_calls[chat_id]
+            _group_call_hosts.pop(chat_id, None)
 
 
 @app.websocket("/ws")
@@ -4107,6 +4139,8 @@ async def websocket_endpoint(socket: WebSocket, token: str = Query(default="")):
                     relay["sdp"] = payload.get("sdp")
                 elif kind == "call_ice":
                     relay["candidate"] = payload.get("candidate")
+                elif kind in ("call_upgrade_offer", "call_upgrade_answer"):
+                    relay["sdp"] = payload.get("sdp")
                 # call_reject, call_end and call_busy carry nothing beyond
                 # chat_id and who sent it — that is all the receiving end needs
                 # to tear its own call state down.
@@ -4136,9 +4170,12 @@ async def websocket_endpoint(socket: WebSocket, token: str = Query(default="")):
                 is_first = len(room) == 0
                 roster = list(room.values())  # who the joiner needs to connect to
                 room[user_id] = _participant_info(user_id)
+                if is_first:
+                    _group_call_hosts[chat_id] = user_id
 
                 await socket.send_json({
                     "type": "group_call_roster", "chat_id": chat_id, "participants": roster,
+                    "host_id": _group_call_hosts.get(chat_id),
                 })
                 if is_first:
                     # Ring only members who currently allow calls here —
@@ -4175,8 +4212,62 @@ async def websocket_endpoint(socket: WebSocket, token: str = Query(default="")):
                         await hub.send_to_chat(chat_id, {
                             "type": "group_call_participant_left", "chat_id": chat_id, "user_id": user_id,
                         })
+                        await _reassign_host_if_needed(chat_id, user_id, room)
                     else:
                         del _group_calls[chat_id]
+                        _group_call_hosts.pop(chat_id, None)
+
+            elif kind == "group_call_force_mute_all":
+                # Genuinely "force": the server can't reach into someone
+                # else's microphone, but every client that receives this
+                # honors it by muting itself — the same trust model as a
+                # meeting app's "mute all" button anywhere else.
+                chat_id = payload.get("chat_id", "")
+                room = _group_calls.get(chat_id)
+                if not room or _group_call_hosts.get(chat_id) != user_id:
+                    continue
+                await hub.send_to_chat(chat_id, {
+                    "type": "group_call_force_muted", "chat_id": chat_id,
+                }, exclude_user=user_id)
+
+            elif kind == "group_call_kick":
+                chat_id = payload.get("chat_id", "")
+                target_id = payload.get("target", "")
+                room = _group_calls.get(chat_id)
+                if not room or _group_call_hosts.get(chat_id) != user_id or target_id not in room:
+                    continue
+                if target_id == user_id:
+                    continue  # a host removing themself is just "leave"
+                del room[target_id]
+                await hub.send_to_user(target_id, {"type": "group_call_kicked", "chat_id": chat_id})
+                await hub.send_to_chat(chat_id, {
+                    "type": "group_call_participant_left", "chat_id": chat_id, "user_id": target_id,
+                }, exclude_user=target_id)
+
+            elif kind == "group_call_add_people":
+                # Any current participant can invite specific fellow chat
+                # members who weren't rung the first time round (they
+                # weren't online yet, or missed it) — this is the
+                # incremental version of the whole-chat ring group_call_start
+                # already does for a brand new room, restricted to the
+                # requester's own choices rather than everyone.
+                chat_id = payload.get("chat_id", "")
+                call_kind = payload.get("call_kind")
+                target_ids = payload.get("targets") or []
+                room = _group_calls.get(chat_id)
+                if not room or user_id not in room or call_kind not in ("voice", "video"):
+                    continue
+                for target_id in target_ids:
+                    if (
+                        target_id in room
+                        or not chatstore.is_member(chat_id, target_id)
+                        or not calling_permitted(chat_id, target_id)
+                    ):
+                        continue
+                    await hub.send_to_user(target_id, {
+                        "type": "group_call_invite", "chat_id": chat_id, "call_kind": call_kind,
+                        **_participant_info(user_id),
+                    })
 
             elif kind in GROUP_CALL_SIGNAL_TYPES:
                 chat_id = payload.get("chat_id", "")

@@ -16,6 +16,7 @@ const RING_TIMEOUT_MS = 30000;
 
 const CALL_EVENT_TYPES = new Set([
   "call_invite", "call_answer", "call_ice", "call_reject", "call_end", "call_busy", "call_error",
+  "call_upgrade_offer", "call_upgrade_answer",
 ]);
 
 /**
@@ -221,12 +222,41 @@ export function useCall(events, send, toast) {
     setCall((c) => (c ? { ...c, muted: nowMuted } : c));
   }, []);
 
-  const toggleCamera = useCallback(() => {
+  const toggleCamera = useCallback(async () => {
     const current = callRef.current;
-    if (!current?.localStream) return;
-    const nowOff = !current.cameraOff;
-    current.localStream.getVideoTracks().forEach((track) => { track.enabled = !nowOff; });
-    setCall((c) => (c ? { ...c, cameraOff: nowOff } : c));
+    const pc = pcRef.current;
+    if (!current?.localStream || !pc) return;
+
+    const existingTrack = current.localStream.getVideoTracks()[0];
+    if (existingTrack) {
+      const nowOff = !current.cameraOff;
+      existingTrack.enabled = !nowOff;
+      setCall((c) => (c ? { ...c, cameraOff: nowOff } : c));
+      return;
+    }
+
+    // No video track yet — this call started as voice-only. The original
+    // offer/answer never negotiated a video m-line, so adding one now needs
+    // a full second offer/answer round trip on the same connection, not
+    // just a track swap. Turning the camera on is the only way this ever
+    // happens; there is no separate "upgrade to video" button.
+    let videoStream;
+    try {
+      videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
+    } catch (problem) {
+      toastRef.current?.(problem.name === "NotAllowedError"
+        ? "Camera permission was denied" : "No camera is available");
+      return;
+    }
+    const videoTrack = videoStream.getVideoTracks()[0];
+    current.localStream.addTrack(videoTrack);
+    pc.addTrack(videoTrack, current.localStream);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    sendRef.current({
+      type: "call_upgrade_offer", to: current.peerId, chat_id: current.chatId, sdp: offer,
+    });
+    setCall((c) => (c ? { ...c, callKind: "video", cameraOff: false } : c));
   }, []);
 
   // Swaps the outgoing video track for a screen-capture track via
@@ -327,6 +357,27 @@ export function useCall(events, send, toast) {
         } else {
           pendingCandidatesRef.current.push(event.candidate);
         }
+      } else if (event.type === "call_upgrade_offer") {
+        // The other side just turned their camera on for a call that
+        // started voice-only. Answering this (rather than needing our own
+        // camera too) is what actually unlocks the video call UI on our
+        // side — pc.ontrack already adds their new video track to
+        // remoteStream through the existing handler once this completes.
+        const pc = pcRef.current;
+        if (pc) {
+          pc.setRemoteDescription(event.sdp)
+            .then(() => pc.createAnswer())
+            .then((answer) => pc.setLocalDescription(answer).then(() => answer))
+            .then((answer) => {
+              sendRef.current({
+                type: "call_upgrade_answer", to: current.peerId, chat_id: current.chatId, sdp: answer,
+              });
+            })
+            .catch(() => {});
+        }
+        setCall((c) => (c ? { ...c, callKind: "video" } : c));
+      } else if (event.type === "call_upgrade_answer") {
+        pcRef.current?.setRemoteDescription(event.sdp).catch(() => {});
       } else if (event.type === "call_reject") {
         if (current.isCaller) logOutcome(current, "declined");
         teardown();

@@ -492,10 +492,12 @@ export default function App() {
         <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
                      onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
                      onShareScreen={call.shareScreen}/>
-        <GroupCallOverlay call={groupCall.call} onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
+        <GroupCallOverlay call={groupCall.call} myUserId={me?.id}
+                          onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
                           onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
                           onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
-                          onShareScreen={groupCall.shareScreen}/>
+                          onShareScreen={groupCall.shareScreen} onForceMuteAll={groupCall.forceMuteAll}
+                          onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}/>
       </Screen>
     );
   }
@@ -515,7 +517,7 @@ export default function App() {
           {tab === "chats" && (
             <ChatList chats={chats} loading={loadingChats} typingBy={typingBy}
                       onOpen={setOpenChat} onChanged={reloadChats} toast={toast}
-                      onNewChat={() => setDiscoverOpen(true)}
+                      onNewChat={() => setDiscoverOpen(true)} onLogout={signOut}
                       onSearch={(query) => Search.query(query).then(setSearchResults)}/>
           )}
           {tab === "calls" && (
@@ -545,10 +547,12 @@ export default function App() {
       <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
                    onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
                    onShareScreen={call.shareScreen}/>
-      <GroupCallOverlay call={groupCall.call} onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
+      <GroupCallOverlay call={groupCall.call} myUserId={me?.id}
+                        onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
                         onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
                         onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
-                        onShareScreen={groupCall.shareScreen}/>
+                        onShareScreen={groupCall.shareScreen} onForceMuteAll={groupCall.forceMuteAll}
+                        onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}/>
       {discoverOpen && (
         <DiscoverOverlay onClose={() => setDiscoverOpen(false)}
                          onOpenChat={(chat) => { setDiscoverOpen(false); setOpenChat(chat); }}
@@ -793,7 +797,7 @@ function DesktopShell({
             {tab === "chats" && (
               <ChatList chats={chats} loading={loadingChats} typingBy={typingBy}
                         onOpen={onOpenChat} onChanged={reloadChats} toast={toast}
-                        onNewChat={onDiscoverOpen}
+                        onNewChat={onDiscoverOpen} onLogout={onLogout}
                         onSearch={(query) => Search.query(query).then(onSearchResultsChange)}/>
             )}
             {tab === "calls" && (
@@ -847,10 +851,12 @@ function DesktopShell({
       <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
                    onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
                    onShareScreen={call.shareScreen}/>
-      <GroupCallOverlay call={groupCall.call} onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
+      <GroupCallOverlay call={groupCall.call} myUserId={me?.id}
+                        onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
                         onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
                         onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
-                        onShareScreen={groupCall.shareScreen}/>
+                        onShareScreen={groupCall.shareScreen} onForceMuteAll={groupCall.forceMuteAll}
+                        onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}/>
       {discoverOpen && (
         <DiscoverOverlay onClose={onDiscoverClose}
                          onOpenChat={(chat) => { onDiscoverClose(); onOpenChat(chat); }}

@@ -5,8 +5,8 @@ import {
 } from "../api.js";
 import * as offlineDb from "../offlineDb.js";
 import {
-  Av, Button, ChatBackdrop, EMOJIS, EMOJI_GROUPS, Field, G, I, SRow, Spinner, Toggle, clockTime,
-  countdown, durationLabel, localInputToUnix, whenLabel,
+  Av, Button, ChatBackdrop, ContextMenu, EMOJIS, EMOJI_GROUPS, Field, G, I, SRow, Spinner, Toggle,
+  clockTime, countdown, durationLabel, localInputToUnix, whenLabel,
 } from "../ui.jsx";
 import { useVoiceRecorder } from "../useVoiceRecorder.js";
 import { canvasToPdfBlob } from "../imageToPdf.js";
@@ -49,6 +49,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   const [replyTo, setReplyTo] = useState(null);
   const [editing, setEditing] = useState(null);
   const [menuFor, setMenuFor] = useState(null);
+  const [bgMenu, setBgMenu] = useState(null); // { x, y } for right-click/long-press on empty chat background
   const [forwarding, setForwarding] = useState(null);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedMsgIds, setSelectedMsgIds] = useState(new Set());
@@ -64,8 +65,16 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   const [chatSearchOpen, setChatSearchOpen] = useState(false);
   const [chatSearchQuery, setChatSearchQuery] = useState("");
   const [chatSearchResults, setChatSearchResults] = useState([]);
+  const [headerMenu, setHeaderMenu] = useState(null); // { x, y } for the header's ⋮ menu
+  const [muteSheetTop, setMuteSheetTop] = useState(false);
+  const [mutedUntilTop, setMutedUntilTop] = useState(chat.muted_until || 0);
+  const [lockSheetTop, setLockSheetTop] = useState(null); // 'set' | 'remove'
+  const [lockedTop, setLockedTop] = useState(Boolean(chat.is_locked));
   const inputRef = useRef(chat.draft || "");
   const bottom = useRef(null);
+  const bgLongPressTimer = useRef(null);
+  const bgLongPressFired = useRef(false);
+  const bgPressStart = useRef({ x: 0, y: 0 });
   const typingSentAt = useRef(0);
   const lastApplied = useRef(0);
   const lastPinEvent = useRef(0);
@@ -419,6 +428,124 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
     setForwarding(null);
   }
 
+  // The OS-level share sheet, not in-app forwarding — lets a photo/document
+  // land in whatever other app the user actually wants (Instagram, Mail,
+  // WhatsApp itself), which Forward alone can never reach since that only
+  // moves a message to another chat inside TalkEx.
+  async function shareMessage(message) {
+    try {
+      const attachmentId = message.payload?.attachment_id;
+      if (attachmentId) {
+        const blobUrl = message.payload?._localUrl || await Uploads.fetchBlobUrl(attachmentId, { cache: true });
+        const blob = await fetch(blobUrl).then((r) => r.blob());
+        const file = new File([blob], message.payload?.file_name || "file", { type: blob.type });
+        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+          await navigator.share({ files: [file], text: message.text || undefined });
+          return;
+        }
+      }
+      if (message.text) await navigator.share({ text: message.text });
+    } catch (problem) {
+      if (problem?.name !== "AbortError") toast("Could not share");
+    }
+  }
+
+  async function clearThisChat() {
+    if (!confirm("Clear this chat? This only clears your own copy.")) return;
+    await Chats.clear(chat.id);
+    setMessages([]);
+    toast("Chat cleared");
+    onChanged();
+  }
+
+  // Right-click (desktop) or long-press/tap (mobile, mirroring the
+  // per-message menu's onClick+onContextMenu pattern) on empty space in the
+  // message list — distinct from the per-message menu above, this is for
+  // chat-wide actions rather than anything about one message.
+  function bgMenuItems() {
+    return [
+      {
+        label: "Select messages",
+        icon: I.check(G.sub, 16),
+        onClick: () => { setSelectMode(true); setSelectedMsgIds(new Set()); },
+      },
+      {
+        label: "Search in chat",
+        icon: I.search(G.sub, 16),
+        onClick: () => { setChatSearchOpen(true); setChatSearchQuery(""); setChatSearchResults([]); },
+      },
+      { label: "Chat info", icon: I.user(G.sub, 16), onClick: () => setSheet("info") },
+      { divider: true },
+      { label: "Clear chat", icon: I.broom(G.sub, 16), danger: true, onClick: clearThisChat },
+    ];
+  }
+
+  async function toggleArchiveTop() {
+    const next = !chat.archived;
+    await Chats.settings(chat.id, { archived: next });
+    toast(next ? "Chat archived" : "Chat unarchived");
+    onChanged();
+  }
+
+  async function blockPeer() {
+    if (!chat.peer_id) return;
+    if (!confirm(`Block ${chat.name || "this person"}? They won't be able to message or call you.`)) return;
+    try {
+      await Users.block(chat.peer_id);
+      toast("Blocked");
+    } catch (problem) {
+      toast(problem.message || "Could not block");
+    }
+  }
+
+  async function deleteThisChat() {
+    if (!confirm("Delete this chat? It will disappear from your chat list.")) return;
+    await Chats.clear(chat.id);
+    await Chats.settings(chat.id, { archived: true });
+    toast("Chat deleted");
+    onChanged();
+    onBack();
+  }
+
+  // The header's ⋮ button — a visible, always-discoverable way to reach
+  // everything the background right-click/long-press menu above also
+  // offers, plus the chat-level actions that otherwise only live one level
+  // deeper inside the full Chat info sheet.
+  function headerMenuItems() {
+    const isMutedTop = mutedUntilTop > Date.now() / 1000;
+    return [
+      { label: "Chat info", icon: I.user(G.sub, 16), onClick: () => setSheet("info") },
+      {
+        label: "Select messages",
+        icon: I.check(G.sub, 16),
+        onClick: () => { setSelectMode(true); setSelectedMsgIds(new Set()); },
+      },
+      {
+        label: "Search in chat",
+        icon: I.search(G.sub, 16),
+        onClick: () => { setChatSearchOpen(true); setChatSearchQuery(""); setChatSearchResults([]); },
+      },
+      {
+        label: isMutedTop ? muteLabel(mutedUntilTop) : "Mute notifications",
+        icon: I.bellOff(G.sub, 16),
+        onClick: () => setMuteSheetTop(true),
+      },
+      { label: "Disappearing messages", icon: I.timer(G.sub, 16), onClick: () => setSheet("timer") },
+      {
+        label: lockedTop ? "Remove chat lock" : "Chat lock",
+        icon: I.lock(lockedTop ? G.accent : G.sub, 16),
+        onClick: () => setLockSheetTop(lockedTop ? "remove" : "set"),
+      },
+      { divider: true },
+      { label: chat.archived ? "Unarchive chat" : "Archive chat", icon: I.archive(G.sub, 16), onClick: toggleArchiveTop },
+      ...(chat.type === "dm" && chat.peer_id
+        ? [{ label: "Block", icon: I.ban(G.red, 16), danger: true, onClick: blockPeer }]
+        : []),
+      { label: "Clear chat", icon: I.broom(G.sub, 16), onClick: clearThisChat },
+      { label: "Delete chat", icon: I.trash(G.red, 16), danger: true, onClick: deleteThisChat },
+    ];
+  }
+
   const [uploading, setUploading] = useState(false);
 
   function sendVoiceNote(blob) {
@@ -662,7 +789,31 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
               onVideoCall={() => (chat.type === "dm" ? onStartCall("video") : onStartGroupCall("video"))}
               pinCount={pins.length}
               onTogglePins={() => setShowPins((v) => !v)}
-              onSearch={() => { setChatSearchOpen((v) => !v); setChatSearchQuery(""); setChatSearchResults([]); }}/>
+              onSearch={() => { setChatSearchOpen((v) => !v); setChatSearchQuery(""); setChatSearchResults([]); }}
+              onMenu={(event) => setHeaderMenu({ x: event.clientX, y: event.clientY })}/>
+
+      {headerMenu && (
+        <ContextMenu x={headerMenu.x} y={headerMenu.y} items={headerMenuItems()} onClose={() => setHeaderMenu(null)}/>
+      )}
+      {muteSheetTop && (
+        <MuteSheet mutedUntil={mutedUntilTop} onClose={() => setMuteSheetTop(false)}
+                   onPicked={async (muted_until) => {
+                     setMutedUntilTop(muted_until);
+                     setMuteSheetTop(false);
+                     await Chats.settings(chat.id, { muted_until });
+                     onChanged();
+                   }}/>
+      )}
+      {lockSheetTop && (
+        <LockSheet chatId={chat.id} mode={lockSheetTop} toast={toast}
+                   onClose={() => setLockSheetTop(null)}
+                   onDone={(nowLocked) => {
+                     setLockedTop(nowLocked);
+                     setLockSheetTop(null);
+                     onChanged();
+                     if (nowLocked) onChatLocked?.(chat.id);
+                   }}/>
+      )}
 
       {chatSearchOpen && (
         <ChatSearchBar chatId={chat.id} query={chatSearchQuery}
@@ -715,7 +866,41 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
 
       <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
         <ChatBackdrop/>
-        <div style={{
+        <div
+          onContextMenu={(event) => {
+            if (selectMode || event.target !== event.currentTarget) return;
+            event.preventDefault();
+            setBgMenu({ x: event.clientX, y: event.clientY });
+          }}
+          onPointerDown={(event) => {
+            // Empty-space long-press, on touch only — the same trigger a
+            // right-click is for a mouse. A message itself has its own
+            // press handling (see Bubble) and isn't the container itself,
+            // so this only ever fires for a press on genuine empty space.
+            if (selectMode || event.pointerType !== "touch" || event.target !== event.currentTarget) return;
+            bgLongPressFired.current = false;
+            bgPressStart.current = { x: event.clientX, y: event.clientY };
+            const x = event.clientX, y = event.clientY;
+            bgLongPressTimer.current = setTimeout(() => {
+              bgLongPressFired.current = true;
+              setBgMenu({ x, y });
+            }, 500);
+          }}
+          onPointerMove={(event) => {
+            if (!bgLongPressTimer.current) return;
+            if (Math.abs(event.clientX - bgPressStart.current.x) > 8
+                || Math.abs(event.clientY - bgPressStart.current.y) > 8) {
+              clearTimeout(bgLongPressTimer.current);
+              bgLongPressTimer.current = null;
+            }
+          }}
+          onPointerUp={() => {
+            if (bgLongPressTimer.current) { clearTimeout(bgLongPressTimer.current); bgLongPressTimer.current = null; }
+          }}
+          onPointerCancel={() => {
+            if (bgLongPressTimer.current) { clearTimeout(bgLongPressTimer.current); bgLongPressTimer.current = null; }
+          }}
+          style={{
           position: "relative", zIndex: 1, height: "100%", overflowY: "auto", padding: "12px 14px",
         }}>
         {loading ? <Spinner/> : messages.map((message) => (
@@ -803,6 +988,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
           onPin={() => togglePin(menuFor)}
           onStar={() => toggleStar(menuFor)}
           onForward={() => { setForwarding(menuFor); setMenuFor(null); }}
+          onShare={() => { shareMessage(menuFor); setMenuFor(null); }}
           onCopy={() => {
             navigator.clipboard?.writeText(menuFor.text || "");
             toast("Copied");
@@ -818,6 +1004,10 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
       {forwarding && (
         <ForwardSheet message={forwarding} onClose={() => setForwarding(null)}
                       onForward={(toChatIds) => forwardTo(forwarding, toChatIds)}/>
+      )}
+
+      {bgMenu && (
+        <ContextMenu x={bgMenu.x} y={bgMenu.y} items={bgMenuItems()} onClose={() => setBgMenu(null)}/>
       )}
 
       {sheet === "timer" && (
@@ -963,7 +1153,7 @@ function typingLabel(names, isGroup) {
 }
 
 function Header({ chat, typing, onBack, onTimer, onMeeting, onInfo, onVoiceCall, onVideoCall,
-                   pinCount, onTogglePins, onSearch }) {
+                   pinCount, onTogglePins, onSearch, onMenu }) {
   const isGroup = chat.type !== "dm";
   const label = typingLabel(typing, isGroup);
   return (
@@ -1016,6 +1206,9 @@ function Header({ chat, typing, onBack, onTimer, onMeeting, onInfo, onVoiceCall,
       </div>
       <div onClick={onTimer} style={{ cursor: "pointer" }} title="Disappearing messages">
         {I.timer(chat.disappear_secs ? G.yellow : G.sub, 20)}
+      </div>
+      <div onClick={onMenu} style={{ cursor: "pointer" }} title="More options">
+        {I.moreVertical(G.sub, 20)}
       </div>
     </div>
   );
@@ -1195,6 +1388,46 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead,
   const mine = message.sender_id === me.id;
   const gone = message.deleted_at || message.expired;
 
+  // Desktop opens the message menu on a plain click OR a right-click; touch
+  // has neither, so a real press-and-hold stands in — a bare tap is left
+  // free (native media controls, the download link) rather than eating every
+  // touch on the bubble the instant it lands.
+  const longPressTimer = useRef(null);
+  const longPressFired = useRef(false);
+  const pressStart = useRef({ x: 0, y: 0 });
+
+  function handlePointerDown(event) {
+    if (event.pointerType !== "touch") return;
+    longPressFired.current = false;
+    pressStart.current = { x: event.clientX, y: event.clientY };
+    longPressTimer.current = setTimeout(() => {
+      longPressFired.current = true;
+      onLongPress();
+    }, 500);
+  }
+  function handlePointerMove(event) {
+    if (!longPressTimer.current) return;
+    if (Math.abs(event.clientX - pressStart.current.x) > 8 || Math.abs(event.clientY - pressStart.current.y) > 8) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+  }
+  function clearPressTimer() {
+    if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
+  }
+  function handlePointerUp(event) {
+    clearPressTimer();
+    // The long-press timer above already fired onLongPress for touch; this
+    // is only for the mouse, which has no separate long-press path.
+    if (event.pointerType !== "touch" && !longPressFired.current) onLongPress();
+    longPressFired.current = false;
+  }
+  const pressHandlers = {
+    onPointerDown: handlePointerDown, onPointerMove: handlePointerMove,
+    onPointerUp: handlePointerUp, onPointerCancel: clearPressTimer,
+    onContextMenu: (event) => { event.preventDefault(); onLongPress(); },
+  };
+
   if (message.kind === "meeting") {
     return <MeetingCard message={message} mine={mine}
                         update={meetingUpdates?.[message.payload?.meeting_id]}/>;
@@ -1205,8 +1438,7 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead,
   // little illustration and a bubble around it just adds a frame nobody wants.
   if (message.kind === "sticker" && !gone) {
     return (
-      <div id={`msg-${message.id}`} onContextMenu={(event) => { event.preventDefault(); onLongPress(); }}
-           onClick={onLongPress} style={{
+      <div id={`msg-${message.id}`} {...pressHandlers} style={{
              display: "flex", flexDirection: "column",
              alignItems: mine ? "flex-end" : "flex-start", marginBottom: 8, cursor: "pointer",
            }}>
@@ -1220,8 +1452,7 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead,
     <div id={`msg-${message.id}`}
          style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start", marginBottom: 8 }}>
       <div
-        onContextMenu={(event) => { event.preventDefault(); onLongPress(); }}
-        onClick={onLongPress}
+        {...pressHandlers}
         style={{
           position: "relative", maxWidth: "78%", padding: "9px 13px", borderRadius: 16,
           borderBottomRightRadius: mine ? 4 : 16,
@@ -2013,7 +2244,8 @@ function Sheet({ title, children, onClose }) {
 }
 
 function MessageMenu({ message, me, isModerator, isPinned, isStarred, onClose, onReact, onReply,
-                      onEdit, onUnsend, onDeleteForEveryone, onHide, onPin, onStar, onForward, onCopy, onSelect }) {
+                      onEdit, onUnsend, onDeleteForEveryone, onHide, onPin, onStar, onForward, onShare,
+                      onCopy, onSelect }) {
   const mine = message.sender_id === me.id;
   // Two genuinely different removals, not two labels on one action:
   //   Unsend — only the sender, on their own message, no trace left at all.
@@ -2040,6 +2272,11 @@ function MessageMenu({ message, me, isModerator, isPinned, isStarred, onClose, o
       <Button variant="ghost" onClick={onForward} style={{ width: "100%", marginBottom: 8 }}>
         Forward
       </Button>
+      {typeof navigator !== "undefined" && navigator.share && !message.deleted_at && (
+        <Button variant="ghost" onClick={onShare} style={{ width: "100%", marginBottom: 8 }}>
+          Share
+        </Button>
+      )}
       {!message.deleted_at && (
         <Button variant="ghost" onClick={onPin} style={{ width: "100%", marginBottom: 8 }}>
           {isPinned ? "Unpin" : "Pin"}
@@ -3185,14 +3422,14 @@ const MUTE_CHOICES = [
   { label: "Always", seconds: 100 * 365 * 24 * 3600 },
 ];
 
-function muteLabel(mutedUntil) {
+export function muteLabel(mutedUntil) {
   const secondsLeft = mutedUntil - Date.now() / 1000;
   if (secondsLeft > 50 * 365 * 24 * 3600) return "Muted";
   if (secondsLeft > 24 * 3600) return `Muted for ${Math.round(secondsLeft / (24 * 3600))}d`;
   return `Muted for ${Math.round(secondsLeft / 3600)}h`;
 }
 
-function MuteSheet({ mutedUntil, onClose, onPicked }) {
+export function MuteSheet({ mutedUntil, onClose, onPicked }) {
   const isMuted = mutedUntil > Date.now() / 1000;
   return (
     <Sheet title="Mute notifications" onClose={onClose}>
@@ -3446,7 +3683,7 @@ function InviteLinkSheet({ chat, onClose, toast }) {
   );
 }
 
-function LockSheet({ chatId, mode, onClose, onDone, toast }) {
+export function LockSheet({ chatId, mode, onClose, onDone, toast }) {
   const [pin, setPin] = useState("");
   const [confirmPin, setConfirmPin] = useState("");
   const [busy, setBusy] = useState(false);

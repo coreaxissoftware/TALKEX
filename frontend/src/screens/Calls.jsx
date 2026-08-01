@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Calls, Chats, Messages } from "../api.js";
-import { Av, G, I, Spinner, whenLabel } from "../ui.jsx";
+import { Av, ContextMenu, G, I, Spinner, whenLabel } from "../ui.jsx";
 
 const ACTIONS_WIDTH = 112;
 const ACTIONS_OPEN_TRIGGER = 60;
+const LONG_PRESS_MS = 500;
+const LONG_PRESS_MOVE_TOLERANCE = 8;
 
 /**
  * A call log gathered from every chat's own 'call' kind messages — the same
@@ -20,6 +22,7 @@ export default function CallsScreen({ me, onCallBack, toast }) {
   const [loading, setLoading] = useState(true);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState(new Set());
+  const [menu, setMenu] = useState(null); // { x, y, call } for the right-click/long-press row menu
 
   useEffect(() => {
     Calls.list().then(setCalls).catch(() => {}).finally(() => setLoading(false));
@@ -98,17 +101,49 @@ export default function CallsScreen({ me, onCallBack, toast }) {
       {calls.map((call) => (
         <CallRow key={call.id} call={call} me={me} onCallBack={onCallBack}
                  onDelete={() => deleteCall(call)} onArchive={() => archiveCallChat(call)}
+                 onMenu={(x, y) => setMenu({ x, y, call })}
                  selectMode={selectMode} selected={selectedIds.has(call.id)}
                  onToggleSelect={() => toggleSelected(call.id)}/>
       ))}
+
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={[
+          {
+            label: "Voice call",
+            icon: I.phone(G.sub, 16),
+            onClick: () => onCallBack({
+              id: menu.call.chat_id, peer_id: menu.call.peer_id, name: menu.call.chat_name,
+              avatar_letter: menu.call.chat_avatar_letter, color: menu.call.chat_color, type: menu.call.chat_type,
+            }, "voice"),
+          },
+          {
+            label: "Video call",
+            icon: I.video(G.sub, 16),
+            onClick: () => onCallBack({
+              id: menu.call.chat_id, peer_id: menu.call.peer_id, name: menu.call.chat_name,
+              avatar_letter: menu.call.chat_avatar_letter, color: menu.call.chat_color, type: menu.call.chat_type,
+            }, "video"),
+          },
+          { divider: true },
+          { label: "Archive chat", icon: I.archive(G.sub, 16), onClick: () => archiveCallChat(menu.call) },
+          { label: "Delete", icon: I.trash(G.red, 16), danger: true, onClick: () => deleteCall(menu.call) },
+        ]}/>
+      )}
     </div>
   );
 }
 
-function CallRow({ call, me, onCallBack, onDelete, onArchive, selectMode, selected, onToggleSelect }) {
+function CallRow({ call, me, onCallBack, onDelete, onArchive, onMenu, selectMode, selected, onToggleSelect }) {
   const [dragX, setDragX] = useState(0);
   const dragging = useRef(false);
   const startX = useRef(0);
+  const startY = useRef(0);
+  const longPressTimer = useRef(null);
+  const longPressFired = useRef(false);
+
+  function clearLongPressTimer() {
+    if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
+  }
 
   const { call_kind: callKind, status, duration_secs: durationSecs } = call.payload || {};
   const iAmCaller = call.sender_id === me.id;
@@ -131,25 +166,51 @@ function CallRow({ call, me, onCallBack, onDelete, onArchive, selectMode, select
     if (dragX !== 0) { setDragX(0); return; }
     dragging.current = true;
     startX.current = event.clientX;
+    startY.current = event.clientY;
     event.currentTarget.setPointerCapture(event.pointerId);
+
+    if (event.pointerType === "touch") {
+      longPressFired.current = false;
+      const x = event.clientX, y = event.clientY;
+      longPressTimer.current = setTimeout(() => {
+        longPressFired.current = true;
+        dragging.current = false;
+        setDragX(0);
+        onMenu(x, y);
+      }, LONG_PRESS_MS);
+    }
   }
 
   function onPointerMove(event) {
     if (selectMode || !dragging.current) return;
     const delta = event.clientX - startX.current;
+    if (longPressTimer.current && (Math.abs(delta) > LONG_PRESS_MOVE_TOLERANCE
+        || Math.abs(event.clientY - startY.current) > LONG_PRESS_MOVE_TOLERANCE)) {
+      clearLongPressTimer();
+    }
     setDragX(Math.max(-ACTIONS_WIDTH, Math.min(0, delta)));
   }
 
   function onPointerUpOrCancel() {
+    clearLongPressTimer();
     if (!dragging.current) return;
     dragging.current = false;
+    if (longPressFired.current) { setDragX(0); return; }
     setDragX(dragX <= -ACTIONS_OPEN_TRIGGER ? -ACTIONS_WIDTH : 0);
   }
 
   function handleTap() {
+    if (longPressFired.current) { longPressFired.current = false; return; }
     if (selectMode) { onToggleSelect(); return; }
     if (dragX !== 0) { setDragX(0); return; }
     callBack();
+  }
+
+  function onContextMenu(event) {
+    event.preventDefault();
+    if (selectMode) return;
+    setDragX(0);
+    onMenu(event.clientX, event.clientY);
   }
 
   return (
@@ -173,7 +234,7 @@ function CallRow({ call, me, onCallBack, onDelete, onArchive, selectMode, select
 
       <div onPointerDown={onPointerDown} onPointerMove={onPointerMove}
            onPointerUp={onPointerUpOrCancel} onPointerCancel={onPointerUpOrCancel}
-           onClick={handleTap}
+           onClick={handleTap} onContextMenu={onContextMenu}
            style={{
              display: "flex", alignItems: "center", gap: 12, padding: "10px 16px",
              cursor: "pointer", background: G.bg,
