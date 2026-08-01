@@ -6,6 +6,7 @@ import {
 import { ACCENTS, Av, Button, Field, G, I, SRow, Spinner, Toggle, clockTime, whenLabel } from "../ui.jsx";
 import { disablePush, enablePush, getPushSubscription, isPushSupported } from "../push.js";
 import { getAutoDownload, setAutoDownload } from "../mediaPrefs.js";
+import { getWallpaper, setWallpaper } from "../chatWallpaper.js";
 import { disableAppLock, isAppLockEnabled, setAppLockPin } from "../appLock.js";
 import QrScanner from "../QrScanner.jsx";
 import Login from "./Login.jsx";
@@ -49,6 +50,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
   const [pushBusy, setPushBusy] = useState(false);
   const [activeSection, setActiveSection] = useState(null);
   const [autoDownload, setAutoDownloadState] = useState(getAutoDownload);
+  const [wallpaper, setWallpaperState] = useState(getWallpaper);
   const [appLockOn, setAppLockOn] = useState(isAppLockEnabled);
   const [appLockSheet, setAppLockSheet] = useState(false);
   const [changingPhone, setChangingPhone] = useState(false);
@@ -61,6 +63,11 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
   function changeAutoDownload(value) {
     setAutoDownload(value);
     setAutoDownloadState(value);
+  }
+
+  function changeWallpaper(value) {
+    setWallpaper(value);
+    setWallpaperState(value);
   }
 
   async function onAvatarFileChosen(event) {
@@ -358,6 +365,19 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
                 </div>
               );
             })}
+          </div>
+
+          <div style={{ fontSize: 12, color: G.muted, margin: "16px 0 10px" }}>Chat wallpaper</div>
+          <div style={{ display: "flex", gap: 6 }}>
+            {[["particles", "Animated"], ["none", "Plain"]].map(([value, label]) => (
+              <button key={value} onClick={() => changeWallpaper(value)} style={{
+                flex: 1, padding: "9px 4px", borderRadius: 10, cursor: "pointer",
+                fontSize: 12.5, fontWeight: 600,
+                border: `1px solid ${wallpaper === value ? G.accent : G.border}`,
+                background: wallpaper === value ? G.accentSoft : "transparent",
+                color: wallpaper === value ? G.accentText : G.sub,
+              }}>{label}</button>
+            ))}
           </div>
         </div>
       </Section>
