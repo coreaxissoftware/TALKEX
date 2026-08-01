@@ -2,6 +2,36 @@ import { useEffect, useRef, useState } from "react";
 import { Auth, setToken } from "../api.js";
 import { Button, Field, G, I, Screen, Spinner } from "../ui.jsx";
 
+// A short, curated list rather than all ~195 countries — covers the
+// audience this app actually has today. India first since that's who
+// DLT/MSG91 delivery is registered for.
+// `len` is the expected local-number length for that country — used to cap
+// what can be typed so the field can't grow into an obviously-wrong number.
+const COUNTRY_CODES = [
+  { iso: "IN", dial: "+91", name: "India", len: 10 },
+  { iso: "US", dial: "+1", name: "United States", len: 10 },
+  { iso: "GB", dial: "+44", name: "United Kingdom", len: 10 },
+  { iso: "AE", dial: "+971", name: "UAE", len: 9 },
+  { iso: "SA", dial: "+966", name: "Saudi Arabia", len: 9 },
+  { iso: "SG", dial: "+65", name: "Singapore", len: 8 },
+  { iso: "AU", dial: "+61", name: "Australia", len: 9 },
+  { iso: "CA", dial: "+1", name: "Canada", len: 10 },
+  { iso: "DE", dial: "+49", name: "Germany", len: 11 },
+  { iso: "FR", dial: "+33", name: "France", len: 9 },
+  { iso: "NP", dial: "+977", name: "Nepal", len: 10 },
+  { iso: "BD", dial: "+880", name: "Bangladesh", len: 10 },
+  { iso: "PK", dial: "+92", name: "Pakistan", len: 10 },
+  { iso: "LK", dial: "+94", name: "Sri Lanka", len: 9 },
+];
+
+// Regional-indicator Unicode trick: each letter A-Z has a matching
+// "regional indicator symbol" codepoint: two of them next to each other
+// render as that country's flag in every modern OS/browser, no image
+// asset or icon font needed.
+function flagFor(iso) {
+  return [...iso.toUpperCase()].map((c) => String.fromCodePoint(127397 + c.charCodeAt(0))).join("");
+}
+
 /**
  * Sign in or create an account.
  *
@@ -83,67 +113,85 @@ export default function Login({ onAuthenticated }) {
     );
   }
 
+  const tabs = [
+    { key: "phone", label: "Phone number" },
+    { key: "login", label: "Username" },
+    { key: "qr", label: "Scan QR" },
+  ];
+  const tabIndex = tabs.findIndex((t) => t.key === mode);
+
   return (
-    <Screen style={{ justifyContent: "center", padding: 28 }}>
-      <div style={{ textAlign: "center", marginBottom: 32 }}>
+    <Screen style={{
+      justifyContent: "center", padding: 24,
+      background: `radial-gradient(circle at 50% 0%, ${G.accentGlow}, transparent 60%), ${G.bg}`,
+    }}>
+      <div style={{ textAlign: "center", marginBottom: 28 }}>
         <div style={{
-          width: 72, height: 72, borderRadius: 22, margin: "0 auto 16px",
-          overflow: "hidden",
-          boxShadow: `0 8px 32px ${G.accentGlow}`,
+          width: 76, height: 76, borderRadius: 24, margin: "0 auto 18px",
+          overflow: "hidden", boxShadow: `0 12px 36px ${G.accentGlow}`,
         }}><img src="/icon.png" alt="TalkEx" style={{ width: "100%", height: "100%", objectFit: "cover" }}/></div>
-        <div style={{ fontSize: 30, fontWeight: 800, letterSpacing: -0.5 }}>TalkEx</div>
-        <div style={{ fontSize: 14, color: G.sub, marginTop: 6 }}>
+        <div style={{
+          fontSize: 32, fontWeight: 800, letterSpacing: -0.7,
+          backgroundImage: `linear-gradient(135deg, ${G.text}, ${G.accentD})`,
+          WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent",
+        }}>TalkEx</div>
+        <div style={{ fontSize: 13.5, color: G.sub, marginTop: 6, letterSpacing: 0.2 }}>
           Chat • Meetings • Business • Automation
         </div>
       </div>
 
       <div style={{
-        display: "flex", gap: 6, padding: 4, background: G.dim,
-        borderRadius: 14, marginBottom: 20,
+        background: G.bg, border: `1px solid ${G.border}`, borderRadius: 24,
+        padding: 22, boxShadow: `0 20px 50px -20px ${G.accentGlow}, 0 2px 8px #0001`,
       }}>
-        {["phone", "login", "qr"].map((option) => (
-          <button key={option} onClick={() => { setMode(option); setError(""); }}
-            style={{
-              flex: 1, padding: "10px", borderRadius: 10, border: "none",
-              cursor: "pointer", fontSize: 13, fontWeight: 600,
-              background: mode === option ? G.accent : "transparent",
-              color: mode === option ? "#fff" : G.sub,
-            }}>
-            {option === "phone" ? "Phone number" : option === "login" ? "Username" : "Scan QR"}
-          </button>
-        ))}
+        <div style={{
+          position: "relative", display: "flex", padding: 4, background: G.dim,
+          borderRadius: 14, marginBottom: 22,
+        }}>
+          <div style={{
+            position: "absolute", top: 4, bottom: 4, left: 4,
+            width: `calc(${100 / tabs.length}% - 4px)`,
+            transform: `translateX(calc(${tabIndex} * (100% + ${4 / tabs.length}px)))`,
+            background: G.accent, borderRadius: 10, transition: "transform 220ms ease",
+          }}/>
+          {tabs.map((tab) => (
+            <button key={tab.key} onClick={() => { setMode(tab.key); setError(""); }}
+              style={{
+                position: "relative", flex: 1, padding: "10px 4px", borderRadius: 10,
+                border: "none", cursor: "pointer", fontSize: 12.5, fontWeight: 600,
+                background: "transparent", color: mode === tab.key ? "#fff" : G.sub,
+                transition: "color 150ms ease",
+              }}>
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {mode === "qr" ? (
+          <QrSignIn onAuthenticated={onAuthenticated}/>
+        ) : mode === "phone" ? (
+          <PhoneAuth onAuthenticated={onAuthenticated}/>
+        ) : (
+          <>
+            <Field label="Username" value={form.username} onChange={set("username")}
+                   placeholder="rahul_s" autoCapitalize="none"/>
+            <Field label="Password" type="password" value={form.password}
+                   onChange={set("password")} placeholder="At least 8 characters"
+                   onKeyDown={(event) => event.key === "Enter" && login()}/>
+
+            {error && <ErrorBox>{error}</ErrorBox>}
+
+            <Button onClick={login} disabled={busy}
+                    style={{ width: "100%", padding: 14, marginBottom: 10 }}>
+              {busy ? "Please wait…" : "Sign in"}
+            </Button>
+
+            <Button variant="ghost" onClick={tryIt} disabled={busy} style={{ width: "100%" }}>
+              Try it with a guest account
+            </Button>
+          </>
+        )}
       </div>
-
-      {mode === "qr" ? (
-        <QrSignIn onAuthenticated={onAuthenticated}/>
-      ) : mode === "phone" ? (
-        <PhoneAuth onAuthenticated={onAuthenticated}/>
-      ) : (
-        <>
-          <Field label="Username" value={form.username} onChange={set("username")}
-                 placeholder="rahul_s" autoCapitalize="none"/>
-          <Field label="Password" type="password" value={form.password}
-                 onChange={set("password")} placeholder="At least 8 characters"
-                 onKeyDown={(event) => event.key === "Enter" && login()}/>
-
-          {error && (
-            <div style={{
-              padding: "10px 14px", borderRadius: 10, background: `${G.red}18`,
-              border: `1px solid ${G.red}44`, color: G.red, fontSize: 13,
-              marginBottom: 12,
-            }}>{error}</div>
-          )}
-
-          <Button onClick={login} disabled={busy}
-                  style={{ width: "100%", padding: 14, marginBottom: 10 }}>
-            {busy ? "Please wait…" : "Sign in"}
-          </Button>
-
-          <Button variant="ghost" onClick={tryIt} disabled={busy} style={{ width: "100%" }}>
-            Try it with a guest account
-          </Button>
-        </>
-      )}
     </Screen>
   );
 }
@@ -156,11 +204,23 @@ export default function Login({ onAuthenticated }) {
  */
 function PhoneAuth({ onAuthenticated }) {
   const [step, setStep] = useState("phone"); // phone | code | name
+  const [country, setCountry] = useState(COUNTRY_CODES[0]);
   const [phone, setPhone] = useState("");
   const [code, setCode] = useState("");
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  // The number actually sent to the server: whatever country was picked,
+  // plus only the digits the person typed (in case they paste a number
+  // with spaces, dashes, or their own leading "+91").
+  const fullPhone = country.dial + phone;
+
+  function onPhoneChange(event) {
+    // Digits only, capped to this country's expected local-number length —
+    // no more "type as many digits as you want" free-for-all.
+    setPhone(event.target.value.replace(/\D/g, "").slice(0, country.len));
+  }
 
   function finish(result) {
     setToken(result.token);
@@ -173,7 +233,7 @@ function PhoneAuth({ onAuthenticated }) {
     setBusy(true);
     setError("");
     try {
-      await Auth.requestPhoneOtp(phone.trim());
+      await Auth.requestPhoneOtp(fullPhone);
       setStep("code");
     } catch (problem) {
       setError(problem.message || "Could not send a code");
@@ -187,7 +247,7 @@ function PhoneAuth({ onAuthenticated }) {
     setBusy(true);
     setError("");
     try {
-      const result = await Auth.verifyPhoneOtp(phone.trim(), code.trim());
+      const result = await Auth.verifyPhoneOtp(fullPhone, code.trim());
       finish(result);
     } catch (problem) {
       // A brand new number 400s here specifically because a name is
@@ -207,7 +267,7 @@ function PhoneAuth({ onAuthenticated }) {
     setBusy(true);
     setError("");
     try {
-      const result = await Auth.verifyPhoneOtp(phone.trim(), code.trim(), name.trim());
+      const result = await Auth.verifyPhoneOtp(fullPhone, code.trim(), name.trim());
       finish(result);
     } catch (problem) {
       setError(problem.message || "Could not create your account");
@@ -217,14 +277,38 @@ function PhoneAuth({ onAuthenticated }) {
   }
 
   if (step === "phone") {
+    const validLength = phone.length === country.len;
     return (
       <>
-        <Field label="Phone number" value={phone}
-               onChange={(event) => setPhone(event.target.value)}
-               placeholder="+91 98765 43210" inputMode="tel"
-               onKeyDown={(event) => event.key === "Enter" && requestCode()}/>
+        <label style={{ display: "block", marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: G.sub, marginBottom: 6 }}>Phone number</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <select value={country.iso}
+                    onChange={(event) => {
+                      setCountry(COUNTRY_CODES.find((c) => c.iso === event.target.value));
+                      setPhone("");
+                    }}
+                    style={{
+                      padding: "12px 8px", borderRadius: 12, background: G.dim,
+                      border: `1px solid ${G.border}`, color: G.text, fontSize: 15,
+                      outline: "none", flexShrink: 0,
+                    }}>
+              {COUNTRY_CODES.map((c) => (
+                <option key={c.iso} value={c.iso}>{flagFor(c.iso)} {c.dial}</option>
+              ))}
+            </select>
+            <input value={phone} onChange={onPhoneChange} inputMode="tel"
+                   placeholder={"98765" + "4".repeat(Math.max(country.len - 5, 0))}
+                   onKeyDown={(event) => event.key === "Enter" && validLength && requestCode()}
+                   style={{
+                     flex: 1, width: "100%", padding: "12px 14px", borderRadius: 12,
+                     background: G.dim, border: `1px solid ${G.border}`, color: G.text,
+                     fontSize: 15, outline: "none", boxSizing: "border-box",
+                   }}/>
+          </div>
+        </label>
         {error && <ErrorBox>{error}</ErrorBox>}
-        <Button onClick={requestCode} disabled={busy || !phone.trim()}
+        <Button onClick={requestCode} disabled={busy || !validLength}
                 style={{ width: "100%", padding: 14 }}>
           {busy ? "Sending…" : "Send code"}
         </Button>
@@ -236,7 +320,7 @@ function PhoneAuth({ onAuthenticated }) {
     return (
       <>
         <div style={{ fontSize: 12.5, color: G.muted, marginBottom: 14 }}>
-          We sent a code to {phone}.
+          We sent a code to {fullPhone}.
         </div>
         <Field label="Code" value={code} inputMode="numeric" autoCapitalize="none"
                onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 8))}
