@@ -1,47 +1,130 @@
 import { useEffect, useRef, useState } from "react";
 import { Auth, setToken } from "../api.js";
 import { Button, Field, G, I, Screen, Spinner, useIsDesktop } from "../ui.jsx";
-import { COUNTRY_CODES, flagFor } from "../countryCodes.js";
+import { COUNTRY_CODES, flagFor, samplePlaceholder } from "../countryCodes.js";
 
 /**
- * Three soft blobs of the app's own accent colors, slowly drifting behind
- * the card — reads as "alive" without being an actual video (no asset to
- * ship, no autoplay/codec concerns, and it re-themes for free since it's
- * built from G's colors rather than a baked-in clip).
+ * A canvas particle network: dots drifting on their own physics, thin lines
+ * connecting nearby ones, and — beyond what most of these effects do — the
+ * dots gently give way as the cursor passes near them, with a warm line
+ * drawn from each nearby dot to the cursor itself. Canvas rather than CSS
+ * because "draw a line between every pair of points currently within N
+ * pixels of each other, every frame" is a per-frame numeric computation,
+ * not something keyframes can express.
  */
-function AnimatedBackdrop() {
+function ParticleNetwork() {
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    let width = 0, height = 0, particles = [], animationId;
+    const mouse = { x: null, y: null };
+    const LINK_DIST = 130;
+    const MOUSE_DIST = 160;
+
+    function makeParticles() {
+      // Density-scaled, capped so a huge desktop window doesn't tank frame rate.
+      const count = Math.min(110, Math.max(35, Math.floor((width * height) / 13000)));
+      particles = Array.from({ length: count }, () => ({
+        x: Math.random() * width,
+        y: Math.random() * height,
+        vx: (Math.random() - 0.5) * 0.35,
+        vy: (Math.random() - 0.5) * 0.35,
+        r: Math.random() * 1.6 + 1.1,
+        warm: Math.random() < 0.16,
+      }));
+    }
+
+    function onResize() {
+      width = canvas.width = canvas.offsetWidth;
+      height = canvas.height = canvas.offsetHeight;
+      makeParticles();
+    }
+
+    function onMouseMove(event) {
+      const rect = canvas.getBoundingClientRect();
+      mouse.x = event.clientX - rect.left;
+      mouse.y = event.clientY - rect.top;
+    }
+    function onMouseLeave() { mouse.x = null; mouse.y = null; }
+
+    function step() {
+      ctx.clearRect(0, 0, width, height);
+
+      for (const p of particles) {
+        p.x += p.vx;
+        p.y += p.vy;
+        if (p.x < 0 || p.x > width) p.vx *= -1;
+        if (p.y < 0 || p.y > height) p.vy *= -1;
+        if (mouse.x != null) {
+          const dx = p.x - mouse.x, dy = p.y - mouse.y;
+          const dist = Math.hypot(dx, dy) || 1;
+          if (dist < 85) {
+            p.x += (dx / dist) * 0.7;
+            p.y += (dy / dist) * 0.7;
+          }
+        }
+      }
+
+      for (let i = 0; i < particles.length; i++) {
+        for (let j = i + 1; j < particles.length; j++) {
+          const a = particles[i], b = particles[j];
+          const dist = Math.hypot(a.x - b.x, a.y - b.y);
+          if (dist < LINK_DIST) {
+            ctx.strokeStyle = `rgba(148,197,255,${(1 - dist / LINK_DIST) * 0.35})`;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+          }
+        }
+        if (mouse.x != null) {
+          const dist = Math.hypot(particles[i].x - mouse.x, particles[i].y - mouse.y);
+          if (dist < MOUSE_DIST) {
+            ctx.strokeStyle = `rgba(245,165,36,${(1 - dist / MOUSE_DIST) * 0.55})`;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(particles[i].x, particles[i].y);
+            ctx.lineTo(mouse.x, mouse.y);
+            ctx.stroke();
+          }
+        }
+      }
+
+      for (const p of particles) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fillStyle = p.warm ? "#f5a524" : "#7dd3fc";
+        ctx.fill();
+      }
+
+      animationId = requestAnimationFrame(step);
+    }
+
+    onResize();
+    step();
+    window.addEventListener("resize", onResize);
+    canvas.addEventListener("mousemove", onMouseMove);
+    canvas.addEventListener("mouseleave", onMouseLeave);
+    return () => {
+      cancelAnimationFrame(animationId);
+      window.removeEventListener("resize", onResize);
+      canvas.removeEventListener("mousemove", onMouseMove);
+      canvas.removeEventListener("mouseleave", onMouseLeave);
+    };
+  }, []);
+
   return (
-    <>
-      <style>{`
-        @keyframes talkexDrift1 { 0%,100% { transform: translate(-10%,-10%) scale(1) rotate(0deg); } 50% { transform: translate(18%,10%) scale(1.35) rotate(40deg); } }
-        @keyframes talkexDrift2 { 0%,100% { transform: translate(8%,12%) scale(1) rotate(0deg); } 50% { transform: translate(-16%,-14%) scale(1.25) rotate(-35deg); } }
-        @keyframes talkexDrift3 { 0%,100% { transform: translate(0%,0%) scale(1); } 50% { transform: translate(12%,-18%) scale(1.4); } }
-        @keyframes talkexDrift4 { 0%,100% { transform: translate(-6%,8%) scale(1); } 50% { transform: translate(14%,-10%) scale(0.85); } }
-        @keyframes talkexPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
-      `}</style>
-      <div aria-hidden style={{ position: "absolute", inset: 0, overflow: "hidden", zIndex: 0 }}>
-        <div style={{
-          position: "absolute", width: "60%", paddingBottom: "60%", left: "-15%", top: "-20%",
-          borderRadius: "50%", background: G.accent, opacity: 0.55, filter: "blur(60px)",
-          animation: "talkexDrift1 13s ease-in-out infinite, talkexPulse 6s ease-in-out infinite",
-        }}/>
-        <div style={{
-          position: "absolute", width: "50%", paddingBottom: "50%", right: "-12%", top: "5%",
-          borderRadius: "50%", background: G.accentD, opacity: 0.5, filter: "blur(60px)",
-          animation: "talkexDrift2 16s ease-in-out infinite, talkexPulse 7s ease-in-out infinite 1s",
-        }}/>
-        <div style={{
-          position: "absolute", width: "45%", paddingBottom: "45%", left: "15%", bottom: "-20%",
-          borderRadius: "50%", background: G.accentD, opacity: 0.4, filter: "blur(60px) hue-rotate(35deg)",
-          animation: "talkexDrift3 18s ease-in-out infinite, talkexPulse 8s ease-in-out infinite 2s",
-        }}/>
-        <div style={{
-          position: "absolute", width: "35%", paddingBottom: "35%", right: "10%", bottom: "-10%",
-          borderRadius: "50%", background: G.accent, opacity: 0.4, filter: "blur(60px)",
-          animation: "talkexDrift4 14s ease-in-out infinite",
-        }}/>
-      </div>
-    </>
+    <div aria-hidden style={{
+      // Fixed to the viewport, not the (narrow, centered) card column — this
+      // is the whole page's backdrop, not a decoration inside the card.
+      position: "fixed", inset: 0, zIndex: 0, overflow: "hidden",
+      background: "linear-gradient(135deg, #0b1c33, #14294a 55%, #0b1c33)",
+    }}>
+      <canvas ref={canvasRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}/>
+    </div>
   );
 }
 
@@ -139,31 +222,33 @@ export default function Login({ onAuthenticated }) {
   return (
     <Screen style={{
       justifyContent: "center", padding: 24, position: "relative", overflow: "hidden",
-      maxWidth: isDesktop ? (wideQr ? 820 : 480) : 430,
-      background: G.bg,
+      maxWidth: isDesktop ? (wideQr ? 860 : 480) : 430, background: "transparent",
     }}>
-      <AnimatedBackdrop/>
+      <ParticleNetwork/>
 
-      <div style={{ position: "relative", zIndex: 1, textAlign: "center", marginBottom: 28 }}>
-        <div style={{
-          width: 76, height: 76, borderRadius: 24, margin: "0 auto 18px",
-          overflow: "hidden", boxShadow: `0 12px 36px ${G.accentGlow}`,
-        }}><img src="/icon.png" alt="TalkEx" style={{ width: "100%", height: "100%", objectFit: "cover" }}/></div>
-        <div style={{
-          fontSize: 32, fontWeight: 800, letterSpacing: -0.7,
-          backgroundImage: `linear-gradient(135deg, ${G.text}, ${G.accentD})`,
-          WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent",
-        }}>TalkEx</div>
-        <div style={{ fontSize: 13.5, color: G.sub, marginTop: 6, letterSpacing: 0.2 }}>
-          Chat • Meetings • Business • Automation
-        </div>
-      </div>
-
+      {/* One rounded-rectangle card, top to bottom — the brand strip and the
+          form live inside the same box (border/shadow/radius shared) rather
+          than the wordmark floating separately above a second card. */}
       <div style={{
         position: "relative", zIndex: 1,
-        background: G.bg, border: `1px solid ${G.border}`, borderRadius: 24,
-        padding: 22, boxShadow: `0 20px 50px -20px ${G.accentGlow}, 0 2px 8px #0001`,
+        background: G.bg, border: `1px solid #ffffff26`, borderRadius: 24,
+        overflow: "hidden", boxShadow: "0 30px 70px -20px #00000066, 0 2px 8px #0003",
       }}>
+        <div style={{
+          textAlign: "center", padding: "30px 24px 26px",
+          background: "linear-gradient(160deg, #101f38, #0c1930)",
+        }}>
+          <div style={{
+            width: 68, height: 68, borderRadius: 20, margin: "0 auto 14px",
+            overflow: "hidden", boxShadow: `0 12px 30px ${G.accentGlow}, 0 0 0 4px #ffffff14`,
+          }}><img src="/icon.png" alt="TalkEx" style={{ width: "100%", height: "100%", objectFit: "cover" }}/></div>
+          <div style={{ fontSize: 28, fontWeight: 800, letterSpacing: -0.7, color: "#fff" }}>TalkEx</div>
+          <div style={{ fontSize: 13, color: "#a9c2e0", marginTop: 6, letterSpacing: 0.2 }}>
+            Chat • Meetings • Business • Automation
+          </div>
+        </div>
+
+        <div style={{ padding: 22 }}>
         <div style={{
           position: "relative", display: "flex", padding: 4, background: G.dim,
           borderRadius: 14, marginBottom: 22,
@@ -212,6 +297,7 @@ export default function Login({ onAuthenticated }) {
             </Button>
           </>
         )}
+        </div>
       </div>
     </Screen>
   );
@@ -343,7 +429,7 @@ function PhoneAuth({ onAuthenticated }) {
             borderRight: `1px solid ${G.border}`,
           }}>{country.dial}</div>
           <input value={phone} onChange={onPhoneChange} inputMode="tel" autoFocus
-                 placeholder={"98765" + "4".repeat(Math.max(country.len - 5, 0))}
+                 placeholder={samplePlaceholder(country.len)}
                  onKeyDown={(event) => event.key === "Enter" && validLength && requestCode()}
                  style={{
                    flex: 1, width: "100%", padding: "13px 14px", border: "none",

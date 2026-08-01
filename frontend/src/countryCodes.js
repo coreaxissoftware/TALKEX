@@ -27,6 +27,14 @@ export const COUNTRY_CODES = [
   { iso: "LK", dial: "+94", name: "Sri Lanka", len: 9 },
 ];
 
+// A natural-looking example number ("9876543210") rather than a single
+// digit repeated to fill the length — used as every phone field's
+// placeholder so it reads like a real number, not a mechanically padded one.
+const SAMPLE_DIGITS = "98765432109876543210";
+export function samplePlaceholder(len) {
+  return SAMPLE_DIGITS.slice(0, len);
+}
+
 // Regional-indicator Unicode trick: each letter A-Z has a matching
 // "regional indicator symbol" codepoint: two of them next to each other
 // render as that country's flag in every modern OS/browser, no image

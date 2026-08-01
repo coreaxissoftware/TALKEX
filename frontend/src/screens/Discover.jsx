@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Chats, Contacts, Users } from "../api.js";
 import { Av, Button, Field, G, I, Spinner } from "../ui.jsx";
-import { COUNTRY_CODES, flagFor } from "../countryCodes.js";
+import { COUNTRY_CODES, flagFor, samplePlaceholder } from "../countryCodes.js";
 
 /**
  * Find people, channels and communities.
@@ -324,7 +324,7 @@ function AddContactSheet({ onClose, onAdded, toast }) {
               ))}
             </select>
             <input value={phone} onChange={onPhoneChange} inputMode="tel"
-                   placeholder={"98765" + "4".repeat(Math.max(country.len - 5, 0))}
+                   placeholder={samplePlaceholder(country.len)}
                    style={{
                      flex: 1, width: "100%", padding: "12px 14px", borderRadius: 12,
                      background: G.dim, border: `1px solid ${G.border}`, color: G.text,

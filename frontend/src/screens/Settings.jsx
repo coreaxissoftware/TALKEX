@@ -9,7 +9,7 @@ import { getAutoDownload, setAutoDownload } from "../mediaPrefs.js";
 import { disableAppLock, isAppLockEnabled, setAppLockPin } from "../appLock.js";
 import QrScanner from "../QrScanner.jsx";
 import Login from "./Login.jsx";
-import { COUNTRY_CODES, flagFor, splitPhone } from "../countryCodes.js";
+import { COUNTRY_CODES, flagFor, samplePlaceholder, splitPhone } from "../countryCodes.js";
 
 /**
  * Profile and privacy.
@@ -847,7 +847,7 @@ function ChangePhoneSheet({ currentPhone, onClose, onChanged, toast }) {
                   ))}
                 </select>
                 <input value={phone} onChange={onPhoneChange} inputMode="tel"
-                       placeholder={"98765" + "4".repeat(Math.max(country.len - 5, 0))}
+                       placeholder={samplePlaceholder(country.len)}
                        onKeyDown={(event) => event.key === "Enter" && validLength && requestCode()}
                        style={{
                          flex: 1, width: "100%", padding: "12px 14px", borderRadius: 12,

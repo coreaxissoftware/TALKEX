@@ -13,7 +13,7 @@ import { canvasToPdfBlob } from "../imageToPdf.js";
 import { STICKERS, STICKERS_BY_ID } from "../stickers.jsx";
 import { shouldAutoDownload } from "../mediaPrefs.js";
 import CameraCapture from "../CameraCapture.jsx";
-import { COUNTRY_CODES, flagFor, splitPhone } from "../countryCodes.js";
+import { COUNTRY_CODES, flagFor, samplePlaceholder, splitPhone } from "../countryCodes.js";
 
 const SLOW_MODE_CHOICES = [
   { label: "Off", seconds: 0 },
@@ -2928,7 +2928,7 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
                          ...contactForm,
                          phone: event.target.value.replace(/\D/g, "").slice(0, contactCountry.len),
                        })}
-                       placeholder={"98765" + "4".repeat(Math.max(contactCountry.len - 5, 0))}
+                       placeholder={samplePlaceholder(contactCountry.len)}
                        style={{
                          flex: 1, width: "100%", padding: "12px 14px", borderRadius: 12,
                          background: G.dim, border: `1px solid ${G.border}`, color: G.text,
