@@ -1,7 +1,42 @@
 import { useEffect, useRef, useState } from "react";
 import { Auth, setToken } from "../api.js";
-import { Button, Field, G, I, Screen, Spinner } from "../ui.jsx";
+import { Button, Field, G, I, Screen, Spinner, useIsDesktop } from "../ui.jsx";
 import { COUNTRY_CODES, flagFor } from "../countryCodes.js";
+
+/**
+ * Three soft blobs of the app's own accent colors, slowly drifting behind
+ * the card — reads as "alive" without being an actual video (no asset to
+ * ship, no autoplay/codec concerns, and it re-themes for free since it's
+ * built from G's colors rather than a baked-in clip).
+ */
+function AnimatedBackdrop() {
+  return (
+    <>
+      <style>{`
+        @keyframes talkexDrift1 { 0%,100% { transform: translate(-10%,-10%) scale(1); } 50% { transform: translate(10%,5%) scale(1.15); } }
+        @keyframes talkexDrift2 { 0%,100% { transform: translate(5%,10%) scale(1); } 50% { transform: translate(-8%,-8%) scale(1.1); } }
+        @keyframes talkexDrift3 { 0%,100% { transform: translate(0%,0%) scale(1); } 50% { transform: translate(6%,-10%) scale(1.2); } }
+      `}</style>
+      <div aria-hidden style={{ position: "absolute", inset: 0, overflow: "hidden", zIndex: 0 }}>
+        <div style={{
+          position: "absolute", width: "55%", paddingBottom: "55%", left: "-10%", top: "-15%",
+          borderRadius: "50%", background: G.accent, opacity: 0.22, filter: "blur(70px)",
+          animation: "talkexDrift1 16s ease-in-out infinite",
+        }}/>
+        <div style={{
+          position: "absolute", width: "45%", paddingBottom: "45%", right: "-8%", top: "10%",
+          borderRadius: "50%", background: G.accentD, opacity: 0.18, filter: "blur(70px)",
+          animation: "talkexDrift2 20s ease-in-out infinite",
+        }}/>
+        <div style={{
+          position: "absolute", width: "40%", paddingBottom: "40%", left: "20%", bottom: "-15%",
+          borderRadius: "50%", background: G.accent, opacity: 0.15, filter: "blur(70px)",
+          animation: "talkexDrift3 24s ease-in-out infinite",
+        }}/>
+      </div>
+    </>
+  );
+}
 
 /**
  * Sign in or create an account.
@@ -84,6 +119,9 @@ export default function Login({ onAuthenticated }) {
     );
   }
 
+  const isDesktop = useIsDesktop();
+  const wideQr = isDesktop && mode === "qr";
+
   const tabs = [
     { key: "phone", label: "Phone number" },
     { key: "login", label: "Username" },
@@ -93,10 +131,13 @@ export default function Login({ onAuthenticated }) {
 
   return (
     <Screen style={{
-      justifyContent: "center", padding: 24,
-      background: `radial-gradient(circle at 50% 0%, ${G.accentGlow}, transparent 60%), ${G.bg}`,
+      justifyContent: "center", padding: 24, position: "relative", overflow: "hidden",
+      maxWidth: isDesktop ? (wideQr ? 820 : 480) : 430,
+      background: G.bg,
     }}>
-      <div style={{ textAlign: "center", marginBottom: 28 }}>
+      <AnimatedBackdrop/>
+
+      <div style={{ position: "relative", zIndex: 1, textAlign: "center", marginBottom: 28 }}>
         <div style={{
           width: 76, height: 76, borderRadius: 24, margin: "0 auto 18px",
           overflow: "hidden", boxShadow: `0 12px 36px ${G.accentGlow}`,
@@ -112,6 +153,7 @@ export default function Login({ onAuthenticated }) {
       </div>
 
       <div style={{
+        position: "relative", zIndex: 1,
         background: G.bg, border: `1px solid ${G.border}`, borderRadius: 24,
         padding: 22, boxShadow: `0 20px 50px -20px ${G.accentGlow}, 0 2px 8px #0001`,
       }}>
@@ -139,7 +181,8 @@ export default function Login({ onAuthenticated }) {
         </div>
 
         {mode === "qr" ? (
-          <QrSignIn onAuthenticated={onAuthenticated}/>
+          <QrSignIn onAuthenticated={onAuthenticated} wide={wideQr}
+                    onUsePhone={() => setMode("phone")}/>
         ) : mode === "phone" ? (
           <PhoneAuth onAuthenticated={onAuthenticated}/>
         ) : (
@@ -418,7 +461,20 @@ const POLL_INTERVAL_MS = 2000;
  * to LOOK right but not verified against a real scanner is a worse bet than
  * just asking the server, which already has a trusted library available.
  */
-function QrSignIn({ onAuthenticated }) {
+function Step({ n, children }) {
+  return (
+    <div style={{ display: "flex", gap: 14, alignItems: "flex-start", marginBottom: 18 }}>
+      <div style={{
+        width: 26, height: 26, borderRadius: "50%", border: `1.5px solid ${G.border}`,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontSize: 12.5, fontWeight: 700, color: G.sub, flexShrink: 0,
+      }}>{n}</div>
+      <div style={{ fontSize: 14.5, color: G.text, paddingTop: 3 }}>{children}</div>
+    </div>
+  );
+}
+
+function QrSignIn({ onAuthenticated, wide, onUsePhone }) {
   const [state, setState] = useState("loading");   // loading | ready | expired | error
   const [code, setCode] = useState("");
   const [qrSvg, setQrSvg] = useState("");
@@ -476,31 +532,66 @@ function QrSignIn({ onAuthenticated }) {
     );
   }
 
+  const qrBlock = (
+    <div
+      // Server-generated SVG from qrcode.make() — not user input, safe to inline.
+      dangerouslySetInnerHTML={{ __html: qrSvg }}
+      style={{
+        width: wide ? 200 : 180, height: wide ? 200 : 180, margin: wide ? "0 0 16px" : "0 auto 16px",
+        background: "#fff", borderRadius: 14, padding: 10, display: "flex",
+        alignItems: "center", justifyContent: "center",
+      }}/>
+  );
+
+  const codeBlock = (
+    <div style={{
+      fontSize: 24, fontWeight: 800, letterSpacing: 6, color: G.text,
+      marginBottom: 16, fontFamily: "monospace",
+    }}>{code}</div>
+  );
+
+  const waitingBlock = (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: wide ? "flex-start" : "center" }}>
+      <Spinner small/>
+      <span style={{ fontSize: 12.5, color: G.sub }}>Waiting for approval…</span>
+    </div>
+  );
+
+  if (wide) {
+    return (
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 220px", gap: 32, alignItems: "start" }}>
+        <div>
+          <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 18 }}>Scan to log in</div>
+          <Step n={1}>Open <b>TalkEx</b> on a device you're already signed into</Step>
+          <Step n={2}>Go to <b>Settings → Linked devices → Link a device</b></Step>
+          <Step n={3}>Scan this QR code, or type the code shown alongside it</Step>
+          {onUsePhone && (
+            <div onClick={onUsePhone} style={{
+              marginTop: 8, fontSize: 13.5, fontWeight: 600, color: G.accentD,
+              cursor: "pointer", textDecoration: "underline", width: "fit-content",
+            }}>Log in with phone number →</div>
+          )}
+        </div>
+        <div style={{ textAlign: "left" }}>
+          {qrBlock}
+          {codeBlock}
+          {waitingBlock}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ textAlign: "center" }}>
-      <div
-        // Server-generated SVG from qrcode.make() — not user input, safe to inline.
-        dangerouslySetInnerHTML={{ __html: qrSvg }}
-        style={{
-          width: 180, height: 180, margin: "0 auto 16px", background: "#fff",
-          borderRadius: 14, padding: 10, display: "flex",
-          alignItems: "center", justifyContent: "center",
-        }}/>
+      <div style={{ display: "flex", justifyContent: "center" }}>{qrBlock}</div>
 
       <div style={{ fontSize: 12.5, color: G.muted, marginBottom: 8 }}>
         Open TalkEx on a device you're already signed into →
         Settings → Linked devices → Link a device, and enter this code:
       </div>
 
-      <div style={{
-        fontSize: 24, fontWeight: 800, letterSpacing: 6, color: G.text,
-        marginBottom: 16, fontFamily: "monospace",
-      }}>{code}</div>
-
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-        <Spinner small/>
-        <span style={{ fontSize: 12.5, color: G.sub }}>Waiting for approval…</span>
-      </div>
+      {codeBlock}
+      {waitingBlock}
     </div>
   );
 }

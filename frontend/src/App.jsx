@@ -7,7 +7,7 @@ import { useRealtime } from "./useRealtime.js";
 import { useCall } from "./useCall.js";
 import { useGroupCall } from "./useGroupCall.js";
 import {
-  Button, Field, G, I, Screen, Spinner,
+  Button, Field, G, I, Screen, Spinner, useIsDesktop,
   applyTheme, getStoredAccent, getStoredTheme, saveAccent, saveTheme,
 } from "./ui.jsx";
 import { getAppLockTimeout, isAppLockEnabled, verifyAppLockPin } from "./appLock.js";
@@ -36,33 +36,6 @@ const TABS = [
   { key: "planner", label: "Planner", icon: I.calendar },
   { key: "settings", label: "You", icon: I.settings },
 ];
-
-// Below this width the app is the single-column, phone-shaped layout it was
-// designed around. At or above it there's room for a WhatsApp-Web-style
-// split view, so DesktopShell takes over instead.
-const DESKTOP_QUERY = "(min-width: 900px)";
-
-function useIsDesktop() {
-  const [isDesktop, setIsDesktop] = useState(
-    () => typeof window !== "undefined" && window.matchMedia(DESKTOP_QUERY).matches
-  );
-  useEffect(() => {
-    const mql = window.matchMedia(DESKTOP_QUERY);
-    // Both listeners recompute the same matchMedia check — belt and
-    // suspenders, because some environments (browser automation resizing
-    // a viewport via devtools protocol, some embedded webviews) fire a
-    // plain `resize` without ever dispatching the MediaQueryList's own
-    // `change` event.
-    const onChange = () => setIsDesktop(window.matchMedia(DESKTOP_QUERY).matches);
-    mql.addEventListener("change", onChange);
-    window.addEventListener("resize", onChange);
-    return () => {
-      mql.removeEventListener("change", onChange);
-      window.removeEventListener("resize", onChange);
-    };
-  }, []);
-  return isDesktop;
-}
 
 /**
  * The shell: authentication, the tab bar, and the one WebSocket.
