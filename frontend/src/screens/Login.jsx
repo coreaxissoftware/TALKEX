@@ -13,25 +13,32 @@ function AnimatedBackdrop() {
   return (
     <>
       <style>{`
-        @keyframes talkexDrift1 { 0%,100% { transform: translate(-10%,-10%) scale(1); } 50% { transform: translate(10%,5%) scale(1.15); } }
-        @keyframes talkexDrift2 { 0%,100% { transform: translate(5%,10%) scale(1); } 50% { transform: translate(-8%,-8%) scale(1.1); } }
-        @keyframes talkexDrift3 { 0%,100% { transform: translate(0%,0%) scale(1); } 50% { transform: translate(6%,-10%) scale(1.2); } }
+        @keyframes talkexDrift1 { 0%,100% { transform: translate(-10%,-10%) scale(1) rotate(0deg); } 50% { transform: translate(18%,10%) scale(1.35) rotate(40deg); } }
+        @keyframes talkexDrift2 { 0%,100% { transform: translate(8%,12%) scale(1) rotate(0deg); } 50% { transform: translate(-16%,-14%) scale(1.25) rotate(-35deg); } }
+        @keyframes talkexDrift3 { 0%,100% { transform: translate(0%,0%) scale(1); } 50% { transform: translate(12%,-18%) scale(1.4); } }
+        @keyframes talkexDrift4 { 0%,100% { transform: translate(-6%,8%) scale(1); } 50% { transform: translate(14%,-10%) scale(0.85); } }
+        @keyframes talkexPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
       `}</style>
       <div aria-hidden style={{ position: "absolute", inset: 0, overflow: "hidden", zIndex: 0 }}>
         <div style={{
-          position: "absolute", width: "55%", paddingBottom: "55%", left: "-10%", top: "-15%",
-          borderRadius: "50%", background: G.accent, opacity: 0.22, filter: "blur(70px)",
-          animation: "talkexDrift1 16s ease-in-out infinite",
+          position: "absolute", width: "60%", paddingBottom: "60%", left: "-15%", top: "-20%",
+          borderRadius: "50%", background: G.accent, opacity: 0.55, filter: "blur(60px)",
+          animation: "talkexDrift1 13s ease-in-out infinite, talkexPulse 6s ease-in-out infinite",
         }}/>
         <div style={{
-          position: "absolute", width: "45%", paddingBottom: "45%", right: "-8%", top: "10%",
-          borderRadius: "50%", background: G.accentD, opacity: 0.18, filter: "blur(70px)",
-          animation: "talkexDrift2 20s ease-in-out infinite",
+          position: "absolute", width: "50%", paddingBottom: "50%", right: "-12%", top: "5%",
+          borderRadius: "50%", background: G.accentD, opacity: 0.5, filter: "blur(60px)",
+          animation: "talkexDrift2 16s ease-in-out infinite, talkexPulse 7s ease-in-out infinite 1s",
         }}/>
         <div style={{
-          position: "absolute", width: "40%", paddingBottom: "40%", left: "20%", bottom: "-15%",
-          borderRadius: "50%", background: G.accent, opacity: 0.15, filter: "blur(70px)",
-          animation: "talkexDrift3 24s ease-in-out infinite",
+          position: "absolute", width: "45%", paddingBottom: "45%", left: "15%", bottom: "-20%",
+          borderRadius: "50%", background: G.accentD, opacity: 0.4, filter: "blur(60px) hue-rotate(35deg)",
+          animation: "talkexDrift3 18s ease-in-out infinite, talkexPulse 8s ease-in-out infinite 2s",
+        }}/>
+        <div style={{
+          position: "absolute", width: "35%", paddingBottom: "35%", right: "10%", bottom: "-10%",
+          borderRadius: "50%", background: G.accent, opacity: 0.4, filter: "blur(60px)",
+          animation: "talkexDrift4 14s ease-in-out infinite",
         }}/>
       </div>
     </>
