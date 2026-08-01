@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Uploads } from "./api.js";
+import { TEXTURES, getWallpaper, onWallpaperChange } from "./chatWallpaper.js";
 
 // Below this width the app is the single-column, phone-shaped layout it was
 // designed around. At or above it there's room for a WhatsApp-Web-style
@@ -154,6 +155,43 @@ export function ParticleNetwork({ fixed = true }) {
       <canvas ref={canvasRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}/>
     </div>
   );
+}
+
+/**
+ * Renders whatever the current chat-wallpaper preference is (particle
+ * network / a CSS texture / a custom photo / nothing), and stays in sync if
+ * that preference changes while mounted — every chat screen drops this in
+ * once instead of each re-implementing the same read-preference-and-branch
+ * logic, and ChatWallpaperPicker (the Settings UI) never has to know who's
+ * listening.
+ */
+export function ChatBackdrop({ fixed = false }) {
+  const [wallpaper, setWallpaperState] = useState(getWallpaper);
+  useEffect(() => onWallpaperChange(setWallpaperState), []);
+
+  const base = { position: fixed ? "fixed" : "absolute", inset: 0, zIndex: 0 };
+
+  if (wallpaper.type === "particles") return <ParticleNetwork fixed={fixed}/>;
+
+  if (wallpaper.type === "texture") {
+    const texture = TEXTURES.find((t) => t.id === wallpaper.id) || TEXTURES[0];
+    return (
+      <div aria-hidden style={{
+        ...base, background: G.bg, backgroundImage: texture.css(G), backgroundSize: texture.size,
+      }}/>
+    );
+  }
+
+  if (wallpaper.type === "custom" && wallpaper.dataUrl) {
+    return (
+      <div aria-hidden style={{
+        ...base, backgroundImage: `url(${wallpaper.dataUrl})`,
+        backgroundSize: "cover", backgroundPosition: "center",
+      }}/>
+    );
+  }
+
+  return null;
 }
 
 // Design system: palette, icons and the small shared components.

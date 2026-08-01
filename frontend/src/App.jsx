@@ -7,7 +7,7 @@ import { useRealtime } from "./useRealtime.js";
 import { useCall } from "./useCall.js";
 import { useGroupCall } from "./useGroupCall.js";
 import {
-  Button, Field, G, I, ParticleNetwork, Screen, Spinner, useIsDesktop,
+  Button, ChatBackdrop, Field, G, I, Screen, Spinner, useIsDesktop,
   applyTheme, getStoredAccent, getStoredTheme, saveAccent, saveTheme,
 } from "./ui.jsx";
 import { getAppLockTimeout, isAppLockEnabled, verifyAppLockPin } from "./appLock.js";
@@ -928,7 +928,7 @@ function DesktopRail({ tab, onChange, unread, plannerCount, missedCalls, onNewCh
 function EmptyChatPanel() {
   return (
     <div style={{ position: "relative", height: "100%", overflow: "hidden" }}>
-      <ParticleNetwork fixed={false}/>
+      <ChatBackdrop/>
       <div style={{
         position: "relative", zIndex: 1, height: "100%", display: "flex", flexDirection: "column",
         alignItems: "center", justifyContent: "center", color: "#a9c2e0", textAlign: "center", padding: 40,

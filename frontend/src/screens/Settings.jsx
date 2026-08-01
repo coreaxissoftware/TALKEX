@@ -6,7 +6,7 @@ import {
 import { ACCENTS, Av, Button, Field, G, I, SRow, Spinner, Toggle, clockTime, whenLabel } from "../ui.jsx";
 import { disablePush, enablePush, getPushSubscription, isPushSupported } from "../push.js";
 import { getAutoDownload, setAutoDownload } from "../mediaPrefs.js";
-import { getWallpaper, setWallpaper } from "../chatWallpaper.js";
+import { TEXTURES, getWallpaper, readImageAsWallpaper, setWallpaper } from "../chatWallpaper.js";
 import { disableAppLock, isAppLockEnabled, setAppLockPin } from "../appLock.js";
 import QrScanner from "../QrScanner.jsx";
 import Login from "./Login.jsx";
@@ -58,7 +58,9 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
   const [deactivating, setDeactivating] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
   const [avatarBusy, setAvatarBusy] = useState(false);
+  const [wallpaperBusy, setWallpaperBusy] = useState(false);
   const avatarInputRef = useRef(null);
+  const wallpaperInputRef = useRef(null);
 
   function changeAutoDownload(value) {
     setAutoDownload(value);
@@ -68,6 +70,21 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
   function changeWallpaper(value) {
     setWallpaper(value);
     setWallpaperState(value);
+  }
+
+  async function onWallpaperFileChosen(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setWallpaperBusy(true);
+    try {
+      const dataUrl = await readImageAsWallpaper(file);
+      changeWallpaper({ type: "custom", dataUrl });
+    } catch {
+      toast("Could not use that photo");
+    } finally {
+      setWallpaperBusy(false);
+    }
   }
 
   async function onAvatarFileChosen(event) {
@@ -368,16 +385,38 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
           </div>
 
           <div style={{ fontSize: 12, color: G.muted, margin: "16px 0 10px" }}>Chat wallpaper</div>
-          <div style={{ display: "flex", gap: 6 }}>
-            {[["particles", "Animated"], ["none", "Plain"]].map(([value, label]) => (
-              <button key={value} onClick={() => changeWallpaper(value)} style={{
-                flex: 1, padding: "9px 4px", borderRadius: 10, cursor: "pointer",
-                fontSize: 12.5, fontWeight: 600,
-                border: `1px solid ${wallpaper === value ? G.accent : G.border}`,
-                background: wallpaper === value ? G.accentSoft : "transparent",
-                color: wallpaper === value ? G.accentText : G.sub,
-              }}>{label}</button>
+          <input ref={wallpaperInputRef} type="file" accept="image/*" style={{ display: "none" }}
+                 onChange={onWallpaperFileChosen}/>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
+            <WallpaperSwatch label="Animated" active={wallpaper.type === "particles"}
+                              onClick={() => changeWallpaper({ type: "particles" })}
+                              style={{
+                                background: "linear-gradient(135deg,#0b1c33,#14294a)",
+                                backgroundImage:
+                                  "radial-gradient(circle at 30% 30%, #7dd3fc 0 3px, transparent 4px)," +
+                                  "radial-gradient(circle at 70% 60%, #f5a524 0 2.5px, transparent 3.5px)," +
+                                  "radial-gradient(circle at 50% 80%, #7dd3fc 0 2px, transparent 3px)",
+                              }}/>
+            <WallpaperSwatch label="Plain" active={wallpaper.type === "none"}
+                              onClick={() => changeWallpaper({ type: "none" })}
+                              style={{ background: G.bg }}/>
+            {TEXTURES.map((texture) => (
+              <WallpaperSwatch key={texture.id} label={texture.label}
+                                active={wallpaper.type === "texture" && wallpaper.id === texture.id}
+                                onClick={() => changeWallpaper({ type: "texture", id: texture.id })}
+                                style={{
+                                  background: G.bg, backgroundImage: texture.css(G),
+                                  backgroundSize: texture.size,
+                                }}/>
             ))}
+            <WallpaperSwatch label={wallpaperBusy ? "…" : "Photo"}
+                              active={wallpaper.type === "custom"}
+                              onClick={() => wallpaperInputRef.current?.click()}
+                              style={wallpaper.type === "custom" && wallpaper.dataUrl
+                                ? { backgroundImage: `url(${wallpaper.dataUrl})`, backgroundSize: "cover", backgroundPosition: "center" }
+                                : { background: G.dim, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              {!(wallpaper.type === "custom" && wallpaper.dataUrl) && I.camera(G.sub, 18)}
+            </WallpaperSwatch>
           </div>
         </div>
       </Section>
@@ -1190,6 +1229,24 @@ function StorageUsage() {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+/** One tile in the chat-wallpaper grid — a live preview of that choice, with a check mark when it's the active one. */
+function WallpaperSwatch({ label, active, onClick, style, children }) {
+  return (
+    <div onClick={onClick} title={label} style={{
+      position: "relative", aspectRatio: "1", borderRadius: 12, cursor: "pointer",
+      overflow: "hidden", border: `2px solid ${active ? G.accent : G.border}`, ...style,
+    }}>
+      {children}
+      {active && (
+        <div style={{
+          position: "absolute", top: 4, right: 4, width: 18, height: 18, borderRadius: "50%",
+          background: G.accent, display: "flex", alignItems: "center", justifyContent: "center",
+        }}>{I.check("#fff", 11)}</div>
+      )}
     </div>
   );
 }

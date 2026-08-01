@@ -5,14 +5,13 @@ import {
 } from "../api.js";
 import * as offlineDb from "../offlineDb.js";
 import {
-  Av, Button, EMOJIS, EMOJI_GROUPS, Field, G, I, ParticleNetwork, SRow, Spinner, Toggle, clockTime,
+  Av, Button, ChatBackdrop, EMOJIS, EMOJI_GROUPS, Field, G, I, SRow, Spinner, Toggle, clockTime,
   countdown, durationLabel, localInputToUnix, whenLabel,
 } from "../ui.jsx";
 import { useVoiceRecorder } from "../useVoiceRecorder.js";
 import { canvasToPdfBlob } from "../imageToPdf.js";
 import { STICKERS, STICKERS_BY_ID } from "../stickers.jsx";
 import { shouldAutoDownload } from "../mediaPrefs.js";
-import { getWallpaper, onWallpaperChange } from "../chatWallpaper.js";
 import CameraCapture from "../CameraCapture.jsx";
 import { COUNTRY_CODES, flagFor, samplePlaceholder, splitPhone } from "../countryCodes.js";
 
@@ -65,7 +64,6 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   const [chatSearchOpen, setChatSearchOpen] = useState(false);
   const [chatSearchQuery, setChatSearchQuery] = useState("");
   const [chatSearchResults, setChatSearchResults] = useState([]);
-  const [wallpaper, setWallpaperState] = useState(getWallpaper);
   const inputRef = useRef(chat.draft || "");
   const bottom = useRef(null);
   const typingSentAt = useRef(0);
@@ -77,11 +75,6 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
 
   // Keep ref in sync so the unmount cleanup can read it without depending on state.
   useEffect(() => { inputRef.current = input; }, [input]);
-
-  // Picking up a wallpaper change made in Settings while this chat is still
-  // mounted (desktop split-view keeps ChatView alive underneath the Settings
-  // tab in a way mobile's single-screen navigation never does).
-  useEffect(() => onWallpaperChange(setWallpaperState), []);
 
   // Save draft on unmount (leaving the chat).
   useEffect(() => {
@@ -721,7 +714,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
       )}
 
       <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
-        {wallpaper === "particles" && <ParticleNetwork fixed={false}/>}
+        <ChatBackdrop/>
         <div style={{
           position: "relative", zIndex: 1, height: "100%", overflowY: "auto", padding: "12px 14px",
         }}>
