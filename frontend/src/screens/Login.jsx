@@ -155,7 +155,7 @@ export default function Login({ onAuthenticated }) {
         ) : (
           <>
             <Field label="Username" value={form.username} onChange={set("username")}
-                   placeholder="rahul_s" autoCapitalize="none"/>
+                   placeholder="its_satyajeet_coreaxis" autoCapitalize="none"/>
             <Field label="Password" type="password" value={form.password}
                    onChange={set("password")} placeholder="At least 8 characters"
                    onKeyDown={(event) => event.key === "Enter" && login()}/>
