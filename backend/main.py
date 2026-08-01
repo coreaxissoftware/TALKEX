@@ -1620,6 +1620,30 @@ def call_target_ok(chat_id: str, user_id: str, to_user_id: str) -> bool:
     return not blocked_between(user_id, to_user_id)
 
 
+def calling_permitted(chat_id: str, user_id: str) -> bool:
+    """
+    Whether `user_id` currently allows calling at all, checked on BOTH sides
+    of an attempt — the caller (did they switch calling off for themselves?)
+    and the callee (are they willing to be reached?) go through the exact
+    same check. Two independent switches: a global "Calling" toggle in
+    Privacy (users.calling_enabled) and a per-chat override
+    (chat_members.calls_enabled) that defaults on, so muting calls in one
+    noisy group doesn't require going dark everywhere.
+
+    Meetings never call this — they don't route through call_invite or
+    group_call_start at all (join_url is a plain link), so there is nothing
+    to bypass here on their behalf.
+    """
+    user = db.query_one("SELECT calling_enabled FROM users WHERE id = ?", (user_id,))
+    if user is None or not user["calling_enabled"]:
+        return False
+    member = db.query_one(
+        "SELECT calls_enabled FROM chat_members WHERE chat_id = ? AND user_id = ?",
+        (chat_id, user_id),
+    )
+    return member is None or bool(member["calls_enabled"])
+
+
 def require_member(chat_id: str, user_id: str) -> dict:
     """Load a chat, refusing if the caller is not in it."""
     chat = db.query_one("SELECT * FROM chats WHERE id = ?", (chat_id,))
@@ -1659,6 +1683,7 @@ def list_chats(user: dict = Depends(current_user)):
         SELECT
             c.*,
             m.role, m.last_read_seq, m.muted_until, m.is_pinned, m.folder, m.draft, m.archived,
+            m.calls_enabled,
             MAX(c.last_seq - m.last_read_seq, 0) AS unread
         FROM chat_members AS m
         JOIN chats AS c ON c.id = m.chat_id
@@ -4062,6 +4087,15 @@ async def websocket_endpoint(socket: WebSocket, token: str = Query(default="")):
                     call_kind = payload.get("call_kind")
                     if call_kind not in ("voice", "video"):
                         continue
+                    # Checked only at the invite, not on every subsequent
+                    # signal — an already-accepted call keeps working even if
+                    # someone flips their Calling toggle mid-call.
+                    if not calling_permitted(chat_id, user_id) or not calling_permitted(chat_id, to_user_id):
+                        await socket.send_json({
+                            "type": "call_error", "chat_id": chat_id,
+                            "reason": "This person isn't accepting calls right now",
+                        })
+                        continue
                     caller = db.query_one(
                         "SELECT name, avatar_letter, color FROM users WHERE id = ?", (user_id,))
                     relay["call_kind"] = call_kind
@@ -4091,6 +4125,12 @@ async def websocket_endpoint(socket: WebSocket, token: str = Query(default="")):
                 chat = db.query_one("SELECT type FROM chats WHERE id = ?", (chat_id,))
                 if chat is None or chat["type"] != "group":
                     continue
+                if not calling_permitted(chat_id, user_id):
+                    await socket.send_json({
+                        "type": "call_error", "chat_id": chat_id,
+                        "reason": "Calling is off for you in this chat",
+                    })
+                    continue
 
                 room = _group_calls.setdefault(chat_id, {})
                 is_first = len(room) == 0
@@ -4101,12 +4141,23 @@ async def websocket_endpoint(socket: WebSocket, token: str = Query(default="")):
                     "type": "group_call_roster", "chat_id": chat_id, "participants": roster,
                 })
                 if is_first:
-                    # Ring everyone else in the chat, not just those already
-                    # watching this room (there was no room a moment ago).
-                    await hub.send_to_chat(chat_id, {
-                        "type": "group_call_invite", "chat_id": chat_id, "call_kind": call_kind,
-                        **room[user_id],
-                    }, exclude_user=user_id)
+                    # Ring only members who currently allow calls here —
+                    # everyone else simply never hears about this room, the
+                    # same as if they weren't a member at all.
+                    eligible = db.query_all(
+                        """
+                        SELECT cm.user_id FROM chat_members cm
+                        JOIN users u ON u.id = cm.user_id
+                        WHERE cm.chat_id = ? AND cm.user_id != ?
+                          AND u.calling_enabled = 1 AND cm.calls_enabled = 1
+                        """,
+                        (chat_id, user_id),
+                    )
+                    for row in eligible:
+                        await hub.send_to_user(row["user_id"], {
+                            "type": "group_call_invite", "chat_id": chat_id, "call_kind": call_kind,
+                            **room[user_id],
+                        })
                 else:
                     # Tell everyone ALREADY in the room about the new arrival,
                     # so their clients know to expect an offer from them.

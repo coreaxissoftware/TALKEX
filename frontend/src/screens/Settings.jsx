@@ -506,6 +506,11 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
               sub="When on, others can't see your number — only your name and username"
               right={<Toggle on={!Boolean(me.show_phone_number)}
                              onChange={(hideOn) => togglePrivacy("show_phone_number", !hideOn)}/>}/>
+
+        <SRow icon={I.phone(G.accent, 18)} label="Calling"
+              sub="When off, you can't be called and can't call anyone — scheduled meetings still work"
+              right={<Toggle on={me.calling_enabled !== false}
+                             onChange={(value) => togglePrivacy("calling_enabled", value)}/>}/>
       </Section>
 
       <Section id="livelocation" icon={I.mapPin(G.accent, 20)} title="Live Location" sub="Who's sharing, and with you"

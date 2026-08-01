@@ -490,10 +490,12 @@ export default function App() {
           toast={toast}/>
         <Toast text={toastText}/>
         <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
-                     onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}/>
+                     onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
+                     onShareScreen={call.shareScreen}/>
         <GroupCallOverlay call={groupCall.call} onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
                           onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
-                          onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}/>
+                          onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
+                          onShareScreen={groupCall.shareScreen}/>
       </Screen>
     );
   }
@@ -541,10 +543,12 @@ export default function App() {
               plannerCount={plannerCount} missedCalls={missedCalls} tabs={tabs}/>
       <Toast text={toastText}/>
       <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
-                   onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}/>
+                   onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
+                   onShareScreen={call.shareScreen}/>
       <GroupCallOverlay call={groupCall.call} onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
                         onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
-                        onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}/>
+                        onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
+                        onShareScreen={groupCall.shareScreen}/>
       {discoverOpen && (
         <DiscoverOverlay onClose={() => setDiscoverOpen(false)}
                          onOpenChat={(chat) => { setDiscoverOpen(false); setOpenChat(chat); }}
@@ -841,10 +845,12 @@ function DesktopShell({
 
       <Toast text={toastText}/>
       <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
-                   onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}/>
+                   onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
+                   onShareScreen={call.shareScreen}/>
       <GroupCallOverlay call={groupCall.call} onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
                         onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
-                        onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}/>
+                        onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
+                        onShareScreen={groupCall.shareScreen}/>
       {discoverOpen && (
         <DiscoverOverlay onClose={onDiscoverClose}
                          onOpenChat={(chat) => { onDiscoverClose(); onOpenChat(chat); }}

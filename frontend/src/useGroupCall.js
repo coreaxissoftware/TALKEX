@@ -6,6 +6,7 @@ const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
 const GROUP_CALL_EVENT_TYPES = new Set([
   "group_call_invite", "group_call_roster", "group_call_participant_joined",
   "group_call_participant_left", "group_call_offer", "group_call_answer", "group_call_ice",
+  "call_error",
 ]);
 
 /**
@@ -157,6 +158,41 @@ export function useGroupCall(events, send, toast) {
     setCall((c) => (c ? { ...c, cameraOff: nowOff } : c));
   }, []);
 
+  // Same replaceTrack idea as useCall.js's version, but across every peer in
+  // the mesh at once — one screen-capture track, swapped onto each
+  // connection's existing video sender. Same scope limit: needs an existing
+  // video track already flowing, since adding a fresh one to a voice-only
+  // call is a renegotiation this pass doesn't do.
+  const shareScreen = useCallback(async () => {
+    const current = callRef.current;
+    const peers = Object.values(peersRef.current);
+    if (!current?.localStream || peers.length === 0) return;
+    const senders = peers
+      .map((pc) => pc.getSenders().find((s) => s.track?.kind === "video"))
+      .filter(Boolean);
+    if (senders.length === 0) {
+      toastRef.current?.("Turn your camera on first to share your screen");
+      return;
+    }
+    let screenStream;
+    try {
+      screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+    } catch {
+      return;
+    }
+    const screenTrack = screenStream.getVideoTracks()[0];
+    const cameraTrack = current.localStream.getVideoTracks()[0];
+    await Promise.all(senders.map((sender) => sender.replaceTrack(screenTrack)));
+    setCall((c) => (c ? { ...c, sharingScreen: true } : c));
+
+    screenTrack.onended = async () => {
+      if (cameraTrack) {
+        await Promise.all(senders.map((sender) => sender.replaceTrack(cameraTrack).catch(() => {})));
+      }
+      setCall((c) => (c ? { ...c, sharingScreen: false } : c));
+    };
+  }, []);
+
   // ── Remote events ────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -181,7 +217,14 @@ export function useGroupCall(events, send, toast) {
 
         if (!current || event.chat_id !== current.chatId) continue;
 
-        if (event.type === "group_call_roster") {
+        if (event.type === "call_error") {
+          // The optimistic "active" state join() sets before the server has
+          // actually confirmed the room join needs undoing here — most
+          // commonly because calling_permitted() rejected it server-side.
+          toastRef.current?.(event.reason || "Could not join the call");
+          teardown();
+          setCall(null);
+        } else if (event.type === "group_call_roster") {
           for (const participant of event.participants) {
             await connectOutward(event.chat_id, participant);
           }
@@ -236,5 +279,5 @@ export function useGroupCall(events, send, toast) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [events, buildPeerConnection, connectOutward, addParticipant]);
 
-  return { call, join, declineIncoming, leave, toggleMute, toggleCamera };
+  return { call, join, declineIncoming, leave, toggleMute, toggleCamera, shareScreen };
 }

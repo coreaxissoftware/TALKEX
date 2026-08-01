@@ -106,6 +106,7 @@ class UpdateProfileRequest(BaseModel):
     show_phone_number: Optional[bool] = None
     away_enabled: Optional[bool] = None
     away_message: Optional[str] = Field(default=None, max_length=500)
+    calling_enabled: Optional[bool] = None
 
 
 # ── Automation: webhooks and canned replies ─────────────────────────────────
@@ -213,6 +214,7 @@ class ChatSettingsRequest(BaseModel):
     muted_until: Optional[float] = None
     draft: Optional[str] = Field(default=None, max_length=4000)
     archived: Optional[bool] = None
+    calls_enabled: Optional[bool] = None
 
 
 class DisappearingRequest(BaseModel):

@@ -2736,6 +2736,7 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
   const [locked, setLocked] = useState(Boolean(chat.is_locked));
   const [lockSheet, setLockSheet] = useState(null);   // 'set' | 'remove'
   const [archived, setArchived] = useState(Boolean(chat.archived));
+  const [callsEnabled, setCallsEnabled] = useState(chat.calls_enabled !== false);
   const [muteSheet, setMuteSheet] = useState(false);
   const [mediaSheet, setMediaSheet] = useState(false);
   const [inviteSheet, setInviteSheet] = useState(false);
@@ -2875,6 +2876,12 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
     onChanged();
   }
 
+  async function toggleCallsEnabled(next) {
+    setCallsEnabled(next);
+    await Chats.settings(chat.id, { calls_enabled: next });
+    onChanged();
+  }
+
   async function changeFolder(next) {
     setFolder(next);
     await Chats.settings(chat.id, { folder: next });
@@ -2972,6 +2979,10 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
       <SRow icon={I.archive(G.accent, 18)} label="Archive chat"
             sub="Off the main list until a new message arrives"
             right={<Toggle on={archived} onChange={toggleArchive}/>}/>
+
+      <SRow icon={I.phone(G.accent, 18)} label="Calls"
+            sub="When off, nobody can call you in this chat — even if Calling is on overall"
+            right={<Toggle on={callsEnabled} onChange={toggleCallsEnabled}/>}/>
 
       <SRow icon={I.image(G.accent, 18)} label="Shared media" onClick={() => setMediaSheet(true)}/>
 

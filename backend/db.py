@@ -825,6 +825,15 @@ COLUMNS_ADDED_LATER = [
     # Set automatically on login when the username matches SUPERADMIN_USERNAME
     # — see main.py's ensure_superadmin(). Nothing else ever sets this.
     ("users", "is_superadmin", "INTEGER NOT NULL DEFAULT 0"),
+    # Global "Calling" privacy switch (Settings > Privacy). Off means this
+    # user can neither be called nor place calls anywhere — see
+    # calling_permitted() in main.py. Meetings never check this; they don't
+    # route through the calling system at all.
+    ("users", "calling_enabled", "INTEGER NOT NULL DEFAULT 1"),
+    # Per-membership override: calling can be on globally but switched off
+    # for one specific chat. Defaults on so nothing changes for anyone who
+    # never touches the setting.
+    ("chat_members", "calls_enabled", "INTEGER NOT NULL DEFAULT 1"),
 ]
 
 

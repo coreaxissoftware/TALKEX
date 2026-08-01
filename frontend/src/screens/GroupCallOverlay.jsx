@@ -1,5 +1,6 @@
+import { useState } from "react";
 import { Av, G, I } from "../ui.jsx";
-import { CallButton, VideoTag } from "./CallOverlay.jsx";
+import { AudioOutputPicker, CallButton, MoreMenu, VideoTag, canPickAudioOutput } from "./CallOverlay.jsx";
 
 /**
  * The group-call counterpart to CallOverlay — same full-screen mount point,
@@ -11,7 +12,11 @@ import { CallButton, VideoTag } from "./CallOverlay.jsx";
  * machine would have made the simpler, already-shipped 1:1 path harder to
  * reason about for no real benefit.
  */
-export default function GroupCallOverlay({ call, onAccept, onDecline, onLeave, onToggleMute, onToggleCamera }) {
+export default function GroupCallOverlay({
+  call, onAccept, onDecline, onLeave, onToggleMute, onToggleCamera, onShareScreen,
+}) {
+  const [sinkId, setSinkId] = useState(undefined);
+
   if (!call) return null;
 
   return (
@@ -23,8 +28,9 @@ export default function GroupCallOverlay({ call, onAccept, onDecline, onLeave, o
     }}>
       {call.phase === "incoming"
         ? <IncomingGroupCall call={call} onAccept={onAccept} onDecline={onDecline}/>
-        : <ActiveGroupCall call={call} onLeave={onLeave}
-                           onToggleMute={onToggleMute} onToggleCamera={onToggleCamera}/>}
+        : <ActiveGroupCall call={call} onLeave={onLeave} onToggleMute={onToggleMute}
+                           onToggleCamera={onToggleCamera} onShareScreen={onShareScreen}
+                           sinkId={sinkId} onSinkId={setSinkId}/>}
     </div>
   );
 }
@@ -47,7 +53,9 @@ function IncomingGroupCall({ call, onAccept, onDecline }) {
   );
 }
 
-function ActiveGroupCall({ call, onLeave, onToggleMute, onToggleCamera }) {
+function ActiveGroupCall({ call, onLeave, onToggleMute, onToggleCamera, onShareScreen, sinkId, onSinkId }) {
+  const [showSpeakerPicker, setShowSpeakerPicker] = useState(false);
+  const [showMore, setShowMore] = useState(false);
   const others = Object.entries(call.participants);
   const tileCount = others.length + 1; // + yourself
   const columns = tileCount <= 2 ? 1 : 2;
@@ -60,12 +68,19 @@ function ActiveGroupCall({ call, onLeave, onToggleMute, onToggleCamera }) {
       }}>
         <SelfTile call={call}/>
         {others.map(([userId, participant]) => (
-          <ParticipantTile key={userId} participant={participant}
-                           showVideo={call.callKind === "video"}/>
+          <ParticipantTile key={userId} participant={participant} sinkId={sinkId}/>
         ))}
       </div>
 
-      <div style={{ display: "flex", justifyContent: "center", gap: 20, padding: "16px 24px 60px" }}>
+      {call.sharingScreen && (
+        <div style={{
+          alignSelf: "center", margin: "0 0 8px", padding: "5px 10px", borderRadius: 8,
+          background: "#ef444422", border: "1px solid #ef444455", color: "#ff8080",
+          fontSize: 12, fontWeight: 600, display: "flex", alignItems: "center", gap: 6,
+        }}>{I.screenShare("#ff8080", 13)} Sharing screen</div>
+      )}
+
+      <div style={{ display: "flex", justifyContent: "center", gap: 16, padding: "16px 20px 60px", flexWrap: "wrap" }}>
         <CallButton onClick={onToggleMute} background={call.muted ? "#fff" : "#ffffff26"}
                     icon={call.muted ? I.micOff("#0b1220", 20) : I.mic("#fff", 20)} label="Mute" small/>
         {call.callKind === "video" && (
@@ -73,8 +88,29 @@ function ActiveGroupCall({ call, onLeave, onToggleMute, onToggleCamera }) {
                       icon={call.cameraOff ? I.videoOff("#0b1220", 20) : I.video("#fff", 20)}
                       label="Camera" small/>
         )}
+        {canPickAudioOutput && (
+          <CallButton onClick={() => setShowSpeakerPicker(true)} background="#ffffff26"
+                      icon={I.volume("#fff", 20)} label="Speaker" small/>
+        )}
+        <CallButton onClick={() => setShowMore(true)} background="#ffffff26"
+                    icon={I.moreVertical("#fff", 20)} label="More" small/>
         <CallButton onClick={onLeave} background="#ef4444" icon={I.phoneOff("#fff", 24)} label="Leave"/>
       </div>
+
+      {showSpeakerPicker && (
+        <AudioOutputPicker current={sinkId} onSelect={onSinkId} onClose={() => setShowSpeakerPicker(false)}/>
+      )}
+      {showMore && (
+        <MoreMenu onClose={() => setShowMore(false)} items={[
+          {
+            label: call.sharingScreen ? "Stop sharing screen" : "Share screen",
+            sub: call.callKind !== "video" ? "Turn your camera on first" : undefined,
+            icon: I.screenShare("#fff", 18),
+            disabled: call.callKind !== "video",
+            onClick: onShareScreen,
+          },
+        ]}/>
+      )}
     </>
   );
 }
@@ -99,18 +135,20 @@ function SelfTile({ call }) {
   );
 }
 
-function ParticipantTile({ participant, showVideo }) {
-  const hasVideo = showVideo && participant.stream?.getVideoTracks().length > 0;
+function ParticipantTile({ participant, sinkId }) {
+  const hasVideo = participant.stream?.getVideoTracks().length > 0;
   return (
     <div style={{
       position: "relative", background: "#142235", borderRadius: 10,
       display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden",
     }}>
-      {hasVideo ? (
-        <VideoTag stream={participant.stream} style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
-      ) : (
-        <Av av={participant.avatar} color={participant.color} size={64}/>
-      )}
+      {/* Always mounted so this participant's audio plays even with no
+          video track (voice call, or their camera's off) — hidden rather
+          than unmounted, same reasoning as CallOverlay's remote VideoTag. */}
+      <VideoTag stream={participant.stream} sinkId={sinkId} style={hasVideo ? {
+        width: "100%", height: "100%", objectFit: "cover",
+      } : { display: "none" }}/>
+      {!hasVideo && <Av av={participant.avatar} color={participant.color} size={64}/>}
       <div style={{
         position: "absolute", bottom: 6, left: 8, fontSize: 11.5, color: "#ffffffcc",
         background: "#00000066", padding: "2px 8px", borderRadius: 8,

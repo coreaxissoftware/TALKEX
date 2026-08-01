@@ -229,6 +229,53 @@ export function useCall(events, send, toast) {
     setCall((c) => (c ? { ...c, cameraOff: nowOff } : c));
   }, []);
 
+  // Swaps the outgoing video track for a screen-capture track via
+  // RTCRtpSender.replaceTrack — no renegotiation needed because it's the
+  // SAME track kind on the SAME m-line the call started with. That's also
+  // exactly why this only works on a call that already has a video track:
+  // adding a video track to a voice call from scratch needs a fresh
+  // offer/answer round trip, which is real, separate work this doesn't do.
+  const shareScreen = useCallback(async () => {
+    const pc = pcRef.current;
+    const current = callRef.current;
+    if (!pc || !current?.localStream) return;
+    const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+    if (!sender) {
+      toastRef.current?.("Turn your camera on first to share your screen");
+      return;
+    }
+    let screenStream;
+    try {
+      screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+    } catch {
+      return; // the person cancelled the OS share picker — not an error
+    }
+    const screenTrack = screenStream.getVideoTracks()[0];
+    const cameraTrack = current.localStream.getVideoTracks()[0];
+    await sender.replaceTrack(screenTrack);
+    setCall((c) => (c ? { ...c, sharingScreen: true } : c));
+
+    // The browser's own "Stop sharing" control (not any button of ours) is
+    // how most people end a share — this is the only reliable way to hear
+    // about that and swap the camera back on.
+    screenTrack.onended = async () => {
+      if (cameraTrack && pcRef.current === pc) {
+        await sender.replaceTrack(cameraTrack).catch(() => {});
+      }
+      setCall((c) => (c ? { ...c, sharingScreen: false } : c));
+    };
+  }, []);
+
+  const stopSharingScreen = useCallback(() => {
+    const current = callRef.current;
+    const pc = pcRef.current;
+    if (!pc || !current?.localStream) return;
+    const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+    const cameraTrack = current.localStream.getVideoTracks()[0];
+    sender?.track?.stop(); // fires the screenTrack.onended handler above, which does the actual swap-back
+    if (!sender?.track && cameraTrack) sender?.replaceTrack(cameraTrack);
+  }, []);
+
   // ── Remote events ────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -296,7 +343,7 @@ export function useCall(events, send, toast) {
         teardown();
         setCall(null);
       } else if (event.type === "call_error") {
-        toastRef.current?.("Could not reach them");
+        toastRef.current?.(event.reason || "Could not reach them");
         teardown();
         setCall(null);
       }
@@ -306,5 +353,8 @@ export function useCall(events, send, toast) {
 
   useEffect(() => teardown, [teardown]);
 
-  return { call, startCall, acceptIncoming, rejectIncoming, endCall, toggleMute, toggleCamera };
+  return {
+    call, startCall, acceptIncoming, rejectIncoming, endCall, toggleMute, toggleCamera,
+    shareScreen, stopSharingScreen,
+  };
 }

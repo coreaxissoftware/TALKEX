@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Av, G, I } from "../ui.jsx";
 
 function mmss(totalSeconds) {
@@ -6,12 +6,103 @@ function mmss(totalSeconds) {
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-export function VideoTag({ stream, muted, style }) {
+export const canPickAudioOutput = typeof document !== "undefined"
+  && typeof document.createElement("video").setSinkId === "function";
+
+export function VideoTag({ stream, muted, style, sinkId }) {
   const ref = useRef(null);
   useEffect(() => {
     if (ref.current) ref.current.srcObject = stream || null;
   }, [stream]);
+  // Chrome/Edge only (no Safari/Firefox) — canPickAudioOutput gates whether
+  // the picker that supplies this even shows up, so elsewhere sinkId is
+  // just always undefined and this is a no-op.
+  useEffect(() => {
+    if (ref.current && sinkId && typeof ref.current.setSinkId === "function") {
+      ref.current.setSinkId(sinkId).catch(() => {});
+    }
+  }, [sinkId]);
   return <video ref={ref} autoPlay playsInline muted={muted} style={style}/>;
+}
+
+/**
+ * A popup listing whatever audio-output devices the browser can enumerate —
+ * speaker, wired headphones, a connected Bluetooth headset all show up here
+ * as ordinary entries with whatever label the OS gives them. There is no way
+ * for a web app to single out "Bluetooth" specifically (device switching
+ * itself is the OS's job); this is the generic picker every device funnels
+ * through, Bluetooth included when it's actually connected.
+ */
+export function AudioOutputPicker({ current, onSelect, onClose }) {
+  const [devices, setDevices] = useState([]);
+
+  useEffect(() => {
+    navigator.mediaDevices.enumerateDevices()
+      .then((all) => setDevices(all.filter((d) => d.kind === "audiooutput")))
+      .catch(() => setDevices([]));
+  }, []);
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, zIndex: 1100, background: "#000000aa",
+      display: "flex", alignItems: "flex-end", justifyContent: "center",
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: "100%", maxWidth: 430, background: "#182234", borderTopLeftRadius: 20,
+        borderTopRightRadius: 20, padding: "18px 8px 28px", color: "#fff",
+      }}>
+        <div style={{ fontSize: 14, fontWeight: 600, padding: "0 14px 10px" }}>Audio output</div>
+        {devices.length === 0 && (
+          <div style={{ padding: "10px 14px", fontSize: 13, color: "#ffffff88" }}>
+            No other output devices found.
+          </div>
+        )}
+        {devices.map((d) => (
+          <div key={d.deviceId} onClick={() => { onSelect(d.deviceId); onClose(); }} style={{
+            display: "flex", alignItems: "center", gap: 12, padding: "12px 14px",
+            borderRadius: 10, cursor: "pointer",
+            background: current === d.deviceId ? "#ffffff1a" : "transparent",
+          }}>
+            {I.volume(current === d.deviceId ? G.accent : "#ffffffaa", 18)}
+            <span style={{ fontSize: 14, flex: 1 }}>{d.label || "Audio device"}</span>
+            {current === d.deviceId && I.check(G.accent, 16)}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** The overflow "…" menu — currently just Share screen, a real spot to grow
+ * (add people, merge calls, host controls) once those exist. */
+export function MoreMenu({ items, onClose }) {
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, zIndex: 1100, background: "#000000aa",
+      display: "flex", alignItems: "flex-end", justifyContent: "center",
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: "100%", maxWidth: 430, background: "#182234", borderTopLeftRadius: 20,
+        borderTopRightRadius: 20, padding: "8px 8px 28px", color: "#fff",
+      }}>
+        {items.map((item) => (
+          <div key={item.label}
+               onClick={() => { if (!item.disabled) { item.onClick(); onClose(); } }}
+               style={{
+                 display: "flex", alignItems: "center", gap: 14, padding: "13px 14px",
+                 borderRadius: 10, cursor: item.disabled ? "default" : "pointer",
+                 opacity: item.disabled ? 0.4 : 1,
+               }}>
+            {item.icon}
+            <div>
+              <div style={{ fontSize: 14 }}>{item.label}</div>
+              {item.sub && <div style={{ fontSize: 12, color: "#ffffff88", marginTop: 2 }}>{item.sub}</div>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -19,7 +110,11 @@ export function VideoTag({ stream, muted, style }) {
  * shows up no matter which tab or chat is currently open — a call is not a
  * property of the chat screen, it can interrupt anything.
  */
-export default function CallOverlay({ call, onAccept, onReject, onEnd, onToggleMute, onToggleCamera }) {
+export default function CallOverlay({
+  call, onAccept, onReject, onEnd, onToggleMute, onToggleCamera, onShareScreen,
+}) {
+  const [sinkId, setSinkId] = useState(undefined);
+
   if (!call) return null;
 
   return (
@@ -32,7 +127,8 @@ export default function CallOverlay({ call, onAccept, onReject, onEnd, onToggleM
       {call.phase === "incoming" && <IncomingCall call={call} onAccept={onAccept} onReject={onReject}/>}
       {call.phase === "outgoing" && <OutgoingCall call={call} onEnd={onEnd}/>}
       {call.phase === "active" && (
-        <ActiveCall call={call} onEnd={onEnd} onToggleMute={onToggleMute} onToggleCamera={onToggleCamera}/>
+        <ActiveCall call={call} onEnd={onEnd} onToggleMute={onToggleMute} onToggleCamera={onToggleCamera}
+                    onShareScreen={onShareScreen} sinkId={sinkId} onSinkId={setSinkId}/>
       )}
     </div>
   );
@@ -92,20 +188,25 @@ function OutgoingCall({ call, onEnd }) {
   );
 }
 
-function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera }) {
-  const isVideo = call.callKind === "video" && !call.cameraOff;
-  const hasRemoteVideo = isVideo && call.remoteStream?.getVideoTracks().length > 0;
+function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onShareScreen, sinkId, onSinkId }) {
+  const [showSpeakerPicker, setShowSpeakerPicker] = useState(false);
+  const [showMore, setShowMore] = useState(false);
+  // The remote peer's OWN video state, not mine — turning my camera off
+  // must not also blank out video they're still sending.
+  const hasRemoteVideo = call.remoteStream?.getVideoTracks().length > 0;
 
   return (
     <>
       <div style={{ flex: 1, position: "relative" }}>
-        {hasRemoteVideo ? (
-          <VideoTag stream={call.remoteStream} style={{
-            width: "100%", height: "100%", objectFit: "cover",
-          }}/>
-        ) : (
-          <PeerIdentity call={call} subtitle={mmss(call.duration)}/>
-        )}
+        {/* Always mounted, regardless of whether there's a video track, so
+            remote audio actually plays on a voice-only call — hidden
+            visually rather than left unmounted when there's nothing to
+            show. This is also the element setSinkId() routes through. */}
+        <VideoTag stream={call.remoteStream} sinkId={sinkId} style={hasRemoteVideo ? {
+          width: "100%", height: "100%", objectFit: "cover",
+        } : { display: "none" }}/>
+
+        {!hasRemoteVideo && <PeerIdentity call={call} subtitle={mmss(call.duration)}/>}
 
         {hasRemoteVideo && (
           <div style={{
@@ -123,9 +224,17 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera }) {
             border: "2px solid #ffffff33",
           }}/>
         )}
+
+        {call.sharingScreen && (
+          <div style={{
+            position: "absolute", top: 16, left: 16, padding: "5px 10px", borderRadius: 8,
+            background: "#ef444422", border: "1px solid #ef444455", color: "#ff8080",
+            fontSize: 12, fontWeight: 600, display: "flex", alignItems: "center", gap: 6,
+          }}>{I.screenShare("#ff8080", 13)} Sharing screen</div>
+        )}
       </div>
 
-      <div style={{ display: "flex", justifyContent: "center", gap: 20, padding: "0 24px 60px" }}>
+      <div style={{ display: "flex", justifyContent: "center", gap: 16, padding: "0 20px 60px", flexWrap: "wrap" }}>
         <CallButton onClick={onToggleMute} background={call.muted ? "#fff" : "#ffffff26"}
                     icon={call.muted ? I.micOff("#0b1220", 20) : I.mic("#fff", 20)} label="Mute" small/>
         {call.callKind === "video" && (
@@ -133,8 +242,29 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera }) {
                       icon={call.cameraOff ? I.videoOff("#0b1220", 20) : I.video("#fff", 20)}
                       label="Camera" small/>
         )}
+        {canPickAudioOutput && (
+          <CallButton onClick={() => setShowSpeakerPicker(true)} background="#ffffff26"
+                      icon={I.volume("#fff", 20)} label="Speaker" small/>
+        )}
+        <CallButton onClick={() => setShowMore(true)} background="#ffffff26"
+                    icon={I.moreVertical("#fff", 20)} label="More" small/>
         <CallButton onClick={onEnd} background="#ef4444" icon={I.phoneOff("#fff", 24)} label="End"/>
       </div>
+
+      {showSpeakerPicker && (
+        <AudioOutputPicker current={sinkId} onSelect={onSinkId} onClose={() => setShowSpeakerPicker(false)}/>
+      )}
+      {showMore && (
+        <MoreMenu onClose={() => setShowMore(false)} items={[
+          {
+            label: call.sharingScreen ? "Stop sharing screen" : "Share screen",
+            sub: call.callKind !== "video" ? "Turn your camera on first" : undefined,
+            icon: I.screenShare("#fff", 18),
+            disabled: call.callKind !== "video",
+            onClick: onShareScreen,
+          },
+        ]}/>
+      )}
     </>
   );
 }
