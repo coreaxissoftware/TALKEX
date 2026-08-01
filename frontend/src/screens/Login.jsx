@@ -251,37 +251,61 @@ function PhoneAuth({ onAuthenticated }) {
     const validLength = phone.length === country.len;
     return (
       <>
-        <label style={{ display: "block", marginBottom: 12 }}>
-          <div style={{ fontSize: 12, color: G.sub, marginBottom: 6 }}>Phone number</div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <select value={country.iso}
-                    onChange={(event) => {
-                      setCountry(COUNTRY_CODES.find((c) => c.iso === event.target.value));
-                      setPhone("");
-                    }}
-                    style={{
-                      padding: "12px 8px", borderRadius: 12, background: G.dim,
-                      border: `1px solid ${G.border}`, color: G.text, fontSize: 15,
-                      outline: "none", flexShrink: 0,
-                    }}>
-              {COUNTRY_CODES.map((c) => (
-                <option key={c.iso} value={c.iso}>{flagFor(c.iso)} {c.dial}</option>
-              ))}
-            </select>
-            <input value={phone} onChange={onPhoneChange} inputMode="tel"
-                   placeholder={"98765" + "4".repeat(Math.max(country.len - 5, 0))}
-                   onKeyDown={(event) => event.key === "Enter" && validLength && requestCode()}
-                   style={{
-                     flex: 1, width: "100%", padding: "12px 14px", borderRadius: 12,
-                     background: G.dim, border: `1px solid ${G.border}`, color: G.text,
-                     fontSize: 15, outline: "none", boxSizing: "border-box",
-                   }}/>
+        <div style={{ fontSize: 19, fontWeight: 700, marginBottom: 4 }}>Enter phone number</div>
+        <div style={{ fontSize: 13, color: G.sub, marginBottom: 20 }}>
+          Select a country and enter your phone number.
+        </div>
+
+        {/* A styled row showing flag + country name + chevron, with the real
+            <select> transparent and stretched over it — native picker
+            behavior (keyboard, search-by-letter, mobile wheel) with a look
+            that isn't a cramped little dropdown box. */}
+        <div style={{ position: "relative", marginBottom: 10 }}>
+          <div style={{
+            display: "flex", alignItems: "center", gap: 10, padding: "13px 16px",
+            borderRadius: 14, background: G.dim, border: `1px solid ${G.border}`,
+          }}>
+            <span style={{ fontSize: 20 }}>{flagFor(country.iso)}</span>
+            <span style={{ flex: 1, fontSize: 15, fontWeight: 500 }}>{country.name}</span>
+            <span style={{ color: G.muted, fontSize: 12 }}>▾</span>
           </div>
-        </label>
+          <select value={country.iso} aria-label="Country"
+                  onChange={(event) => {
+                    setCountry(COUNTRY_CODES.find((c) => c.iso === event.target.value));
+                    setPhone("");
+                  }}
+                  style={{
+                    position: "absolute", inset: 0, width: "100%", height: "100%",
+                    opacity: 0, cursor: "pointer", fontSize: 16,
+                  }}>
+            {COUNTRY_CODES.map((c) => (
+              <option key={c.iso} value={c.iso}>{c.name} ({c.dial})</option>
+            ))}
+          </select>
+        </div>
+
+        <div style={{
+          display: "flex", alignItems: "center", borderRadius: 14, background: G.dim,
+          border: `1px solid ${G.border}`, marginBottom: 20, overflow: "hidden",
+        }}>
+          <div style={{
+            padding: "13px 14px", fontSize: 15, fontWeight: 600, color: G.sub,
+            borderRight: `1px solid ${G.border}`,
+          }}>{country.dial}</div>
+          <input value={phone} onChange={onPhoneChange} inputMode="tel" autoFocus
+                 placeholder={"98765" + "4".repeat(Math.max(country.len - 5, 0))}
+                 onKeyDown={(event) => event.key === "Enter" && validLength && requestCode()}
+                 style={{
+                   flex: 1, width: "100%", padding: "13px 14px", border: "none",
+                   background: "transparent", color: G.text, fontSize: 15.5,
+                   outline: "none", boxSizing: "border-box", letterSpacing: 0.3,
+                 }}/>
+        </div>
+
         {error && <ErrorBox>{error}</ErrorBox>}
         <Button onClick={requestCode} disabled={busy || !validLength}
-                style={{ width: "100%", padding: 14 }}>
-          {busy ? "Sending…" : "Send code"}
+                style={{ width: "100%", padding: 15, borderRadius: 999, fontSize: 15 }}>
+          {busy ? "Sending…" : "Next"}
         </Button>
       </>
     );
