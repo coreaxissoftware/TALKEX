@@ -7,7 +7,7 @@ import { useRealtime } from "./useRealtime.js";
 import { useCall } from "./useCall.js";
 import { useGroupCall } from "./useGroupCall.js";
 import {
-  Button, Field, G, I, Screen, Spinner, useIsDesktop,
+  Button, Field, G, I, ParticleNetwork, Screen, Spinner, useIsDesktop,
   applyTheme, getStoredAccent, getStoredTheme, saveAccent, saveTheme,
 } from "./ui.jsx";
 import { getAppLockTimeout, isAppLockEnabled, verifyAppLockPin } from "./appLock.js";
@@ -927,14 +927,20 @@ function DesktopRail({ tab, onChange, unread, plannerCount, missedCalls, onNewCh
 /** The right-hand panel's resting state — no chat open yet, same idea as WhatsApp Web's placeholder. */
 function EmptyChatPanel() {
   return (
-    <div style={{
-      height: "100%", display: "flex", flexDirection: "column",
-      alignItems: "center", justifyContent: "center", color: G.muted, textAlign: "center", padding: 40,
-    }}>
-      <img src="/icon.png" alt="TalkEx" style={{ width: 88, height: 88, borderRadius: 24, marginBottom: 20, opacity: 0.9 }}/>
-      <div style={{ fontSize: 20, fontWeight: 700, color: G.text }}>TalkEx</div>
-      <div style={{ fontSize: 13.5, marginTop: 8, maxWidth: 320 }}>Chat • Meetings • Business • Automation</div>
-      <div style={{ fontSize: 13, marginTop: 16, maxWidth: 320 }}>Select a chat from the list to start messaging.</div>
+    <div style={{ position: "relative", height: "100%", overflow: "hidden" }}>
+      <ParticleNetwork fixed={false}/>
+      <div style={{
+        position: "relative", zIndex: 1, height: "100%", display: "flex", flexDirection: "column",
+        alignItems: "center", justifyContent: "center", color: "#a9c2e0", textAlign: "center", padding: 40,
+      }}>
+        <img src="/icon.png" alt="TalkEx" style={{
+          width: 88, height: 88, borderRadius: 24, marginBottom: 20,
+          boxShadow: `0 12px 30px ${G.accentGlow}, 0 0 0 4px #ffffff14`,
+        }}/>
+        <div style={{ fontSize: 20, fontWeight: 700, color: "#fff" }}>TalkEx</div>
+        <div style={{ fontSize: 13.5, marginTop: 8, maxWidth: 320 }}>Chat • Meetings • Business • Automation</div>
+        <div style={{ fontSize: 13, marginTop: 16, maxWidth: 320 }}>Select a chat from the list to start messaging.</div>
+      </div>
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Uploads } from "./api.js";
 
 // Below this width the app is the single-column, phone-shaped layout it was
@@ -26,6 +26,134 @@ export function useIsDesktop() {
     };
   }, []);
   return isDesktop;
+}
+
+/**
+ * A canvas particle network: dots drifting on their own physics, thin lines
+ * connecting nearby ones, and — beyond what most of these effects do — the
+ * dots gently give way as the cursor passes near them, with a warm line
+ * drawn from each nearby dot to the cursor itself. Canvas rather than CSS
+ * because "draw a line between every pair of points currently within N
+ * pixels of each other, every frame" is a per-frame numeric computation,
+ * not something keyframes can express.
+ *
+ * `fixed` (default true) covers the whole viewport, for a full-page backdrop
+ * (Login). Pass `fixed={false}` to instead fill whatever positioned parent
+ * it's dropped into (e.g. the desktop empty-chat panel) — the parent needs
+ * `position: relative` (or similar) of its own for that to work.
+ */
+export function ParticleNetwork({ fixed = true }) {
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    let width = 0, height = 0, particles = [], animationId;
+    const mouse = { x: null, y: null };
+    const LINK_DIST = 130;
+    const MOUSE_DIST = 160;
+
+    function makeParticles() {
+      // Density-scaled, capped so a huge desktop window doesn't tank frame rate.
+      const count = Math.min(110, Math.max(35, Math.floor((width * height) / 13000)));
+      particles = Array.from({ length: count }, () => ({
+        x: Math.random() * width,
+        y: Math.random() * height,
+        vx: (Math.random() - 0.5) * 0.35,
+        vy: (Math.random() - 0.5) * 0.35,
+        r: Math.random() * 1.6 + 1.1,
+        warm: Math.random() < 0.16,
+      }));
+    }
+
+    function onResize() {
+      width = canvas.width = canvas.offsetWidth;
+      height = canvas.height = canvas.offsetHeight;
+      makeParticles();
+    }
+
+    function onMouseMove(event) {
+      const rect = canvas.getBoundingClientRect();
+      mouse.x = event.clientX - rect.left;
+      mouse.y = event.clientY - rect.top;
+    }
+    function onMouseLeave() { mouse.x = null; mouse.y = null; }
+
+    function step() {
+      ctx.clearRect(0, 0, width, height);
+
+      for (const p of particles) {
+        p.x += p.vx;
+        p.y += p.vy;
+        if (p.x < 0 || p.x > width) p.vx *= -1;
+        if (p.y < 0 || p.y > height) p.vy *= -1;
+        if (mouse.x != null) {
+          const dx = p.x - mouse.x, dy = p.y - mouse.y;
+          const dist = Math.hypot(dx, dy) || 1;
+          if (dist < 85) {
+            p.x += (dx / dist) * 0.7;
+            p.y += (dy / dist) * 0.7;
+          }
+        }
+      }
+
+      for (let i = 0; i < particles.length; i++) {
+        for (let j = i + 1; j < particles.length; j++) {
+          const a = particles[i], b = particles[j];
+          const dist = Math.hypot(a.x - b.x, a.y - b.y);
+          if (dist < LINK_DIST) {
+            ctx.strokeStyle = `rgba(148,197,255,${(1 - dist / LINK_DIST) * 0.35})`;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+          }
+        }
+        if (mouse.x != null) {
+          const dist = Math.hypot(particles[i].x - mouse.x, particles[i].y - mouse.y);
+          if (dist < MOUSE_DIST) {
+            ctx.strokeStyle = `rgba(245,165,36,${(1 - dist / MOUSE_DIST) * 0.55})`;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(particles[i].x, particles[i].y);
+            ctx.lineTo(mouse.x, mouse.y);
+            ctx.stroke();
+          }
+        }
+      }
+
+      for (const p of particles) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fillStyle = p.warm ? "#f5a524" : "#7dd3fc";
+        ctx.fill();
+      }
+
+      animationId = requestAnimationFrame(step);
+    }
+
+    onResize();
+    step();
+    window.addEventListener("resize", onResize);
+    canvas.addEventListener("mousemove", onMouseMove);
+    canvas.addEventListener("mouseleave", onMouseLeave);
+    return () => {
+      cancelAnimationFrame(animationId);
+      window.removeEventListener("resize", onResize);
+      canvas.removeEventListener("mousemove", onMouseMove);
+      canvas.removeEventListener("mouseleave", onMouseLeave);
+    };
+  }, []);
+
+  return (
+    <div aria-hidden style={{
+      position: fixed ? "fixed" : "absolute", inset: 0, zIndex: 0, overflow: "hidden",
+      background: "linear-gradient(135deg, #0b1c33, #14294a 55%, #0b1c33)",
+    }}>
+      <canvas ref={canvasRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}/>
+    </div>
+  );
 }
 
 // Design system: palette, icons and the small shared components.
