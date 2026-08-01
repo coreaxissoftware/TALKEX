@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Chats, Contacts, Users } from "../api.js";
 import { Av, Button, Field, G, I, Spinner } from "../ui.jsx";
+import { COUNTRY_CODES, flagFor } from "../countryCodes.js";
 
 /**
  * Find people, channels and communities.
@@ -268,14 +269,22 @@ export default function Discover({ onOpenChat, onChanged, toast }) {
 
 function AddContactSheet({ onClose, onAdded, toast }) {
   const [name, setName] = useState("");
+  const [country, setCountry] = useState(COUNTRY_CODES[0]);
   const [phone, setPhone] = useState("");
   const [busy, setBusy] = useState(false);
 
+  const fullPhone = country.dial + phone;
+  const validLength = phone.length === country.len;
+
+  function onPhoneChange(event) {
+    setPhone(event.target.value.replace(/\D/g, "").slice(0, country.len));
+  }
+
   async function save() {
-    if (!name.trim() || !phone.trim()) return;
+    if (!name.trim() || !validLength) return;
     setBusy(true);
     try {
-      await Contacts.add(name.trim(), phone.trim());
+      await Contacts.add(name.trim(), fullPhone);
       toast("Contact added");
       onAdded();
     } catch (problem) {
@@ -297,9 +306,33 @@ function AddContactSheet({ onClose, onAdded, toast }) {
         <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 14 }}>New contact</div>
         <Field label="Name" value={name} onChange={(event) => setName(event.target.value)}
                placeholder="Rahul Sharma"/>
-        <Field label="Phone number" value={phone} onChange={(event) => setPhone(event.target.value)}
-               placeholder="+91 98765 43210"/>
-        <Button onClick={save} disabled={busy || !name.trim() || !phone.trim()}
+        <label style={{ display: "block", marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: G.sub, marginBottom: 6 }}>Phone number</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <select value={country.iso}
+                    onChange={(event) => {
+                      setCountry(COUNTRY_CODES.find((c) => c.iso === event.target.value));
+                      setPhone("");
+                    }}
+                    style={{
+                      padding: "12px 8px", borderRadius: 12, background: G.dim,
+                      border: `1px solid ${G.border}`, color: G.text, fontSize: 15,
+                      outline: "none", flexShrink: 0,
+                    }}>
+              {COUNTRY_CODES.map((c) => (
+                <option key={c.iso} value={c.iso}>{flagFor(c.iso)} {c.dial}</option>
+              ))}
+            </select>
+            <input value={phone} onChange={onPhoneChange} inputMode="tel"
+                   placeholder={"98765" + "4".repeat(Math.max(country.len - 5, 0))}
+                   style={{
+                     flex: 1, width: "100%", padding: "12px 14px", borderRadius: 12,
+                     background: G.dim, border: `1px solid ${G.border}`, color: G.text,
+                     fontSize: 15, outline: "none", boxSizing: "border-box",
+                   }}/>
+          </div>
+        </label>
+        <Button onClick={save} disabled={busy || !name.trim() || !validLength}
                 style={{ width: "100%" }}>
           {busy ? "Saving…" : "Save contact"}
         </Button>

@@ -13,6 +13,7 @@ import { canvasToPdfBlob } from "../imageToPdf.js";
 import { STICKERS, STICKERS_BY_ID } from "../stickers.jsx";
 import { shouldAutoDownload } from "../mediaPrefs.js";
 import CameraCapture from "../CameraCapture.jsx";
+import { COUNTRY_CODES, flagFor, splitPhone } from "../countryCodes.js";
 
 const SLOW_MODE_CHOICES = [
   { label: "Off", seconds: 0 },
@@ -2747,6 +2748,9 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
   const [contact, setContact] = useState(null);
   const [editingContact, setEditingContact] = useState(false);
   const [contactForm, setContactForm] = useState({ name: "", phone: "" });
+  const [contactCountry, setContactCountry] = useState(COUNTRY_CODES[0]);
+  const contactFullPhone = contactCountry.dial + contactForm.phone;
+  const contactPhoneValid = contactForm.phone.length === contactCountry.len;
 
   useEffect(() => {
     if (!isDm || !chat.peer_id) return;
@@ -2757,21 +2761,22 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
   }, [isDm, chat.peer_id]);
 
   function startEditContact() {
-    setContactForm(contact
-      ? { name: contact.name, phone: contact.phone }
-      : { name: peerProfile?.name || chat.name || "", phone: peerProfile?.phone || "" });
+    const existingPhone = contact ? contact.phone : (peerProfile?.phone || "");
+    const { country, local } = splitPhone(existingPhone);
+    setContactCountry(country);
+    setContactForm({ name: contact ? contact.name : (peerProfile?.name || chat.name || ""), phone: local });
     setEditingContact(true);
   }
 
   async function saveContact() {
-    if (!contactForm.name.trim() || !contactForm.phone.trim()) {
-      toast("Name and phone are required");
+    if (!contactForm.name.trim() || !contactPhoneValid) {
+      toast("Name and a valid phone number are required");
       return;
     }
     try {
       const saved = contact
-        ? await Contacts.update(contact.id, contactForm.name.trim(), contactForm.phone.trim())
-        : await Contacts.add(contactForm.name.trim(), contactForm.phone.trim());
+        ? await Contacts.update(contact.id, contactForm.name.trim(), contactFullPhone)
+        : await Contacts.add(contactForm.name.trim(), contactFullPhone);
       setContact(saved);
       setEditingContact(false);
       toast(contact ? "Contact updated" : "Contact added");
@@ -2901,10 +2906,40 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
           <div style={{ marginBottom: 8 }}>
             <Field label="Name" value={contactForm.name}
                    onChange={(event) => setContactForm({ ...contactForm, name: event.target.value })}/>
-            <Field label="Phone" value={contactForm.phone}
-                   onChange={(event) => setContactForm({ ...contactForm, phone: event.target.value })}/>
+            <label style={{ display: "block", marginBottom: 12 }}>
+              <div style={{ fontSize: 12, color: G.sub, marginBottom: 6 }}>Phone</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <select value={contactCountry.iso}
+                        onChange={(event) => {
+                          setContactCountry(COUNTRY_CODES.find((c) => c.iso === event.target.value));
+                          setContactForm({ ...contactForm, phone: "" });
+                        }}
+                        style={{
+                          padding: "12px 8px", borderRadius: 12, background: G.dim,
+                          border: `1px solid ${G.border}`, color: G.text, fontSize: 15,
+                          outline: "none", flexShrink: 0,
+                        }}>
+                  {COUNTRY_CODES.map((c) => (
+                    <option key={c.iso} value={c.iso}>{flagFor(c.iso)} {c.dial}</option>
+                  ))}
+                </select>
+                <input value={contactForm.phone} inputMode="tel"
+                       onChange={(event) => setContactForm({
+                         ...contactForm,
+                         phone: event.target.value.replace(/\D/g, "").slice(0, contactCountry.len),
+                       })}
+                       placeholder={"98765" + "4".repeat(Math.max(contactCountry.len - 5, 0))}
+                       style={{
+                         flex: 1, width: "100%", padding: "12px 14px", borderRadius: 12,
+                         background: G.dim, border: `1px solid ${G.border}`, color: G.text,
+                         fontSize: 15, outline: "none", boxSizing: "border-box",
+                       }}/>
+              </div>
+            </label>
             <div style={{ display: "flex", gap: 10 }}>
-              <Button onClick={saveContact} style={{ flex: 1 }}>Save</Button>
+              <Button onClick={saveContact}
+                      disabled={!contactForm.name.trim() || !contactPhoneValid}
+                      style={{ flex: 1 }}>Save</Button>
               <Button variant="ghost" onClick={() => setEditingContact(false)} style={{ flex: 1 }}>
                 Cancel
               </Button>

@@ -9,6 +9,7 @@ import { getAutoDownload, setAutoDownload } from "../mediaPrefs.js";
 import { disableAppLock, isAppLockEnabled, setAppLockPin } from "../appLock.js";
 import QrScanner from "../QrScanner.jsx";
 import Login from "./Login.jsx";
+import { COUNTRY_CODES, flagFor, splitPhone } from "../countryCodes.js";
 
 /**
  * Profile and privacy.
@@ -771,15 +772,23 @@ function ConfirmSheet({ title, body, confirmLabel, onConfirm, onClose, typeToCon
  */
 function ChangePhoneSheet({ currentPhone, onClose, onChanged, toast }) {
   const [step, setStep] = useState("phone"); // phone | code
+  const [country, setCountry] = useState(() => splitPhone(currentPhone).country);
   const [phone, setPhone] = useState("");
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
 
+  const fullPhone = country.dial + phone;
+  const validLength = phone.length === country.len;
+
+  function onPhoneChange(event) {
+    setPhone(event.target.value.replace(/\D/g, "").slice(0, country.len));
+  }
+
   async function requestCode() {
-    if (!phone.trim()) return;
+    if (!validLength) return;
     setBusy(true);
     try {
-      await Me.requestPhoneChangeOtp(phone.trim());
+      await Me.requestPhoneChangeOtp(fullPhone);
       setStep("code");
     } catch (problem) {
       toast(problem.message || "Could not send a code");
@@ -792,7 +801,7 @@ function ChangePhoneSheet({ currentPhone, onClose, onChanged, toast }) {
     if (!code.trim()) return;
     setBusy(true);
     try {
-      const updated = await Me.confirmPhoneChange(phone.trim(), code.trim());
+      const updated = await Me.confirmPhoneChange(fullPhone, code.trim());
       toast("Phone number updated");
       onChanged(updated);
     } catch (problem) {
@@ -820,18 +829,41 @@ function ChangePhoneSheet({ currentPhone, onClose, onChanged, toast }) {
                 Current number: {currentPhone}
               </div>
             )}
-            <Field label="New phone number" value={phone}
-                   onChange={(event) => setPhone(event.target.value)}
-                   placeholder="+91 98765 43210" inputMode="tel"
-                   onKeyDown={(event) => event.key === "Enter" && requestCode()}/>
-            <Button onClick={requestCode} disabled={busy || !phone.trim()} style={{ width: "100%" }}>
+            <label style={{ display: "block", marginBottom: 12 }}>
+              <div style={{ fontSize: 12, color: G.sub, marginBottom: 6 }}>New phone number</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <select value={country.iso}
+                        onChange={(event) => {
+                          setCountry(COUNTRY_CODES.find((c) => c.iso === event.target.value));
+                          setPhone("");
+                        }}
+                        style={{
+                          padding: "12px 8px", borderRadius: 12, background: G.dim,
+                          border: `1px solid ${G.border}`, color: G.text, fontSize: 15,
+                          outline: "none", flexShrink: 0,
+                        }}>
+                  {COUNTRY_CODES.map((c) => (
+                    <option key={c.iso} value={c.iso}>{flagFor(c.iso)} {c.dial}</option>
+                  ))}
+                </select>
+                <input value={phone} onChange={onPhoneChange} inputMode="tel"
+                       placeholder={"98765" + "4".repeat(Math.max(country.len - 5, 0))}
+                       onKeyDown={(event) => event.key === "Enter" && validLength && requestCode()}
+                       style={{
+                         flex: 1, width: "100%", padding: "12px 14px", borderRadius: 12,
+                         background: G.dim, border: `1px solid ${G.border}`, color: G.text,
+                         fontSize: 15, outline: "none", boxSizing: "border-box",
+                       }}/>
+              </div>
+            </label>
+            <Button onClick={requestCode} disabled={busy || !validLength} style={{ width: "100%" }}>
               {busy ? "Sending…" : "Send code"}
             </Button>
           </>
         ) : (
           <>
             <div style={{ fontSize: 12.5, color: G.muted, marginBottom: 14 }}>
-              We sent a code to {phone}.
+              We sent a code to {fullPhone}.
             </div>
             <Field label="Code" value={code} inputMode="numeric"
                    onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 8))}
