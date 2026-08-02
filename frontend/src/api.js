@@ -235,6 +235,10 @@ export const Me = {
 
   storage: () => get("/me/storage"),
 
+  // Who gets to see status updates you post from now on.
+  storyAudience: () => get("/me/story-audience"),
+  setStoryAudience: (mode, userIds) => put("/me/story-audience", { mode, user_ids: userIds }),
+
   // Profile photo — one call sets it, unlike a chat attachment there's no
   // separate upload-then-attach step.
   async setAvatar(file) {
@@ -260,6 +264,13 @@ export const Users = {
   block: (userId) => post(`/users/${userId}/block`),
   unblock: (userId) => remove(`/users/${userId}/block`),
   blocked: () => get("/blocks"),
+};
+
+// A one-way flag for whoever moderates the platform — the target is never
+// told, and nothing here takes any action on its own.
+export const Report = {
+  submit: (targetType, targetId, reason, details = "") =>
+    post("/report", { target_type: targetType, target_id: targetId, reason, details }),
 };
 
 // ── Contacts ─────────────────────────────────────────────────────────────────
@@ -319,6 +330,8 @@ export const Chats = {
   // the code outright — the old link stops working the moment a new one is
   // generated, not just when someone remembers to revoke it.
   createInvite: (chatId) => post(`/chats/${chatId}/invite`),
+  createBreakoutRooms: (chatId, assignments) => post(`/chats/${chatId}/breakout-rooms`, { assignments }),
+  closeBreakoutRooms: (chatId) => post(`/chats/${chatId}/breakout-rooms/close`),
   revokeInvite: (chatId) => remove(`/chats/${chatId}/invite`),
   previewInvite: (code) => get(`/invite/${code}`),
   joinViaInvite: (code) => post(`/invite/${code}/join`),
@@ -724,11 +737,12 @@ export const Calls = {
 
 export const Meetings = {
   create: ({ chatId, title, agenda = "", startsAt, durationMin = 30,
-             joinUrl = "", reminderMin = 10, inviteUserIds = [] }) =>
+             joinUrl = "", reminderMin = 10, inviteUserIds = [], waitingRoom = false, password = "" }) =>
     post("/meetings", {
       chat_id: chatId, title, agenda, starts_at: startsAt,
       duration_min: durationMin, join_url: joinUrl,
       reminder_min: reminderMin, invite_user_ids: inviteUserIds,
+      waiting_room: waitingRoom, password,
     }),
 
   mine: (upcomingOnly = true) => get(`/meetings?upcoming_only=${upcomingOnly}`),
@@ -737,6 +751,13 @@ export const Meetings = {
   update: (meetingId, changes) => patch(`/meetings/${meetingId}`, changes),
   cancel: (meetingId) => remove(`/meetings/${meetingId}`),
   rsvp: (meetingId, response) => post(`/meetings/${meetingId}/rsvp`, { response }),
+
+  // No scheduling step — live immediately, in-app join only (no join_url).
+  startInstant: (chatId, title, waitingRoom = false, password = "") =>
+    post("/meetings/instant", { chat_id: chatId, title, waiting_room: waitingRoom, password }),
+  // Whoever taps Join first moves a scheduled meeting to 'live' for everyone.
+  start: (meetingId) => post(`/meetings/${meetingId}/start`),
+  end: (meetingId) => post(`/meetings/${meetingId}/end`),
 
   // The .ics endpoint returns a calendar file, not JSON, so this can't go
   // through the get() helper — fetched directly and handed to the browser

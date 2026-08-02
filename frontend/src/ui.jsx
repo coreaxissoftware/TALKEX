@@ -620,6 +620,7 @@ export const I = {
   moreVertical: (c = "#fff", s = 22) => <svg width={s} height={s} viewBox="0 0 24 24" fill={c} stroke="none"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>,
   screenShare: (c = G.sub, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/><path d="M9 11l3-3 3 3"/><line x1="12" y1="8" x2="12" y2="14"/></svg>,
   newChatBox: (c = "#fff", s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 4H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h1v3l3.5-3H18a2 2 0 0 0 2-2v-4"/><line x1="17" y1="3" x2="17" y2="9"/><line x1="14" y1="6" x2="20" y2="6"/></svg>,
+  eraser: (c = "#fff", s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 20H8.5L3 14.5a2 2 0 0 1 0-2.83l7.5-7.5a2 2 0 0 1 2.83 0L20 10.83a2 2 0 0 1 0 2.83L14 20"/><path d="M8.5 14.5 15 8"/></svg>,
 
   // Settings-row and chat-info icons — added to replace raw emoji, which
   // render inconsistently across platforms/fonts and read as placeholder

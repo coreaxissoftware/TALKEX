@@ -109,6 +109,21 @@ class UpdateProfileRequest(BaseModel):
     calling_enabled: Optional[bool] = None
 
 
+class StoryAudienceRequest(BaseModel):
+    """Who gets to see status updates you post from now on. 'except' pairs
+    with user_ids naming who is EXCLUDED from your full contact list;
+    'only' pairs with user_ids naming the sole people who can see it."""
+    mode: str = Field(pattern="^(contacts|except|only)$")
+    user_ids: list[str] = Field(default_factory=list, max_length=2000)
+
+
+class ReportRequest(BaseModel):
+    target_type: str = Field(pattern="^(user|chat|message)$")
+    target_id: str = Field(min_length=1, max_length=64)
+    reason: str = Field(min_length=1, max_length=100)
+    details: str = Field(default="", max_length=1000)
+
+
 # ── Automation: webhooks and canned replies ─────────────────────────────────
 
 class CreateWebhookRequest(BaseModel):
@@ -210,6 +225,7 @@ class CreateSubChannelRequest(BaseModel):
 class ChatSettingsRequest(BaseModel):
     """Per-member settings: how *you* filed a chat, not how it is for everyone."""
     is_pinned: Optional[bool] = None
+    is_favorite: Optional[bool] = None
     folder: Optional[str] = Field(default=None, max_length=32)
     muted_until: Optional[float] = None
     draft: Optional[str] = Field(default=None, max_length=4000)
@@ -366,6 +382,13 @@ class CreateMeetingRequest(BaseModel):
     # common case for a team group.
     invite_user_ids: list[str] = Field(default_factory=list, max_length=256)
 
+    # Off by default — "auto join" for everyone permitted to call in this
+    # chat, same as every meeting before this setting existed.
+    waiting_room: bool = False
+    # Blank means no password. Checked only against people who aren't
+    # already the host — see group_call_start in main.py.
+    password: str = Field(default="", max_length=64)
+
 
 class UpdateMeetingRequest(BaseModel):
     title: Optional[str] = Field(default=None, min_length=1, max_length=120)
@@ -374,6 +397,28 @@ class UpdateMeetingRequest(BaseModel):
     duration_min: Optional[int] = Field(default=None, ge=5, le=24 * 60)
     join_url: Optional[str] = Field(default=None, max_length=500)
     reminder_min: Optional[int] = Field(default=None, ge=0, le=24 * 60)
+    waiting_room: Optional[bool] = None
+    # Empty string clears the password; None leaves it untouched — the same
+    # "absent means don't touch" convention every other partial update here
+    # uses, just needing an explicit way to say "clear it" too.
+    password: Optional[str] = Field(default=None, max_length=64)
+
+
+class InstantMeetingRequest(BaseModel):
+    """Start-right-now, no scheduling step — the in-app equivalent of hitting
+    'New Meeting' in Zoom/Meet instead of picking a future time."""
+    chat_id: str
+    title: str = Field(default="Instant meeting", max_length=120)
+    waiting_room: bool = False
+    password: str = Field(default="", max_length=64)
+
+
+class CreateBreakoutRoomsRequest(BaseModel):
+    """assignments maps user_id -> which room (0-based) they land in — the
+    caller decides the grouping (manually or by spreading people evenly
+    client-side); the server doesn't have an opinion about how to split
+    people up, only about creating the rooms and moving them there."""
+    assignments: dict[str, int] = Field(min_length=1, max_length=500)
 
 
 class RsvpRequest(BaseModel):

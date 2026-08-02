@@ -760,6 +760,31 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
 
 CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions (user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_push_endpoint ON push_subscriptions (endpoint);
+
+-- The exception/inclusion set behind users.story_audience — only meaningful
+-- when that mode is 'except' or 'only'; a plain 'contacts' user has no rows
+-- here at all. One shared table for both modes since a row is never read
+-- without also knowing which mode it belongs to.
+CREATE TABLE IF NOT EXISTS story_audience_list (
+    user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    other_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    PRIMARY KEY (user_id, other_user_id)
+);
+
+-- A person flagging a user, chat, or single message for review. Reports are
+-- never surfaced back to the person reported — this is a one-way signal for
+-- whoever moderates the platform, not a dispute the two sides see.
+CREATE TABLE IF NOT EXISTS reports (
+    id          TEXT PRIMARY KEY,
+    reporter_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    target_type TEXT NOT NULL,
+    target_id   TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    details     TEXT NOT NULL DEFAULT '',
+    created_at  REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_reports_created ON reports (created_at DESC);
 """
 
 
@@ -834,6 +859,22 @@ COLUMNS_ADDED_LATER = [
     # for one specific chat. Defaults on so nothing changes for anyone who
     # never touches the setting.
     ("chat_members", "calls_enabled", "INTEGER NOT NULL DEFAULT 1"),
+    # A lighter-weight shortlist than folders — one tap, no naming a list,
+    # surfaces in its own filter tab. Independent of is_pinned; a chat can
+    # be both, either, or neither.
+    ("chat_members", "is_favorite", "INTEGER NOT NULL DEFAULT 0"),
+    # 'contacts' (everyone you share a chat with, the long-standing default)
+    # | 'except' (that, minus story_audience_list) | 'only' (nobody except
+    # story_audience_list).
+    ("users", "story_audience", "TEXT NOT NULL DEFAULT 'contacts'"),
+    # Off (the default) is "auto join" — anyone permitted to call in this
+    # chat lands straight in the room, same as before this existed at all.
+    # On means anyone who isn't the host lands in a holding state until the
+    # host admits them — see group_call_join_request/_admit/_deny in main.py.
+    ("meetings", "waiting_room", "INTEGER NOT NULL DEFAULT 0"),
+    # NULL means no password set. Checked the same way a two-step PIN is —
+    # hashed at rest, never the raw text.
+    ("meetings", "password_hash", "TEXT"),
 ]
 
 

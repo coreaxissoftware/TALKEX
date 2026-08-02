@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Actions, Chats, Contacts, Me, Users } from "../api.js";
 import { Av, Button, ContextMenu, G, I, SRow, Spinner, whenLabel } from "../ui.jsx";
-import { MuteSheet, LockSheet, muteLabel } from "./ChatView.jsx";
+import { MuteSheet, LockSheet, FolderSheet, muteLabel } from "./ChatView.jsx";
 import { AppLockSetupSheet } from "./Settings.jsx";
 import { COUNTRY_CODES, flagFor, samplePlaceholder, splitPhone } from "../countryCodes.js";
 import { disableAppLock, isAppLockEnabled } from "../appLock.js";
@@ -23,6 +23,7 @@ const ACTIONS_OPEN_TRIGGER = 90;
 const CATEGORIES = [
   { key: "all", label: "All" },
   { key: "unread", label: "Unread" },
+  { key: "favourites", label: "Favourites" },
   { key: "non_contact", label: "Non-Contact" },
   { key: "group", label: "Group" },
   { key: "channel", label: "Channel" },
@@ -41,7 +42,7 @@ const CATEGORIES = [
  * not change what anyone else sees.
  */
 export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, onChanged, toast,
-                                    onNewChat, onLogout }) {
+                                    onNewChat, onLogout, headerMenuPos, onHeaderMenuClose }) {
   const [folder, setFolder] = useState("All");
   const [category, setCategory] = useState("all");
   const [query, setQuery] = useState("");
@@ -53,7 +54,7 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
   const [muteFor, setMuteFor] = useState(null); // chat currently showing the mute-duration sheet
   const [contactFor, setContactFor] = useState(null); // chat currently showing the contact-info sheet
   const [lockFor, setLockFor] = useState(null); // { chat, mode: 'set' | 'remove' } for the chat-lock sheet
-  const [headerMenu, setHeaderMenu] = useState(null); // { x, y } for the list-level ⋮ menu
+  const [folderFor, setFolderFor] = useState(null); // chat currently showing the "add to list" sheet
   const [showStarred, setShowStarred] = useState(false);
   const [appLockOn, setAppLockOn] = useState(isAppLockEnabled);
   const [appLockSetupOpen, setAppLockSetupOpen] = useState(false);
@@ -83,6 +84,7 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
     let list = category === "archive" ? archivedChats : activeChats;
 
     if (category === "unread") list = list.filter((chat) => chat.unread > 0);
+    else if (category === "favourites") list = list.filter((chat) => chat.is_favorite);
     else if (category === "non_contact") {
       list = list.filter((chat) => chat.type === "dm" && chat.peer_id && !contactUserIds.has(chat.peer_id));
     } else if (category === "group") list = list.filter((chat) => chat.type === "group");
@@ -142,6 +144,13 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
     onChanged();
   }
 
+  async function toggleFavoriteChat(chat) {
+    const next = !chat.is_favorite;
+    await Chats.settings(chat.id, { is_favorite: next });
+    toast(next ? "Added to favourites" : "Removed from favourites");
+    onChanged();
+  }
+
   function menuItemsFor(chat) {
     const callsOn = chat.calls_enabled !== false;
     const isMuted = (chat.muted_until || 0) > Date.now() / 1000;
@@ -150,6 +159,11 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
         ? [{ label: "Contact info", icon: I.user(G.sub, 16), onClick: () => setContactFor(chat) }]
         : []),
       { label: chat.is_pinned ? "Unpin chat" : "Pin chat", icon: I.pin(G.sub, 16), onClick: () => togglePin(chat) },
+      {
+        label: chat.is_favorite ? "Remove from favourites" : "Add to favourites",
+        icon: <span style={{ fontSize: 15, color: chat.is_favorite ? G.accent : G.sub, width: 16, textAlign: "center", lineHeight: 1 }}>★</span>,
+        onClick: () => toggleFavoriteChat(chat),
+      },
       {
         label: isMuted ? muteLabel(chat.muted_until) : "Mute notifications",
         icon: I.bellOff(G.sub, 16),
@@ -168,6 +182,7 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
         icon: I.lock(chat.is_locked ? G.accent : G.sub, 16),
         onClick: () => setLockFor({ chat, mode: chat.is_locked ? "remove" : "set" }),
       },
+      { label: "Add to list", icon: I.archive(G.sub, 16), onClick: () => setFolderFor(chat) },
       { divider: true },
       { label: chat.archived ? "Unarchive chat" : "Archive chat", icon: I.archive(G.sub, 16), onClick: () => archiveChat(chat) },
       { label: "Clear chat", icon: I.broom(G.sub, 16), onClick: () => clearChat(chat) },
@@ -273,46 +288,29 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
           </div>
         </div>
       ) : (
-        <div style={{ padding: "10px 16px", display: "flex", alignItems: "center", gap: 8 }}>
-          <div style={{
-            flex: 1, display: "flex", alignItems: "center", gap: 10, padding: "10px 14px",
-            background: G.dim, borderRadius: 12, border: `1px solid ${G.border}`,
-          }}>
-            {I.search()}
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              onKeyDown={(event) => {
-                // Enter searches message contents on the server; typing alone only
-                // filters the list of chat names already on screen.
-                if (event.key === "Enter" && query.trim()) onSearch(query.trim());
-              }}
-              placeholder="Search chats, or press Enter for messages"
-              style={{
-                flex: 1, background: "transparent", border: "none", outline: "none",
-                color: G.text, fontSize: 14,
-              }}/>
+        <>
+          <div style={{ padding: "10px 16px" }}>
+            <div style={{
+              width: "100%", boxSizing: "border-box", display: "flex", alignItems: "center", gap: 10,
+              padding: "10px 14px", background: G.dim, borderRadius: 12, border: `1px solid ${G.border}`,
+            }}>
+              {I.search()}
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  // Enter searches message contents on the server; typing alone only
+                  // filters the list of chat names already on screen.
+                  if (event.key === "Enter" && query.trim()) onSearch(query.trim());
+                }}
+                placeholder="Search chats, or press Enter for messages"
+                style={{
+                  flex: 1, background: "transparent", border: "none", outline: "none",
+                  color: G.text, fontSize: 14,
+                }}/>
+            </div>
           </div>
-          {visible.length > 0 && (
-            <div onClick={() => setSelectMode(true)} style={{
-              fontSize: 13, color: G.accentText, cursor: "pointer", whiteSpace: "nowrap",
-            }}>Select</div>
-          )}
-          <div onClick={onNewChat} title="New chat" style={{
-            width: 38, height: 38, borderRadius: 12, background: G.accent,
-            display: "flex", alignItems: "center", justifyContent: "center",
-            cursor: "pointer", flexShrink: 0,
-          }}>
-            {I.newChatBox("#fff", 19)}
-          </div>
-          <div onClick={(event) => setHeaderMenu({ x: event.clientX, y: event.clientY })}
-               title="More options" style={{
-                 width: 38, height: 38, borderRadius: "50%", display: "flex",
-                 alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0,
-               }}>
-            {I.moreVertical(G.sub, 20)}
-          </div>
-        </div>
+        </>
       )}
 
       <div style={{ display: "flex", gap: 8, padding: "0 16px 10px", overflowX: "auto" }}>
@@ -401,8 +399,17 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
                    onClose={() => setLockFor(null)}
                    onDone={() => { setLockFor(null); onChanged(); }}/>
       )}
-      {headerMenu && (
-        <ContextMenu x={headerMenu.x} y={headerMenu.y} items={headerMenuItems()} onClose={() => setHeaderMenu(null)}/>
+      {folderFor && (
+        <FolderSheet current={folderFor.folder || ""} onClose={() => setFolderFor(null)}
+                     onPicked={async (folder) => {
+                       setFolderFor(null);
+                       await Chats.settings(folderFor.id, { folder });
+                       toast(folder ? `Added to "${folder}"` : "Removed from list");
+                       onChanged();
+                     }}/>
+      )}
+      {headerMenuPos && (
+        <ContextMenu x={headerMenuPos.x} y={headerMenuPos.y} items={headerMenuItems()} onClose={onHeaderMenuClose}/>
       )}
       {showStarred && (
         <StarredMessagesSheet chats={chats} onClose={() => setShowStarred(false)}
@@ -710,6 +717,8 @@ function ChatRow({ chat, typing, onOpen, onPin, onArchive, onClear, onDelete, on
     onMenu(event.clientX, event.clientY);
   }
 
+  const chevronRef = useRef(null);
+
   return (
     <div style={{ position: "relative", overflow: "hidden", borderBottom: `1px solid ${G.border}` }}>
       <div style={{
@@ -743,8 +752,27 @@ function ChatRow({ chat, typing, onOpen, onPin, onArchive, onClear, onDelete, on
           transition: dragging.current ? "none" : "transform 0.2s ease",
           touchAction: "pan-y",
         }}
-        onMouseEnter={(event) => (event.currentTarget.style.background = G.card)}
-        onMouseLeave={(event) => (event.currentTarget.style.background = G.bg)}>
+        onMouseEnter={(event) => {
+          event.currentTarget.style.background = G.card;
+          if (chevronRef.current) chevronRef.current.style.opacity = "1";
+        }}
+        onMouseLeave={(event) => {
+          event.currentTarget.style.background = G.bg;
+          if (chevronRef.current) chevronRef.current.style.opacity = "0";
+        }}>
+
+        {!selectMode && (
+          <div ref={chevronRef}
+               onClick={(event) => { event.stopPropagation(); onMenu(event.clientX, event.clientY); }}
+               title="More options"
+               style={{
+                 position: "absolute", right: 14, bottom: 6, zIndex: 2,
+                 opacity: 0, transition: "opacity 0.15s", cursor: "pointer",
+                 width: 22, height: 22, borderRadius: "50%",
+                 display: "flex", alignItems: "center", justifyContent: "center",
+                 background: G.card, boxShadow: `0 1px 4px ${G.border}`,
+               }}>{I.chevronDown(G.sub, 14)}</div>
+        )}
 
         {selectMode && (
           <div style={{

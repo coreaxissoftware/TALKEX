@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Calls, Chats, Messages } from "../api.js";
+import { Calls, Chats, Contacts, Messages } from "../api.js";
 import { Av, ContextMenu, G, I, Spinner, whenLabel } from "../ui.jsx";
 
 const ACTIONS_WIDTH = 112;
@@ -17,12 +17,18 @@ const LONG_PRESS_MOVE_TOLERANCE = 8;
  * other messages are untouched. "Archive" archives the whole chat the call
  * happened in, same as ChatList's own archive action.
  */
-export default function CallsScreen({ me, onCallBack, toast }) {
+export default function CallsScreen({ me, onCallBack, toast, newCallOpen, onNewCallClose, menuPos, onMenuClose }) {
   const [calls, setCalls] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [menu, setMenu] = useState(null); // { x, y, call } for the right-click/long-press row menu
+  const [showFavourites, setShowFavourites] = useState(false);
+  const [favouriteChats, setFavouriteChats] = useState([]);
+
+  useEffect(() => {
+    Chats.list().then((all) => setFavouriteChats(all.filter((c) => c.is_favorite))).catch(() => {});
+  }, []);
 
   useEffect(() => {
     Calls.list().then(setCalls).catch(() => {}).finally(() => setLoading(false));
@@ -59,6 +65,13 @@ export default function CallsScreen({ me, onCallBack, toast }) {
     exitSelectMode();
   }
 
+  async function clearAllCalls() {
+    if (calls.length === 0 || !confirm("Clear your entire call log? This only clears your own copy.")) return;
+    await Promise.all(calls.map((call) => Messages.hide(call.id)));
+    setCalls([]);
+    toast("Call log cleared");
+  }
+
   if (loading) return <Spinner/>;
 
   return (
@@ -84,12 +97,40 @@ export default function CallsScreen({ me, onCallBack, toast }) {
         </div>
       ) : (
         calls.length > 0 && (
-          <div style={{ display: "flex", justifyContent: "flex-end", padding: "10px 16px 0" }}>
-            <div onClick={() => setSelectMode(true)} style={{ fontSize: 13, color: G.accentText, cursor: "pointer" }}>
-              Select
-            </div>
+          <div style={{ padding: "10px 16px", display: "flex", justifyContent: "flex-end" }}>
+            <div onClick={() => setSelectMode(true)} style={{
+              fontSize: 13, color: G.accentText, cursor: "pointer", whiteSpace: "nowrap",
+            }}>Select</div>
           </div>
         )
+      )}
+
+      {!selectMode && favouriteChats.length > 0 && (
+        <div style={{ padding: "0 16px 10px" }}>
+          <div onClick={() => setShowFavourites((v) => !v)} style={{
+            display: "flex", alignItems: "center", gap: 8, cursor: "pointer",
+            fontSize: 13, fontWeight: 600, color: G.sub, marginBottom: showFavourites ? 10 : 0,
+          }}>
+            <span style={{ color: G.accent }}>★</span> Favourites
+            {I.chevronDown(G.muted, 14)}
+          </div>
+          {showFavourites && (
+            <div style={{ display: "flex", gap: 14, overflowX: "auto", paddingBottom: 4 }}>
+              {favouriteChats.map((chat) => (
+                <div key={chat.id} onClick={() => onCallBack(chat, "voice")} style={{
+                  display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
+                  cursor: "pointer", flexShrink: 0, width: 56,
+                }}>
+                  <Av av={chat.avatar_letter} color={chat.color} size={48}/>
+                  <div style={{
+                    fontSize: 11, color: G.sub, textAlign: "center", whiteSpace: "nowrap",
+                    overflow: "hidden", textOverflow: "ellipsis", width: "100%",
+                  }}>{chat.name || "Chat"}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       )}
 
       {calls.length === 0 && (
@@ -129,6 +170,101 @@ export default function CallsScreen({ me, onCallBack, toast }) {
           { label: "Delete", icon: I.trash(G.red, 16), danger: true, onClick: () => deleteCall(menu.call) },
         ]}/>
       )}
+      {newCallOpen && (
+        <NewCallPicker onClose={onNewCallClose}
+                       onPick={async (contactUser, kind) => {
+                         onNewCallClose();
+                         try {
+                           const chat = await Chats.dm(contactUser.id);
+                           onCallBack(chat, kind);
+                         } catch (problem) {
+                           toast(problem.message || "Could not start the call");
+                         }
+                       }}/>
+      )}
+      {menuPos && (
+        <ContextMenu x={menuPos.x} y={menuPos.y} onClose={onMenuClose} items={[
+          { label: "Select calls", icon: I.check(G.sub, 16), onClick: () => setSelectMode(true) },
+          { label: "Clear call log", icon: I.broom(G.sub, 16), danger: true, onClick: clearAllCalls },
+        ]}/>
+      )}
+    </div>
+  );
+}
+
+/** Picks anyone from your saved contacts to call directly — the header's
+ * new-call button, for reaching someone with no call history yet rather
+ * than only ever redialing from the log below. */
+/** Same full-screen "New chat" layout as Discover's own overlay — a back
+ * arrow + title header, then a search field, then the list — rather than a
+ * bottom sheet, so picking who to call feels like the same action as
+ * picking who to message. */
+function NewCallPicker({ onClose, onPick }) {
+  const [contacts, setContacts] = useState(null);
+  const [query, setQuery] = useState("");
+
+  useEffect(() => {
+    Contacts.list().then((rows) => setContacts(rows.filter((c) => c.user))).catch(() => setContacts([]));
+  }, []);
+
+  const filtered = (contacts || []).filter((c) =>
+    c.name.toLowerCase().includes(query.trim().toLowerCase()));
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "#000000aa", zIndex: 60,
+      display: "flex", justifyContent: "center",
+    }}>
+      <div style={{
+        width: "100%", maxWidth: 430, height: "100%", background: G.bg,
+        display: "flex", flexDirection: "column", boxShadow: "0 0 40px #00000055",
+      }}>
+        <div style={{
+          display: "flex", alignItems: "center", gap: 12, padding: "14px 16px",
+          borderBottom: `1px solid ${G.border}`, flexShrink: 0,
+        }}>
+          <div onClick={onClose} style={{ cursor: "pointer", display: "flex" }}>{I.back()}</div>
+          <div style={{ fontSize: 18, fontWeight: 800 }}>New call</div>
+        </div>
+
+        <div style={{ padding: "12px 16px" }}>
+          <div style={{
+            display: "flex", alignItems: "center", gap: 10, padding: "10px 14px",
+            background: G.dim, borderRadius: 12, border: `1px solid ${G.border}`,
+          }}>
+            {I.search()}
+            <input value={query} onChange={(event) => setQuery(event.target.value)}
+                   placeholder="Search contacts" style={{
+                     flex: 1, background: "transparent", border: "none", outline: "none",
+                     color: G.text, fontSize: 14,
+                   }}/>
+          </div>
+        </div>
+
+        <div style={{ flex: 1, overflowY: "auto", padding: "0 16px" }}>
+          {contacts === null ? (
+            <Spinner small/>
+          ) : filtered.length === 0 ? (
+            <div style={{ fontSize: 13, color: G.muted, textAlign: "center", padding: 30 }}>
+              No contacts found
+            </div>
+          ) : filtered.map((contact) => (
+            <div key={contact.id} style={{
+              display: "flex", alignItems: "center", gap: 12, padding: "10px 2px",
+              borderBottom: `1px solid ${G.border}`,
+            }}>
+              <Av av={contact.user.avatar_letter} color={contact.user.color} size={42}/>
+              <div style={{ flex: 1, fontSize: 14.5, minWidth: 0 }}>{contact.name}</div>
+              <div onClick={() => onPick(contact.user, "voice")} style={{ cursor: "pointer", padding: 6 }}>
+                {I.phone(G.accent, 19)}
+              </div>
+              <div onClick={() => onPick(contact.user, "video")} style={{ cursor: "pointer", padding: 6 }}>
+                {I.video(G.accent, 20)}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Stories, Uploads } from "../api.js";
+import { Contacts, Me, Stories, Uploads } from "../api.js";
 import {
   Av, Button, Field, G, I, Spinner, countdown, localInputToUnix, whenLabel,
 } from "../ui.jsx";
@@ -75,6 +75,7 @@ export default function Status({ me, toast }) {
   const [loading, setLoading] = useState(true);
   const [composing, setComposing] = useState(false);
   const [viewing, setViewing] = useState(null);
+  const [privacyOpen, setPrivacyOpen] = useState(false);
 
   function reload() {
     setLoading(true);
@@ -98,10 +99,17 @@ export default function Status({ me, toast }) {
 
   return (
     <div style={{ flex: 1, overflowY: "auto", paddingBottom: 20 }}>
-      <div style={{ padding: "14px 16px" }}>
-        <Button onClick={() => setComposing(true)} style={{ width: "100%" }}>
+      <div style={{ padding: "14px 16px", display: "flex", gap: 8 }}>
+        <Button onClick={() => setComposing(true)} style={{ flex: 1 }}>
           + Add to my status
         </Button>
+        <div onClick={() => setPrivacyOpen(true)} title="Status privacy" style={{
+          width: 42, height: 42, borderRadius: 12, border: `1px solid ${G.border}`,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          cursor: "pointer", flexShrink: 0,
+        }}>
+          {I.lock(G.sub, 18)}
+        </div>
       </div>
 
       {scheduled.length > 0 && (
@@ -190,6 +198,114 @@ export default function Status({ me, toast }) {
       )}
 
       {viewing && <Viewer story={viewing} onClose={() => { setViewing(null); reload(); }}/>}
+
+      {privacyOpen && (
+        <StatusPrivacySheet onClose={() => setPrivacyOpen(false)} toast={toast}/>
+      )}
+    </div>
+  );
+}
+
+const AUDIENCE_MODES = [
+  { key: "contacts", label: "My contacts", sub: "Everyone you share a chat with" },
+  { key: "except", label: "My contacts except…", sub: "Everyone you share a chat with, except the people you pick" },
+  { key: "only", label: "Only share with…", sub: "Just the people you pick" },
+];
+
+function StatusPrivacySheet({ onClose, toast }) {
+  const [loading, setLoading] = useState(true);
+  const [mode, setMode] = useState("contacts");
+  const [selected, setSelected] = useState(new Set());
+  const [contacts, setContacts] = useState([]);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    Promise.all([Me.storyAudience(), Contacts.list()])
+      .then(([audience, rows]) => {
+        setMode(audience.mode);
+        setSelected(new Set(audience.user_ids));
+        setContacts(rows.filter((c) => c.user));
+      })
+      .catch(() => toast("Could not load your status privacy settings"))
+      .finally(() => setLoading(false));
+  }, []);
+
+  function toggle(userId) {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(userId)) next.delete(userId); else next.add(userId);
+      return next;
+    });
+  }
+
+  async function save() {
+    setSaving(true);
+    try {
+      await Me.setStoryAudience(mode, [...selected]);
+      toast("Status privacy updated");
+      onClose();
+    } catch (problem) {
+      toast(problem.message || "Could not save");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, zIndex: 1100, background: "#000000aa",
+      display: "flex", alignItems: "flex-end", justifyContent: "center",
+    }}>
+      <div onClick={(event) => event.stopPropagation()} style={{
+        width: "100%", maxWidth: 430, background: G.surface, padding: 20,
+        borderTopLeftRadius: 22, borderTopRightRadius: 22,
+        border: `1px solid ${G.border}`, maxHeight: "80vh", overflowY: "auto", color: G.text,
+      }}>
+        <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 4 }}>Status privacy</div>
+        <div style={{ fontSize: 12.5, color: G.muted, marginBottom: 16 }}>
+          Who sees status updates you post from now on. Anything already posted keeps its old audience.
+        </div>
+        {loading ? <Spinner small/> : (
+          <>
+            {AUDIENCE_MODES.map((option) => (
+              <div key={option.key} onClick={() => setMode(option.key)} style={{
+                padding: "12px 14px", borderRadius: 12, marginBottom: 8, cursor: "pointer",
+                border: `1px solid ${mode === option.key ? G.accent : G.border}`,
+                background: mode === option.key ? G.accentSoft : "transparent",
+              }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: mode === option.key ? G.accentText : G.text }}>
+                  {option.label}
+                </div>
+                <div style={{ fontSize: 12, color: G.muted, marginTop: 2 }}>{option.sub}</div>
+              </div>
+            ))}
+
+            {(mode === "except" || mode === "only") && (
+              <div style={{ marginTop: 10, marginBottom: 16 }}>
+                <div style={{ fontSize: 12, color: G.muted, marginBottom: 8 }}>
+                  {selected.size} selected
+                </div>
+                {contacts.length === 0 ? (
+                  <div style={{ fontSize: 13, color: G.muted, padding: "10px 0" }}>No saved contacts yet</div>
+                ) : contacts.map((contact) => (
+                  <label key={contact.id} onClick={(event) => event.stopPropagation()} style={{
+                    display: "flex", alignItems: "center", gap: 10, padding: "8px 2px", cursor: "pointer",
+                  }}>
+                    <input type="checkbox" checked={selected.has(contact.user.id)}
+                           onChange={() => toggle(contact.user.id)}/>
+                    <Av av={contact.user.avatar_letter} color={contact.user.color} size={30}/>
+                    <div style={{ fontSize: 13.5 }}>{contact.name}</div>
+                  </label>
+                ))}
+              </div>
+            )}
+
+            <Button onClick={save} disabled={saving} style={{ width: "100%" }}>
+              {saving ? "Saving…" : "Save"}
+            </Button>
+          </>
+        )}
+      </div>
     </div>
   );
 }

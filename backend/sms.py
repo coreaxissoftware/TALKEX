@@ -73,7 +73,37 @@ def send_otp(phone: str, code: str) -> str:
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
-            return "sent" if response.status < 300 else "error"
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        # MSG91 puts the actual reason (bad template id, unapproved DLT
+        # header, insufficient balance, etc.) in the body even on a 4xx —
+        # log it, since "SMS request failed" alone gives no way to diagnose
+        # a silently-undelivered OTP.
+        logger.error("MSG91 SMS request failed for %s: HTTP %s %s",
+                     phone, exc.code, _safe_body(exc))
+        return "error"
     except urllib.error.URLError:
         logger.exception("MSG91 SMS request failed for %s", phone)
         return "error"
+
+    # MSG91's Flow API returns HTTP 200 for both success AND rejection
+    # (invalid template variable, unapproved DLT entity, etc.) — the only
+    # way to tell them apart is the "type" field in the body, so a 200
+    # alone is not enough to call this "sent".
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        logger.error("MSG91 SMS response for %s was not JSON: %r", phone, raw[:300])
+        return "error"
+
+    if str(parsed.get("type", "")).lower() == "success":
+        return "sent"
+    logger.error("MSG91 rejected the SMS for %s: %s", phone, parsed.get("message", parsed))
+    return "error"
+
+
+def _safe_body(exc: urllib.error.HTTPError) -> str:
+    try:
+        return exc.read().decode(errors="replace")[:300]
+    except Exception:
+        return "<no body>"

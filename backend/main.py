@@ -60,13 +60,14 @@ from models import (
     ChatSettingsRequest, ConfirmEmailRequest, CreateApiKeyRequest, CreateBroadcastRequest,
     CreateCannedReplyRequest, CreateChannelRequest, CreateCommunityRequest, CreateGroupRequest,
     CreateMeetingRequest, CreateSubChannelRequest, CreateTemplateRequest, CreateWebhookRequest,
-    DisappearingRequest,
+    CreateBreakoutRoomsRequest, DisappearingRequest, InstantMeetingRequest,
     EditMessageRequest, ForwardRequest, LiveLocationUpdateRequest, LoginRequest,
     PushSubscribeRequest, PushUnsubscribeRequest, ReactRequest, ReadRequest,
     RegisterRequest, RemoveTwoStepRequest, RequestEmailOtpRequest, RequestOtpRequest,
-    RescheduleRequest, RsvpRequest,
+    ReportRequest, RescheduleRequest, RsvpRequest,
     ScheduleRequest, SendMessageRequest, SetPinRequest, SetRoleRequest,
-    SetTwoStepRequest, StartLinkRequest, StoryRequest, TestEmailRequest, TestSmsRequest,
+    SetTwoStepRequest, StartLinkRequest, StoryAudienceRequest, StoryRequest,
+    TestEmailRequest, TestSmsRequest,
     UpdateContactRequest, UpdateIntegrationSettingsRequest, UpdateMeetingRequest,
     UpdateProfileRequest, VerifyOtpRequest, VerifyTwoStepRequest, VoteRequest,
 )
@@ -335,6 +336,11 @@ bulk_rate_limiter = RateLimiter(max_events=60, window_seconds=60)
 # (or a phone number that isn't yours) isn't free.
 otp_rate_limiter = RateLimiter(max_events=5, window_seconds=300)
 
+# Keyed by reporter — reporting is a rare, deliberate action; this only
+# exists to stop a script from flooding the queue, not to limit a genuine
+# user filing a few real reports.
+report_rate_limiter = RateLimiter(max_events=10, window_seconds=600)
+
 OTP_LIFETIME_SECONDS = 5 * 60
 OTP_MAX_ATTEMPTS = 5
 
@@ -358,7 +364,13 @@ def issue_otp(phone: str):
         """,
         (phone, auth.hash_password(code), time.time() + OTP_LIFETIME_SECONDS, time.time()),
     )
-    sms.send_otp(phone, code)
+    # A silently-swallowed provider failure here is exactly what makes an
+    # undelivered OTP invisible: the endpoint would answer {"sent": true}
+    # regardless, and the person is left staring at a code-entry screen for
+    # a text that's never coming. Surface it instead — the OTP row above is
+    # harmless left unused; "Resend" just overwrites it via the upsert.
+    if sms.send_otp(phone, code) == "error":
+        raise HTTPException(502, "Could not send the verification code — please try again in a moment")
 
 
 def check_otp(phone: str, code: str):
@@ -400,7 +412,8 @@ def issue_email_otp(email: str):
         """,
         (email, auth.hash_password(code), time.time() + OTP_LIFETIME_SECONDS, time.time()),
     )
-    email_delivery.send_otp(email, code, OTP_LIFETIME_SECONDS)
+    if email_delivery.send_otp(email, code, OTP_LIFETIME_SECONDS) == "error":
+        raise HTTPException(502, "Could not send the verification code — please try again in a moment")
 
 
 def check_email_otp(email: str, code: str):
@@ -1308,6 +1321,33 @@ def update_me(request: UpdateProfileRequest, user: dict = Depends(current_user))
     return public_user(db.query_one("SELECT * FROM users WHERE id = ?", (user["id"],)))
 
 
+@app.get("/me/story-audience")
+def get_story_audience(user: dict = Depends(current_user)):
+    """Your current status-privacy setting plus, when it's 'except'/'only',
+    the exact people that list names — nothing to show for plain 'contacts'."""
+    mode = db.query_one("SELECT story_audience FROM users WHERE id = ?", (user["id"],))["story_audience"]
+    rows = db.query_all(
+        "SELECT other_user_id FROM story_audience_list WHERE user_id = ?", (user["id"],),
+    )
+    return {"mode": mode, "user_ids": [row["other_user_id"] for row in rows]}
+
+
+@app.put("/me/story-audience")
+def set_story_audience(request: StoryAudienceRequest, user: dict = Depends(current_user)):
+    """Replaces the whole exception/inclusion list in one call rather than
+    incremental add/remove — the settings screen always has the full set in
+    hand already, so there is nothing an incremental API would save."""
+    db.execute("UPDATE users SET story_audience = ? WHERE id = ?", (request.mode, user["id"]))
+    db.execute("DELETE FROM story_audience_list WHERE user_id = ?", (user["id"],))
+    if request.mode in ("except", "only"):
+        for other_id in set(request.user_ids):
+            db.execute(
+                "INSERT OR IGNORE INTO story_audience_list (user_id, other_user_id) VALUES (?, ?)",
+                (user["id"], other_id),
+            )
+    return {"mode": request.mode, "user_ids": request.user_ids}
+
+
 @app.post("/me/avatar")
 async def set_avatar(file: UploadFile = File(...), user: dict = Depends(current_user)):
     """
@@ -1460,6 +1500,23 @@ def list_blocks(user: dict = Depends(current_user)):
         (user["id"],),
     )
     return [public_user(row, viewer_id=user["id"]) for row in rows]
+
+
+@app.post("/report")
+def submit_report(request: ReportRequest, user: dict = Depends(current_user)):
+    """
+    One-way — the target never learns they were reported, and nothing here
+    takes any automatic action (no auto-mute, no auto-ban). It's a queue for
+    whoever moderates the platform to look at, same as any report-abuse flow.
+    """
+    report_rate_limiter.check(user["id"])
+    db.execute(
+        "INSERT INTO reports (id, reporter_id, target_type, target_id, reason, details, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (new_id("report"), user["id"], request.target_type, request.target_id,
+         request.reason, request.details, time.time()),
+    )
+    return {"reported": True}
 
 
 # ── Contacts ──────────────────────────────────────────────────────────────────
@@ -1683,7 +1740,7 @@ def list_chats(user: dict = Depends(current_user)):
         SELECT
             c.*,
             m.role, m.last_read_seq, m.muted_until, m.is_pinned, m.folder, m.draft, m.archived,
-            m.calls_enabled,
+            m.calls_enabled, m.is_favorite,
             MAX(c.last_seq - m.last_read_seq, 0) AS unread
         FROM chat_members AS m
         JOIN chats AS c ON c.id = m.chat_id
@@ -1856,6 +1913,86 @@ def create_group(request: CreateGroupRequest, user: dict = Depends(current_user)
             )
 
     return get_chat(chat_id, user)
+
+
+@app.post("/chats/{chat_id}/breakout-rooms")
+async def create_breakout_rooms(chat_id: str, request: CreateBreakoutRoomsRequest,
+                                user: dict = Depends(current_user)):
+    """
+    Splits the people on an ongoing call into smaller side calls.
+
+    Deliberately NOT a new kind of call room — each breakout room is just an
+    ordinary new group chat with its own ordinary group call, both built out
+    of the exact same code every other group chat/call already goes
+    through. That's what keeps this additive rather than a parallel signaling
+    stack to maintain: a breakout room is not a special case anywhere else
+    in the app, including to whoever ends up back in it after leaving and
+    rejoining. Only the person who started the call on it may split it.
+    """
+    parent_chat = db.query_one("SELECT * FROM chats WHERE id = ?", (chat_id,))
+    if parent_chat is None:
+        raise HTTPException(404, "Chat not found")
+    require_member(chat_id, user["id"])
+    if _group_call_hosts.get(chat_id) != user["id"]:
+        raise HTTPException(403, "Only the person who started this call can create breakout rooms")
+
+    by_room: dict[int, set[str]] = {}
+    for target_id, room_index in request.assignments.items():
+        if not chatstore.is_member(chat_id, target_id):
+            continue
+        by_room.setdefault(room_index, set()).add(target_id)
+
+    if not by_room:
+        raise HTTPException(400, "No valid people to assign to a room")
+
+    now = time.time()
+    rooms = []
+    with db.transaction() as conn:
+        for room_index in sorted(by_room):
+            member_ids = by_room[room_index] | {user["id"]}
+            room_chat_id = new_id("group")
+            room_name = f"{parent_chat['name'] or 'Meeting'} — Room {room_index + 1}"
+            conn.execute(
+                """
+                INSERT INTO chats (id, type, name, description, color, avatar_letter,
+                                   owner_id, created_at)
+                VALUES (?, 'group', ?, '', ?, ?, ?, ?)
+                """,
+                (room_chat_id, room_name, parent_chat["color"], "B", user["id"], now),
+            )
+            for member_id in member_ids:
+                role = "owner" if member_id == user["id"] else "member"
+                conn.execute(
+                    "INSERT OR IGNORE INTO chat_members (chat_id, user_id, role, joined_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (room_chat_id, member_id, role, now),
+                )
+            rooms.append({
+                "chat_id": room_chat_id, "name": room_name, "member_ids": sorted(member_ids),
+            })
+
+    _breakout_hosts[chat_id] = user["id"]
+    await hub.send_to_chat(chat_id, {
+        "type": "breakout_rooms_created", "chat_id": chat_id, "rooms": rooms,
+    })
+    return {"rooms": rooms}
+
+
+@app.post("/chats/{chat_id}/breakout-rooms/close")
+async def close_breakout_rooms(chat_id: str, user: dict = Depends(current_user)):
+    """
+    Tells everyone to head back to the main call. Doesn't touch the
+    breakout rooms' own chats/calls at all — each is an ordinary group chat,
+    people leaving it (or staying, it's still a real chat afterward) is
+    exactly the ordinary leave-a-call/leave-a-chat behavior everywhere else.
+    """
+    require_member(chat_id, user["id"])
+    if _breakout_hosts.get(chat_id) != user["id"]:
+        raise HTTPException(403, "Only whoever created the breakout rooms can close them")
+
+    _breakout_hosts.pop(chat_id, None)
+    await hub.send_to_chat(chat_id, {"type": "breakout_rooms_closed", "chat_id": chat_id})
+    return {"closed": True}
 
 
 @app.post("/chats/broadcast")
@@ -3059,15 +3196,20 @@ def download_file(attachment_id: str, user: dict = Depends(current_user)):
             db.execute("UPDATE messages SET view_once_opened_at = ? WHERE id = ?",
                       (time.time(), message["id"]))
     elif attachment["story_id"]:
-        story = db.query_one("SELECT user_id, status FROM stories WHERE id = ?",
-                             (attachment["story_id"],))
+        story = db.query_one(
+            "SELECT s.user_id, s.status, u.story_audience FROM stories AS s "
+            "JOIN users AS u ON u.id = s.user_id WHERE s.id = ?",
+            (attachment["story_id"],),
+        )
         # Same audience /stories itself uses: the author, or anyone who shares
-        # a chat with them — and only once the status has actually gone live,
-        # exactly like a scheduled status's text is withheld until then.
+        # a chat with them (and passes their audience mode) — and only once
+        # the status has actually gone live, exactly like a scheduled
+        # status's text is withheld until then.
         is_author = story is not None and story["user_id"] == user["id"]
         visible = (
             story is not None and story["status"] == "live"
             and chatstore.shares_chat_with(user["id"], story["user_id"])
+            and _story_audience_allows(story["user_id"], story["story_audience"], user["id"])
         )
         if story is None or not (is_author or visible):
             raise HTTPException(404, "File not found")
@@ -3547,6 +3689,22 @@ def _expand_story(story: dict) -> dict:
     return story
 
 
+def _story_audience_allows(author_id: str, audience_mode: str, viewer_id: str) -> bool:
+    """
+    The SQL feeding list_stories already narrows to "shares a chat with the
+    author" — that's the 'contacts' mode in full. 'except'/'only' layer a
+    specific allow/deny list on top of it, checked here in Python since it's
+    a handful of authors per page, never worth a JOIN.
+    """
+    if audience_mode not in ("except", "only"):
+        return True
+    listed = db.query_one(
+        "SELECT 1 FROM story_audience_list WHERE user_id = ? AND other_user_id = ?",
+        (author_id, viewer_id),
+    ) is not None
+    return (not listed) if audience_mode == "except" else listed
+
+
 @app.get("/stories")
 def list_stories(user: dict = Depends(current_user)):
     """
@@ -3557,7 +3715,7 @@ def list_stories(user: dict = Depends(current_user)):
     """
     rows = db.query_all(
         """
-        SELECT s.*, u.name, u.avatar_letter, u.color, u.avatar_attachment_id
+        SELECT s.*, u.name, u.avatar_letter, u.color, u.avatar_attachment_id, u.story_audience
         FROM stories AS s
         JOIN users AS u ON u.id = s.user_id
         WHERE s.status = 'live'
@@ -3578,7 +3736,12 @@ def list_stories(user: dict = Depends(current_user)):
 
     grouped: dict[str, dict] = {}
     for row in rows:
-        story = _expand_story(dict(row))
+        row = dict(row)
+        if row["user_id"] != user["id"] and not _story_audience_allows(
+            row["user_id"], row["story_audience"], user["id"],
+        ):
+            continue
+        story = _expand_story(row)
         author = grouped.setdefault(story["user_id"], {
             "user_id": story["user_id"],
             "name": story["name"],
@@ -3645,6 +3808,9 @@ def delete_story(story_id: str, user: dict = Depends(current_user)):
 
 def serialise_meeting(row, viewer_id: str = "") -> dict:
     meeting = dict(row)
+    # The hash itself never leaves the server — has_password is all a
+    # client needs to know whether to prompt for one before joining.
+    meeting["has_password"] = bool(meeting.pop("password_hash", None))
     participants = db.query_all(
         """
         SELECT p.user_id, p.response, u.name, u.avatar_letter, u.color
@@ -3661,6 +3827,64 @@ def serialise_meeting(row, viewer_id: str = "") -> dict:
     return meeting
 
 
+async def _create_meeting_row(chat_id: str, host_id: str, title: str, agenda: str,
+                              starts_at: float, duration_min: int, join_url: str,
+                              reminder_min: int, invite_user_ids: list[str], status: str,
+                              waiting_room: bool = False, password: str = "") -> dict:
+    """Shared by /meetings (scheduled) and /meetings/instant (live from the
+    moment it's created) — everything past the initial status is identical:
+    invite expansion, the RSVP rows, and the card posted into the chat."""
+    meeting_id = new_id("meet")
+    now = time.time()
+    password_hash = auth.hash_password(password) if password else None
+
+    db.execute(
+        """
+        INSERT INTO meetings (id, chat_id, host_id, title, agenda, starts_at,
+                              duration_min, join_url, status, reminder_min, created_at,
+                              waiting_room, password_hash)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (meeting_id, chat_id, host_id, title, agenda, starts_at, duration_min, join_url,
+         status, reminder_min, now, int(waiting_room), password_hash),
+    )
+
+    # Invite the named people, or the whole chat when none are named.
+    if invite_user_ids:
+        invitees = [uid for uid in set(invite_user_ids) if chatstore.is_member(chat_id, uid)]
+    else:
+        invitees = [row["user_id"] for row in db.query_all(
+            "SELECT user_id FROM chat_members WHERE chat_id = ?", (chat_id,))]
+
+    for invitee_id in set(invitees) | {host_id}:
+        # The host is going by definition; everyone else starts undecided.
+        response = "going" if invitee_id == host_id else "pending"
+        db.execute(
+            "INSERT OR IGNORE INTO meeting_participants (meeting_id, user_id, response, responded_at) "
+            "VALUES (?, ?, ?, ?)",
+            (meeting_id, invitee_id, response, now if response == "going" else None),
+        )
+
+    # The card in the chat. Storing it as a message means it inherits unread
+    # counts, search and the read marker without any special handling.
+    card, _ = chatstore.insert_message(
+        chat_id=chat_id,
+        sender_id=host_id,
+        text=f"📅 {title}",
+        kind="meeting",
+        payload={"meeting_id": meeting_id, "starts_at": starts_at,
+                 "duration_min": duration_min, "join_url": join_url},
+    )
+    db.execute("UPDATE meetings SET message_id = ? WHERE id = ?", (card["id"], meeting_id))
+
+    meeting = serialise_meeting(
+        db.query_one("SELECT * FROM meetings WHERE id = ?", (meeting_id,)), host_id)
+
+    await hub.send_to_chat(chat_id, {"type": "message", "message": card})
+    await hub.send_to_chat(chat_id, {"type": "meeting_created", "meeting": meeting})
+    return meeting
+
+
 @app.post("/meetings")
 async def create_meeting(request: CreateMeetingRequest, user: dict = Depends(current_user)):
     """
@@ -3674,55 +3898,72 @@ async def create_meeting(request: CreateMeetingRequest, user: dict = Depends(cur
     if request.starts_at <= time.time():
         raise HTTPException(400, "starts_at must be in the future")
 
-    meeting_id = new_id("meet")
-    now = time.time()
-
-    db.execute(
-        """
-        INSERT INTO meetings (id, chat_id, host_id, title, agenda, starts_at,
-                              duration_min, join_url, status, reminder_min, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?, ?)
-        """,
-        (meeting_id, request.chat_id, user["id"], request.title, request.agenda,
-         request.starts_at, request.duration_min, request.join_url,
-         request.reminder_min, now),
+    return await _create_meeting_row(
+        request.chat_id, user["id"], request.title, request.agenda, request.starts_at,
+        request.duration_min, request.join_url, request.reminder_min,
+        request.invite_user_ids, "scheduled",
+        waiting_room=request.waiting_room, password=request.password,
     )
 
-    # Invite the named people, or the whole chat when none are named.
-    if request.invite_user_ids:
-        invitees = [uid for uid in set(request.invite_user_ids)
-                    if chatstore.is_member(request.chat_id, uid)]
-    else:
-        invitees = [row["user_id"] for row in db.query_all(
-            "SELECT user_id FROM chat_members WHERE chat_id = ?", (request.chat_id,))]
 
-    for invitee_id in set(invitees) | {user["id"]}:
-        # The host is going by definition; everyone else starts undecided.
-        response = "going" if invitee_id == user["id"] else "pending"
-        db.execute(
-            "INSERT OR IGNORE INTO meeting_participants (meeting_id, user_id, response, responded_at) "
-            "VALUES (?, ?, ?, ?)",
-            (meeting_id, invitee_id, response, now if response == "going" else None),
-        )
-
-    # The card in the chat. Storing it as a message means it inherits unread
-    # counts, search and the read marker without any special handling.
-    card, _ = chatstore.insert_message(
-        chat_id=request.chat_id,
-        sender_id=user["id"],
-        text=f"📅 {request.title}",
-        kind="meeting",
-        payload={"meeting_id": meeting_id, "starts_at": request.starts_at,
-                 "duration_min": request.duration_min, "join_url": request.join_url},
+@app.post("/meetings/instant")
+async def start_instant_meeting(request: InstantMeetingRequest, user: dict = Depends(current_user)):
+    """
+    The in-app 'New Meeting' button — no scheduling step, live immediately,
+    everyone currently in the chat is invited. join_url stays empty: joining
+    means the in-app call room for this chat, exactly like tapping the
+    header's call buttons, not an external Zoom/Meet link.
+    """
+    require_member(request.chat_id, user["id"])
+    return await _create_meeting_row(
+        request.chat_id, user["id"], request.title or "Instant meeting", "",
+        time.time(), 60, "", 0, [], "live",
+        waiting_room=request.waiting_room, password=request.password,
     )
-    db.execute("UPDATE meetings SET message_id = ? WHERE id = ?", (card["id"], meeting_id))
 
-    meeting = serialise_meeting(
+
+@app.post("/meetings/{meeting_id}/start")
+async def start_meeting(meeting_id: str, user: dict = Depends(current_user)):
+    """
+    Moves a scheduled meeting to 'live' — whoever gets there first, not only
+    the host, same as tapping 'Join' in Zoom/Meet starts the call for
+    everyone rather than requiring the organizer to click a separate button
+    first. A no-op if it's already live so two people tapping Join at once
+    isn't a race.
+    """
+    meeting = db.query_one("SELECT * FROM meetings WHERE id = ?", (meeting_id,))
+    if meeting is None:
+        raise HTTPException(404, "Meeting not found")
+    require_member(meeting["chat_id"], user["id"])
+    if meeting["status"] in ("ended", "cancelled"):
+        raise HTTPException(400, f"This meeting is already {meeting['status']}")
+
+    if meeting["status"] != "live":
+        db.execute("UPDATE meetings SET status = 'live' WHERE id = ?", (meeting_id,))
+
+    updated = serialise_meeting(
         db.query_one("SELECT * FROM meetings WHERE id = ?", (meeting_id,)), user["id"])
+    await hub.send_to_chat(meeting["chat_id"], {"type": "meeting_updated", "meeting": updated})
+    return updated
 
-    await hub.send_to_chat(request.chat_id, {"type": "message", "message": card})
-    await hub.send_to_chat(request.chat_id, {"type": "meeting_created", "meeting": meeting})
-    return meeting
+
+@app.post("/meetings/{meeting_id}/end")
+async def end_meeting(meeting_id: str, user: dict = Depends(current_user)):
+    """Host-only, unlike starting — ending it for everyone else mid-call is
+    disruptive enough that it shouldn't be one tap for any participant."""
+    meeting = db.query_one("SELECT * FROM meetings WHERE id = ?", (meeting_id,))
+    if meeting is None:
+        raise HTTPException(404, "Meeting not found")
+    if meeting["host_id"] != user["id"]:
+        raise HTTPException(403, "Only the host can end this meeting")
+    if meeting["status"] != "live":
+        raise HTTPException(400, f"This meeting is {meeting['status']}, not live")
+
+    db.execute("UPDATE meetings SET status = 'ended' WHERE id = ?", (meeting_id,))
+    await hub.send_to_chat(meeting["chat_id"], {
+        "type": "meeting_ended", "meeting_id": meeting_id, "chat_id": meeting["chat_id"],
+    })
+    return {"ended": True}
 
 
 @app.get("/meetings")
@@ -3831,6 +4072,12 @@ async def update_meeting(meeting_id: str, request: UpdateMeetingRequest,
     fields = request.model_dump(exclude_none=True)
     if request.starts_at is not None and request.starts_at <= time.time():
         raise HTTPException(400, "starts_at must be in the future")
+
+    # `password` isn't a real column — it maps to password_hash, and an
+    # empty string means "clear it" rather than "hash an empty string."
+    if "password" in fields:
+        raw_password = fields.pop("password")
+        fields["password_hash"] = auth.hash_password(raw_password) if raw_password else None
 
     if fields:
         assignments = ", ".join(f"{name} = ?" for name in fields)
@@ -3997,6 +4244,19 @@ _group_calls: dict[str, dict[str, dict]] = {}
 # rather than ending the call for everyone.
 _group_call_hosts: dict[str, str] = {}
 
+# parent_chat_id -> user_id of whoever most recently split that chat's call
+# into breakout rooms. Tracked separately from _group_call_hosts above:
+# once everyone's moved into their breakout rooms, the parent room empties
+# out and _group_call_hosts forgets who ran it — this survives that so
+# "close breakout rooms" still knows who's allowed to.
+_breakout_hosts: dict[str, str] = {}
+
+# chat_id -> {user_id: participant_info} of people who've asked to join a
+# waiting-room-gated call and are on hold for the host's decision. Never
+# holds media of any kind — these people have no peer connections yet,
+# they're just names waiting on a decision.
+_group_call_waiting: dict[str, dict[str, dict]] = {}
+
 
 def _participant_info(user_id: str) -> dict:
     row = db.query_one("SELECT name, avatar_letter, color FROM users WHERE id = ?", (user_id,))
@@ -4028,6 +4288,22 @@ async def _reassign_host_if_needed(chat_id: str, leaving_user_id: str, remaining
     })
 
 
+async def _admit_to_group_call(chat_id: str, user_id: str):
+    """The tail end of group_call_start's normal (non-waiting-room) path,
+    factored out so an admitted waiting-room joiner goes through the exact
+    same roster/offer setup as anyone who walked straight in."""
+    room = _group_calls.setdefault(chat_id, {})
+    roster = list(room.values())
+    room[user_id] = _participant_info(user_id)
+    await hub.send_to_user(user_id, {
+        "type": "group_call_roster", "chat_id": chat_id, "participants": roster,
+        "host_id": _group_call_hosts.get(chat_id),
+    })
+    await hub.send_to_chat(chat_id, {
+        "type": "group_call_participant_joined", "chat_id": chat_id, **room[user_id],
+    }, exclude_user=user_id)
+
+
 async def _leave_all_group_calls(user_id: str):
     """Called when a socket disconnects — a dropped connection must not
     leave a phantom participant other clients keep trying to reach."""
@@ -4043,6 +4319,7 @@ async def _leave_all_group_calls(user_id: str):
         else:
             del _group_calls[chat_id]
             _group_call_hosts.pop(chat_id, None)
+            _group_call_waiting.pop(chat_id, None)
 
 
 @app.websocket("/ws")
@@ -4168,6 +4445,34 @@ async def websocket_endpoint(socket: WebSocket, token: str = Query(default="")):
 
                 room = _group_calls.setdefault(chat_id, {})
                 is_first = len(room) == 0
+                host_id = _group_call_hosts.get(chat_id)
+
+                # The waiting-room/password settings live on whichever
+                # meeting is currently live for this chat — a plain,
+                # meeting-less group call (started from the header's own
+                # call buttons rather than Planner) has neither, same as
+                # every call before either setting existed.
+                live_meeting = db.query_one(
+                    "SELECT waiting_room, password_hash FROM meetings "
+                    "WHERE chat_id = ? AND status = 'live' ORDER BY created_at DESC LIMIT 1",
+                    (chat_id,),
+                )
+                if live_meeting and live_meeting["password_hash"] and user_id != host_id:
+                    supplied = str(payload.get("password", ""))
+                    if not auth.verify_password(supplied, live_meeting["password_hash"]):
+                        await socket.send_json({
+                            "type": "call_error", "chat_id": chat_id, "reason": "Incorrect meeting password",
+                        })
+                        continue
+                if live_meeting and live_meeting["waiting_room"] and not is_first and user_id != host_id:
+                    _group_call_waiting.setdefault(chat_id, {})[user_id] = _participant_info(user_id)
+                    if host_id:
+                        await hub.send_to_user(host_id, {
+                            "type": "group_call_join_request", "chat_id": chat_id, **_participant_info(user_id),
+                        })
+                    await socket.send_json({"type": "group_call_waiting", "chat_id": chat_id})
+                    continue
+
                 roster = list(room.values())  # who the joiner needs to connect to
                 room[user_id] = _participant_info(user_id)
                 if is_first:
@@ -4216,6 +4521,21 @@ async def websocket_endpoint(socket: WebSocket, token: str = Query(default="")):
                     else:
                         del _group_calls[chat_id]
                         _group_call_hosts.pop(chat_id, None)
+                        _group_call_waiting.pop(chat_id, None)
+
+            elif kind in ("group_call_admit", "group_call_deny"):
+                chat_id = payload.get("chat_id", "")
+                target_id = payload.get("target", "")
+                if _group_call_hosts.get(chat_id) != user_id:
+                    continue
+                waiting = _group_call_waiting.get(chat_id, {})
+                if target_id not in waiting:
+                    continue
+                del waiting[target_id]
+                if kind == "group_call_admit":
+                    await _admit_to_group_call(chat_id, target_id)
+                else:
+                    await hub.send_to_user(target_id, {"type": "group_call_join_denied", "chat_id": chat_id})
 
             elif kind == "group_call_force_mute_all":
                 # Genuinely "force": the server can't reach into someone
@@ -4282,6 +4602,55 @@ async def websocket_endpoint(socket: WebSocket, token: str = Query(default="")):
                     relay["candidate"] = payload.get("candidate")
 
                 await hub.send_to_user(to_user_id, relay)
+
+            elif kind in ("whiteboard_draw", "whiteboard_clear", "whiteboard_open", "whiteboard_close", "whiteboard_laser"):
+                # A meeting tool, not a standalone chat feature — scoped to
+                # whoever's actually in that chat's call room right now, same
+                # as screen share. Nothing is persisted: closing the board
+                # (or the call) loses it, exactly like a real whiteboard once
+                # everyone leaves the room. The laser pointer is the most
+                # ephemeral of all — it never touches the canvas, just a
+                # fading dot relayed point-by-point.
+                chat_id = payload.get("chat_id", "")
+                room = _group_calls.get(chat_id)
+                if not room or user_id not in room:
+                    continue
+                relay = {"type": kind, "chat_id": chat_id, "from": user_id}
+                if kind == "whiteboard_draw":
+                    relay["stroke"] = payload.get("stroke")
+                elif kind == "whiteboard_laser":
+                    relay["point"] = payload.get("point")
+                await hub.send_to_chat(chat_id, relay, exclude_user=user_id)
+
+            elif kind in ("group_call_reaction", "group_call_raise_hand", "group_call_lower_hand"):
+                # Same room-membership gate as the whiteboard — a floating
+                # emoji or a raised-hand flag, purely transient, never stored.
+                chat_id = payload.get("chat_id", "")
+                room = _group_calls.get(chat_id)
+                if not room or user_id not in room:
+                    continue
+                relay = {"type": kind, "chat_id": chat_id, "from": user_id}
+                if kind == "group_call_reaction":
+                    emoji = payload.get("emoji", "")
+                    if emoji not in ("👍", "❤️", "👏", "😂", "🎉"):
+                        continue
+                    relay["emoji"] = emoji
+                await hub.send_to_chat(chat_id, relay, exclude_user=user_id)
+
+            elif kind == "group_call_caption":
+                # Each browser transcribes only its OWN microphone (the
+                # server never sees or stores audio, transcript included —
+                # there is no server-side speech pipeline here at all) and
+                # broadcasts the recognized line, same as any other
+                # ephemeral in-call signal.
+                chat_id = payload.get("chat_id", "")
+                text = str(payload.get("text", ""))[:500]
+                room = _group_calls.get(chat_id)
+                if not room or user_id not in room or not text.strip():
+                    continue
+                await hub.send_to_chat(chat_id, {
+                    "type": "group_call_caption", "chat_id": chat_id, "from": user_id, "text": text,
+                }, exclude_user=user_id)
 
     except WebSocketDisconnect:
         pass

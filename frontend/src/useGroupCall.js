@@ -7,8 +7,14 @@ const GROUP_CALL_EVENT_TYPES = new Set([
   "group_call_invite", "group_call_roster", "group_call_participant_joined",
   "group_call_participant_left", "group_call_offer", "group_call_answer", "group_call_ice",
   "group_call_host_changed", "group_call_force_muted", "group_call_kicked",
-  "call_error",
+  "call_error", "whiteboard_open", "whiteboard_close",
+  "group_call_reaction", "group_call_raise_hand", "group_call_lower_hand",
+  "group_call_caption", "breakout_rooms_created", "breakout_rooms_closed",
+  "group_call_waiting", "group_call_admitted", "group_call_join_denied", "group_call_join_request",
 ]);
+
+let reactionKeyCounter = 0; // a plain module counter, not Date.now()/Math.random() — this file has no such restriction, but a counter is simpler and collision-free either way
+const MAX_CAPTION_LINES = 3;
 
 /**
  * A mesh group call: every participant holds one RTCPeerConnection per OTHER
@@ -41,6 +47,7 @@ export function useGroupCall(events, send, toast) {
 
   const peersRef = useRef({});               // userId -> RTCPeerConnection
   const localStreamRef = useRef(null);
+  const screenTrackRef = useRef(null);       // active getDisplayMedia video track, while sharing
   const pendingCandidatesRef = useRef({});   // userId -> [candidate, ...] queued pre-remoteDescription
   const lastApplied = useRef(0);
 
@@ -100,7 +107,7 @@ export function useGroupCall(events, send, toast) {
 
   // ── Local actions ────────────────────────────────────────────────────────
 
-  const join = useCallback(async (chatId, callKind) => {
+  const join = useCallback(async (chatId, callKind, password) => {
     if (callRef.current?.phase === "active") {
       toastRef.current?.("You're already in a call");
       return;
@@ -119,12 +126,16 @@ export function useGroupCall(events, send, toast) {
     }
     localStreamRef.current = localStream;
 
+    // Optimistically "active" — a waiting-room-gated room downgrades this
+    // to "waiting" the moment the server's group_call_waiting reply lands,
+    // same idea as call_error undoing an optimistic join that turns out to
+    // be rejected for some other reason.
     setCall((current) => ({
       phase: "active", chatId, callKind, muted: false, cameraOff: false,
       localStream, participants: current?.participants || {},
     }));
 
-    sendRef.current({ type: "group_call_start", chat_id: chatId, call_kind: callKind });
+    sendRef.current({ type: "group_call_start", chat_id: chatId, call_kind: callKind, password });
   }, []);
 
   const declineIncoming = useCallback(() => {
@@ -212,15 +223,32 @@ export function useGroupCall(events, send, toast) {
     }
     const screenTrack = screenStream.getVideoTracks()[0];
     const cameraTrack = current.localStream.getVideoTracks()[0];
+    // "motion" is the right default for most screen shares (video playback,
+    // scrolling) — the encoder favors frame rate over per-frame sharpness.
+    // "detail" trades that back for a slide deck or a code editor, where a
+    // crisp static frame matters more than smoothness.
+    screenTrack.contentHint = "motion";
+    screenTrackRef.current = screenTrack;
     await Promise.all(senders.map((sender) => sender.replaceTrack(screenTrack)));
-    setCall((c) => (c ? { ...c, sharingScreen: true } : c));
+    setCall((c) => (c ? { ...c, sharingScreen: true, screenOptimizeFor: "motion" } : c));
 
     screenTrack.onended = async () => {
+      screenTrackRef.current = null;
       if (cameraTrack) {
         await Promise.all(senders.map((sender) => sender.replaceTrack(cameraTrack).catch(() => {})));
       }
-      setCall((c) => (c ? { ...c, sharingScreen: false } : c));
+      setCall((c) => (c ? { ...c, sharingScreen: false, screenOptimizeFor: null } : c));
     };
+  }, []);
+
+  // Mirrors Teams' "optimize for video/text" screen-share toggle via the real
+  // MediaStreamTrack.contentHint API — a hint the encoder is free to use, not
+  // a guarantee, but it's the actual platform mechanism for this trade-off.
+  const setScreenOptimization = useCallback((mode) => {
+    const track = screenTrackRef.current;
+    if (!track) return;
+    track.contentHint = mode;
+    setCall((c) => (c ? { ...c, screenOptimizeFor: mode } : c));
   }, []);
 
   // Host-only actions — the server independently checks the sender really
@@ -248,6 +276,96 @@ export function useGroupCall(events, send, toast) {
     });
   }, []);
 
+  const admitParticipant = useCallback((userId) => {
+    const current = callRef.current;
+    if (!current) return;
+    sendRef.current({ type: "group_call_admit", chat_id: current.chatId, target: userId });
+    setCall((c) => (c ? { ...c, joinRequests: (c.joinRequests || []).filter((r) => r.user_id !== userId) } : c));
+  }, []);
+
+  const denyParticipant = useCallback((userId) => {
+    const current = callRef.current;
+    if (!current) return;
+    sendRef.current({ type: "group_call_deny", chat_id: current.chatId, target: userId });
+    setCall((c) => (c ? { ...c, joinRequests: (c.joinRequests || []).filter((r) => r.user_id !== userId) } : c));
+  }, []);
+
+  // Open/close is shared state (broadcast so it appears on everyone's
+  // screen, not just whoever tapped it) — the strokes themselves are NOT
+  // routed through here at all. Every draw point would mean a re-render of
+  // this whole hook's state on every pixel of mouse movement; the
+  // Whiteboard component instead reads the same raw `events` array directly
+  // and paints straight onto its canvas, bypassing React state for that hot
+  // path entirely.
+  const toggleWhiteboard = useCallback(() => {
+    const current = callRef.current;
+    if (!current) return;
+    const next = !current.whiteboardOpen;
+    setCall((c) => (c ? { ...c, whiteboardOpen: next } : c));
+    sendRef.current({ type: next ? "whiteboard_open" : "whiteboard_close", chat_id: current.chatId });
+  }, []);
+
+  // A reaction is a fire-and-forget animation, not a fact about the call —
+  // it isn't stored anywhere; `lastReaction` just changes value each time so
+  // a UI effect watching it knows to play the next one, even the same emoji
+  // sent twice in a row.
+  const sendReaction = useCallback((emoji) => {
+    const current = callRef.current;
+    if (!current) return;
+    reactionKeyCounter += 1;
+    setCall((c) => (c ? { ...c, lastReaction: { emoji, from: "me", key: reactionKeyCounter } } : c));
+    sendRef.current({ type: "group_call_reaction", chat_id: current.chatId, emoji });
+  }, []);
+
+  const toggleRaiseHand = useCallback(() => {
+    const current = callRef.current;
+    if (!current) return;
+    const next = !current.handRaised;
+    setCall((c) => (c ? { ...c, handRaised: next } : c));
+    sendRef.current({ type: next ? "group_call_raise_hand" : "group_call_lower_hand", chat_id: current.chatId });
+  }, []);
+
+  // Purely a local viewing preference — whether YOU see captions and whether
+  // YOUR OWN speech gets transcribed and broadcast. Not synced to anyone
+  // else's screen the way whiteboard open/close is, since captions-on is
+  // "do I want subtitles," not a fact about the meeting.
+  const toggleCaptions = useCallback(() => {
+    setCall((c) => (c ? { ...c, captionsOn: !c.captionsOn, captions: c.captionsOn ? c.captions : [] } : c));
+  }, []);
+
+  // Called by whatever's running local speech recognition (see
+  // GroupCallOverlay's LiveCaptions) once it has a recognized line — echoes
+  // it into your own caption log immediately rather than waiting on a round
+  // trip through the server first.
+  const sendCaption = useCallback((text) => {
+    const current = callRef.current;
+    if (!current || !text.trim()) return;
+    setCall((c) => (c ? {
+      ...c, captions: [...(c.captions || []), { from: "me", text, key: `${Date.now()}-me` }].slice(-MAX_CAPTION_LINES),
+    } : c));
+    sendRef.current({ type: "group_call_caption", chat_id: current.chatId, text });
+  }, []);
+
+  // A breakout room is an ordinary group call in an ordinary group chat —
+  // moving into one is just leaving whatever call you're on and joining
+  // that chat's, the same as tapping any other chat's call button. The only
+  // thing special is remembering where you came from, so "return to main
+  // call" later is possible.
+  const joinBreakoutRoom = useCallback(async (roomChatId, parentChatId, callKind) => {
+    leave();
+    await join(roomChatId, callKind);
+    setCall((c) => (c ? { ...c, breakoutParentChatId: parentChatId } : c));
+  }, [leave, join]);
+
+  const returnToMainCall = useCallback(async () => {
+    const current = callRef.current;
+    if (!current?.breakoutParentChatId) return;
+    const parentChatId = current.breakoutParentChatId;
+    const kind = current.callKind;
+    leave();
+    await join(parentChatId, kind);
+  }, [leave, join]);
+
   // ── Remote events ────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -267,6 +385,23 @@ export function useGroupCall(events, send, toast) {
             inviterName: event.name, inviterAvatar: event.avatar_letter, inviterColor: event.color,
             localStream: null, participants: {},
           });
+          continue;
+        }
+
+        // Both bypass the general "must match my current call's chat_id"
+        // gate below — a breakout announcement arrives tagged with the
+        // PARENT chat's id, which is exactly the one case where that's
+        // still relevant after you've moved into a different room's call.
+        if (event.type === "breakout_rooms_created") {
+          if (current && event.chat_id === current.chatId) {
+            setCall((c) => (c ? { ...c, breakoutRooms: event.rooms } : c));
+          }
+          continue;
+        }
+        if (event.type === "breakout_rooms_closed") {
+          if (current && (event.chat_id === current.chatId || event.chat_id === current.breakoutParentChatId)) {
+            setCall((c) => (c ? { ...c, breakoutRoomsClosed: true } : c));
+          }
           continue;
         }
 
@@ -293,6 +428,21 @@ export function useGroupCall(events, send, toast) {
           toastRef.current?.("You were removed from the call");
           teardown();
           setCall(null);
+        } else if (event.type === "group_call_waiting") {
+          setCall((c) => (c ? { ...c, phase: "waiting" } : c));
+        } else if (event.type === "group_call_admitted") {
+          setCall((c) => (c ? { ...c, phase: "active" } : c));
+        } else if (event.type === "group_call_join_denied") {
+          toastRef.current?.("The host didn't let you into this call");
+          teardown();
+          setCall(null);
+        } else if (event.type === "group_call_join_request") {
+          setCall((c) => (c ? {
+            ...c,
+            joinRequests: [...(c.joinRequests || []), {
+              user_id: event.user_id, name: event.name, avatar: event.avatar_letter, color: event.color,
+            }],
+          } : c));
         } else if (event.type === "group_call_participant_joined") {
           addParticipant(event.user_id, {
             name: event.name, avatar: event.avatar_letter, color: event.color, stream: null,
@@ -330,6 +480,27 @@ export function useGroupCall(events, send, toast) {
             await pc.addIceCandidate(candidate).catch(() => {});
           }
           pendingCandidatesRef.current[event.from] = [];
+        } else if (event.type === "whiteboard_open") {
+          setCall((c) => (c ? { ...c, whiteboardOpen: true } : c));
+        } else if (event.type === "whiteboard_close") {
+          setCall((c) => (c ? { ...c, whiteboardOpen: false } : c));
+        } else if (event.type === "group_call_reaction") {
+          reactionKeyCounter += 1;
+          setCall((c) => (c ? {
+            ...c, lastReaction: { emoji: event.emoji, from: event.from, key: reactionKeyCounter },
+          } : c));
+        } else if (event.type === "group_call_raise_hand") {
+          addParticipant(event.from, { handRaised: true });
+        } else if (event.type === "group_call_lower_hand") {
+          addParticipant(event.from, { handRaised: false });
+        } else if (event.type === "group_call_caption") {
+          if (!current.captionsOn) continue;
+          const name = current.participants[event.from]?.name || "Someone";
+          setCall((c) => (c ? {
+            ...c,
+            captions: [...(c.captions || []), { from: name, text: event.text, key: `${event._n}` }]
+              .slice(-MAX_CAPTION_LINES),
+          } : c));
         } else if (event.type === "group_call_ice") {
           const pc = peersRef.current[event.from];
           if (pc?.remoteDescription) {
@@ -345,7 +516,9 @@ export function useGroupCall(events, send, toast) {
   }, [events, buildPeerConnection, connectOutward, addParticipant]);
 
   return {
-    call, join, declineIncoming, leave, toggleMute, toggleCamera, shareScreen,
-    forceMuteAll, kickParticipant, addPeople,
+    call, join, declineIncoming, leave, toggleMute, toggleCamera, shareScreen, setScreenOptimization,
+    forceMuteAll, kickParticipant, addPeople, toggleWhiteboard, sendReaction, toggleRaiseHand,
+    toggleCaptions, sendCaption, joinBreakoutRoom, returnToMainCall,
+    admitParticipant, denyParticipant,
   };
 }

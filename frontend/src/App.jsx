@@ -54,6 +54,9 @@ export default function App() {
   const [loadingChats, setLoadingChats] = useState(true);
   const [openChat, setOpenChat] = useState(null);
   const [discoverOpen, setDiscoverOpen] = useState(false);
+  const [chatListMenuPos, setChatListMenuPos] = useState(null); // { x, y } — the chat list's own ⋮ button lives in TopBar now, not inside ChatList itself
+  const [newCallOpen, setNewCallOpen] = useState(false); // Calls tab's "New call" button lives in TopBar too
+  const [callsMenuPos, setCallsMenuPos] = useState(null); // { x, y } — the Calls tab's own ⋮ menu, same idea as chatListMenuPos
   const [events, setEvents] = useState([]);
   const [typingBy, setTypingBy] = useState({});
   const [toastText, setToastText] = useState("");
@@ -173,6 +176,24 @@ export default function App() {
   useEffect(() => {
     if (me) reloadChats();
   }, [me, reloadChats]);
+
+  // A "Send call link" (or a plain group invite link) lands here as
+  // ?invite=<code> — joining is idempotent server-side (INSERT OR IGNORE),
+  // so re-visiting an already-used link just opens the chat again rather
+  // than erroring.
+  useEffect(() => {
+    if (!me) return;
+    const code = new URLSearchParams(window.location.search).get("invite");
+    if (!code) return;
+    window.history.replaceState(null, "", window.location.pathname);
+    Chats.joinViaInvite(code)
+      .then(({ chat_id }) => {
+        reloadChats();
+        return Chats.get(chat_id);
+      })
+      .then(setOpenChat)
+      .catch((problem) => toast(problem.message || "That call link is invalid or expired"));
+  }, [me]);
 
   // Just a count for the tab badge — Planner itself fetches the real lists.
   // "What have I got waiting" mirrors Planner's own framing of the screen:
@@ -451,7 +472,11 @@ export default function App() {
         call={call} groupCall={groupCall} toastText={toastText}
         discoverOpen={discoverOpen} onDiscoverOpen={() => setDiscoverOpen(true)}
         onDiscoverClose={() => setDiscoverOpen(false)} plannerCount={plannerCount}
-        missedCalls={missedCalls} onLogout={signOut} tabs={tabs}/>
+        missedCalls={missedCalls} onLogout={signOut} tabs={tabs}
+        chatListMenuPos={chatListMenuPos} onChatListMenuPos={setChatListMenuPos}
+        newCallOpen={newCallOpen} onNewCallOpen={() => setNewCallOpen(true)}
+        onNewCallClose={() => setNewCallOpen(false)}
+        callsMenuPos={callsMenuPos} onCallsMenuPos={setCallsMenuPos}/>
     );
   }
 
@@ -486,7 +511,7 @@ export default function App() {
             return next;
           })}
           onStartCall={(kind) => call.startCall(resolvedChat, kind)}
-          onStartGroupCall={(kind) => groupCall.join(resolvedChat.id, kind)}
+          onStartGroupCall={(kind, password) => groupCall.join(resolvedChat.id, kind, password)}
           toast={toast}/>
         <Toast text={toastText}/>
         <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
@@ -496,15 +521,24 @@ export default function App() {
                           onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
                           onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
                           onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
-                          onShareScreen={groupCall.shareScreen} onForceMuteAll={groupCall.forceMuteAll}
-                          onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}/>
+                          onShareScreen={groupCall.shareScreen} onSetScreenOptimization={groupCall.setScreenOptimization} onForceMuteAll={groupCall.forceMuteAll}
+                          onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}
+                          onToggleWhiteboard={groupCall.toggleWhiteboard} events={events} send={realtime.send}
+                          onSendReaction={groupCall.sendReaction} onToggleRaiseHand={groupCall.toggleRaiseHand}
+                          onToggleCaptions={groupCall.toggleCaptions} onCaptionText={groupCall.sendCaption}
+                          onJoinBreakoutRoom={groupCall.joinBreakoutRoom} onReturnToMainCall={groupCall.returnToMainCall}
+                          onAdmitParticipant={groupCall.admitParticipant} onDenyParticipant={groupCall.denyParticipant}/>
       </Screen>
     );
   }
 
   return (
     <Screen>
-      <TopBar status={realtime.status} tab={tab}/>
+      <TopBar status={realtime.status} tab={tab}
+              onNewChat={() => setDiscoverOpen(true)}
+              onMenuClick={(event) => setChatListMenuPos({ x: event.clientX, y: event.clientY })}
+              onNewCall={() => setNewCallOpen(true)}
+              onCallsMenuClick={(event) => setCallsMenuPos({ x: event.clientX, y: event.clientY })}/>
 
       {searchResults ? (
         <SearchResults results={searchResults} onClose={() => setSearchResults(null)}
@@ -518,17 +552,20 @@ export default function App() {
             <ChatList chats={chats} loading={loadingChats} typingBy={typingBy}
                       onOpen={setOpenChat} onChanged={reloadChats} toast={toast}
                       onNewChat={() => setDiscoverOpen(true)} onLogout={signOut}
+                      headerMenuPos={chatListMenuPos} onHeaderMenuClose={() => setChatListMenuPos(null)}
                       onSearch={(query) => Search.query(query).then(setSearchResults)}/>
           )}
           {tab === "calls" && (
             <CallsScreen me={me} toast={toast} onCallBack={(chatLike, kind) => {
               if (chatLike.type === "dm") call.startCall(chatLike, kind);
               else groupCall.join(chatLike.id, kind);
-            }}/>
+            }} newCallOpen={newCallOpen} onNewCallClose={() => setNewCallOpen(false)}
+                        menuPos={callsMenuPos} onMenuClose={() => setCallsMenuPos(null)}/>
           )}
           {tab === "status" && <Status me={me} toast={toast}/>}
           {tab === "planner" && (
-            <Planner toast={toast} chats={chats} onOpenChat={setOpenChat}/>
+            <Planner toast={toast} chats={chats} onOpenChat={setOpenChat}
+                     onJoinCall={(chatId, kind, password) => groupCall.join(chatId, kind, password)}/>
           )}
           {tab === "settings" && (
             <Settings me={me} onUpdated={setMe} toast={toast}
@@ -551,8 +588,13 @@ export default function App() {
                         onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
                         onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
                         onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
-                        onShareScreen={groupCall.shareScreen} onForceMuteAll={groupCall.forceMuteAll}
-                        onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}/>
+                        onShareScreen={groupCall.shareScreen} onSetScreenOptimization={groupCall.setScreenOptimization} onForceMuteAll={groupCall.forceMuteAll}
+                        onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}
+                        onToggleWhiteboard={groupCall.toggleWhiteboard} events={events} send={realtime.send}
+                          onSendReaction={groupCall.sendReaction} onToggleRaiseHand={groupCall.toggleRaiseHand}
+                          onToggleCaptions={groupCall.toggleCaptions} onCaptionText={groupCall.sendCaption}
+                          onJoinBreakoutRoom={groupCall.joinBreakoutRoom} onReturnToMainCall={groupCall.returnToMainCall}
+                          onAdmitParticipant={groupCall.admitParticipant} onDenyParticipant={groupCall.denyParticipant}/>
       {discoverOpen && (
         <DiscoverOverlay onClose={() => setDiscoverOpen(false)}
                          onOpenChat={(chat) => { setDiscoverOpen(false); setOpenChat(chat); }}
@@ -664,7 +706,7 @@ function AppLockScreen({ onUnlocked, onSignOut }) {
   );
 }
 
-function TopBar({ status, tab }) {
+function TopBar({ status, tab, onNewChat, onMenuClick, onNewCall, onCallsMenuClick }) {
   const label = tab === "admin" ? "Admin" : TABS.find((entry) => entry.key === tab)?.label || "TalkEx";
   return (
     <div style={{
@@ -673,6 +715,40 @@ function TopBar({ status, tab }) {
       position: "sticky", top: 0, zIndex: 5, flexShrink: 0,
     }}>
       <div style={{ fontSize: 20, fontWeight: 800, flex: 1 }}>{label}</div>
+      {tab === "chats" && onNewChat && (
+        <div onClick={onNewChat} title="New chat" style={{
+          width: 32, height: 32, borderRadius: 10, background: G.accent,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          cursor: "pointer", flexShrink: 0,
+        }}>
+          {I.newChatBox("#fff", 15)}
+        </div>
+      )}
+      {tab === "chats" && onMenuClick && (
+        <div onClick={onMenuClick} title="More options" style={{
+          width: 34, height: 34, borderRadius: "50%", display: "flex",
+          alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0,
+        }}>
+          {I.moreVertical(G.sub, 19)}
+        </div>
+      )}
+      {tab === "calls" && onNewCall && (
+        <div onClick={onNewCall} title="New call" style={{
+          width: 32, height: 32, borderRadius: 10, background: G.accent,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          cursor: "pointer", flexShrink: 0,
+        }}>
+          {I.phone("#fff", 15)}
+        </div>
+      )}
+      {tab === "calls" && onCallsMenuClick && (
+        <div onClick={onCallsMenuClick} title="More options" style={{
+          width: 34, height: 34, borderRadius: "50%", display: "flex",
+          alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0,
+        }}>
+          {I.moreVertical(G.sub, 19)}
+        </div>
+      )}
       <ConnectionDot status={status}/>
     </div>
   );
@@ -766,6 +842,8 @@ function DesktopShell({
   me, onMeUpdated, theme, onThemeChange, accent, onAccentChange, onSignedOut,
   realtime, events, reconnectedAt, call, groupCall, toastText,
   discoverOpen, onDiscoverOpen, onDiscoverClose, plannerCount, missedCalls, onLogout, tabs,
+  chatListMenuPos, onChatListMenuPos, newCallOpen, onNewCallOpen, onNewCallClose,
+  callsMenuPos, onCallsMenuPos,
 }) {
   const resolvedOpenChat = openChat ? (chats.find((chat) => chat.id === openChat.id) || openChat) : null;
   const chatLocked = resolvedOpenChat?.is_locked && !unlockedChats.has(resolvedOpenChat.id);
@@ -779,13 +857,17 @@ function DesktopShell({
     }}>
       <DesktopRail tab={tab} onChange={onTabChange} unread={unread} plannerCount={plannerCount}
                    missedCalls={missedCalls} tabs={tabs}
-                   onNewChat={onDiscoverOpen} onLogout={onLogout}/>
+                   onLogout={onLogout}/>
 
       <div style={{
         width: 400, flexShrink: 0, borderRight: `1px solid ${G.border}`,
         display: "flex", flexDirection: "column", height: "100%", overflow: "hidden",
       }}>
-        <TopBar status={realtime.status} tab={tab}/>
+        <TopBar status={realtime.status} tab={tab}
+                onNewChat={onDiscoverOpen}
+                onMenuClick={(event) => onChatListMenuPos({ x: event.clientX, y: event.clientY })}
+                onNewCall={onNewCallOpen}
+                onCallsMenuClick={(event) => onCallsMenuPos({ x: event.clientX, y: event.clientY })}/>
         {searchResults ? (
           <SearchResults results={searchResults} onClose={() => onSearchResultsChange(null)}
                          onOpen={(chatId) => {
@@ -798,17 +880,20 @@ function DesktopShell({
               <ChatList chats={chats} loading={loadingChats} typingBy={typingBy}
                         onOpen={onOpenChat} onChanged={reloadChats} toast={toast}
                         onNewChat={onDiscoverOpen} onLogout={onLogout}
+                        headerMenuPos={chatListMenuPos} onHeaderMenuClose={() => onChatListMenuPos(null)}
                         onSearch={(query) => Search.query(query).then(onSearchResultsChange)}/>
             )}
             {tab === "calls" && (
               <CallsScreen me={me} toast={toast} onCallBack={(chatLike, kind) => {
                 if (chatLike.type === "dm") call.startCall(chatLike, kind);
                 else groupCall.join(chatLike.id, kind);
-              }}/>
+              }} newCallOpen={newCallOpen} onNewCallClose={onNewCallClose}
+                          menuPos={callsMenuPos} onMenuClose={() => onCallsMenuPos(null)}/>
             )}
             {tab === "status" && <Status me={me} toast={toast}/>}
             {tab === "planner" && (
-              <Planner toast={toast} chats={chats} onOpenChat={onOpenChat}/>
+              <Planner toast={toast} chats={chats} onOpenChat={onOpenChat}
+                       onJoinCall={(chatId, kind, password) => groupCall.join(chatId, kind, password)}/>
             )}
             {tab === "settings" && (
               <Settings me={me} onUpdated={onMeUpdated} toast={toast}
@@ -839,7 +924,7 @@ function DesktopShell({
               onOpenChat={onOpenChat}
               onChatLocked={onRelockChat}
               onStartCall={(kind) => call.startCall(resolvedOpenChat, kind)}
-              onStartGroupCall={(kind) => groupCall.join(resolvedOpenChat.id, kind)}
+              onStartGroupCall={(kind, password) => groupCall.join(resolvedOpenChat.id, kind, password)}
               toast={toast}/>
           )
         ) : (
@@ -855,8 +940,13 @@ function DesktopShell({
                         onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
                         onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
                         onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
-                        onShareScreen={groupCall.shareScreen} onForceMuteAll={groupCall.forceMuteAll}
-                        onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}/>
+                        onShareScreen={groupCall.shareScreen} onSetScreenOptimization={groupCall.setScreenOptimization} onForceMuteAll={groupCall.forceMuteAll}
+                        onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}
+                        onToggleWhiteboard={groupCall.toggleWhiteboard} events={events} send={realtime.send}
+                          onSendReaction={groupCall.sendReaction} onToggleRaiseHand={groupCall.toggleRaiseHand}
+                          onToggleCaptions={groupCall.toggleCaptions} onCaptionText={groupCall.sendCaption}
+                          onJoinBreakoutRoom={groupCall.joinBreakoutRoom} onReturnToMainCall={groupCall.returnToMainCall}
+                          onAdmitParticipant={groupCall.admitParticipant} onDenyParticipant={groupCall.denyParticipant}/>
       {discoverOpen && (
         <DiscoverOverlay onClose={onDiscoverClose}
                          onOpenChat={(chat) => { onDiscoverClose(); onOpenChat(chat); }}
@@ -866,7 +956,7 @@ function DesktopShell({
   );
 }
 
-function DesktopRail({ tab, onChange, unread, plannerCount, missedCalls, onNewChat, onLogout, tabs = TABS }) {
+function DesktopRail({ tab, onChange, unread, plannerCount, missedCalls, onLogout, tabs = TABS }) {
   const badgeFor = (key) => (
     key === "chats" ? unread : key === "planner" ? plannerCount : key === "calls" ? missedCalls : 0
   );
@@ -877,17 +967,6 @@ function DesktopRail({ tab, onChange, unread, plannerCount, missedCalls, onNewCh
       alignItems: "center", padding: "18px 0", gap: 4, overflowY: "auto",
     }}>
       <img src="/icon.png" alt="TalkEx" style={{ width: 34, height: 34, borderRadius: 10, marginBottom: 10 }}/>
-
-      {/* Always available regardless of which tab is active — unlike the old
-          Discover tab, "start something new" shouldn't require switching to
-          Chats first. */}
-      <div onClick={onNewChat} title="New chat" style={{
-        width: 30, height: 30, borderRadius: "50%", background: G.accent,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        cursor: "pointer", marginBottom: 10, flexShrink: 0,
-      }}>
-        {I.plus("#fff", 13)}
-      </div>
 
       {tabs.map((entry) => {
         const active = tab === entry.key;

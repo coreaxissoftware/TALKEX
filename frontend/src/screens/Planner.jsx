@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Meetings, Scheduled } from "../api.js";
+import { Chats, Meetings, Scheduled } from "../api.js";
 import {
   Button, Field, G, I, Spinner, countdown, localInputToUnix, unixToLocalInput, whenLabel,
 } from "../ui.jsx";
+import { MeetingSheet } from "./ChatView.jsx";
 
 /**
  * Everything with a time attached: queued messages and upcoming meetings.
@@ -10,12 +11,14 @@ import {
  * These are two different tables on the server but one idea to a person — "what
  * have I got waiting" — so they share a screen.
  */
-export default function Planner({ toast, onOpenChat, chats }) {
+export default function Planner({ toast, onOpenChat, chats, onJoinCall }) {
   const [tab, setTab] = useState("meetings");
   const [meetings, setMeetings] = useState([]);
   const [queue, setQueue] = useState([]);
   const [loading, setLoading] = useState(true);
   const [editingItem, setEditingItem] = useState(null);
+  const [pickingChat, setPickingChat] = useState(false); // false | 'instant' | 'schedule'
+  const [schedulingChat, setSchedulingChat] = useState(null);
 
   function reload() {
     setLoading(true);
@@ -32,8 +35,57 @@ export default function Planner({ toast, onOpenChat, chats }) {
     return chat?.name || (chat?.type === "dm" ? "Direct message" : "chat");
   };
 
+  // "Join now" always goes through /start first — a no-op if it's already
+  // live, but the thing that actually moves a still-scheduled meeting there
+  // the moment anyone taps it, exactly like Zoom/Meet start on first join
+  // rather than requiring the host to click a separate "Start" button.
+  async function joinMeeting(meeting) {
+    if (meeting.has_password) {
+      const password = window.prompt("This meeting has a password:");
+      if (password === null) return; // cancelled
+      try {
+        await Meetings.start(meeting.id);
+        onJoinCall(meeting.chat_id, "video", password);
+      } catch (problem) {
+        toast(problem.message || "Could not join the meeting");
+      }
+      return;
+    }
+    try {
+      await Meetings.start(meeting.id);
+      onJoinCall(meeting.chat_id, "video");
+    } catch (problem) {
+      toast(problem.message || "Could not join the meeting");
+    }
+  }
+
+  async function startInstant(chat) {
+    setPickingChat(false);
+    try {
+      await Meetings.startInstant(chat.id, `${chat.name || "Instant"} meeting`);
+      onJoinCall(chat.id, "video");
+      reload();
+    } catch (problem) {
+      toast(problem.message || "Could not start the meeting");
+    }
+  }
+
+  function pickChatToSchedule(chat) {
+    setPickingChat(false);
+    setSchedulingChat(chat);
+  }
+
   return (
     <div style={{ flex: 1, overflowY: "auto" }}>
+      <div style={{ padding: "16px 16px 0", display: "flex", gap: 8 }}>
+        <Button onClick={() => setPickingChat("instant")} style={{ flex: 1 }}>
+          🎥 Start instant meeting
+        </Button>
+        <Button onClick={() => setPickingChat("schedule")} variant="ghost" style={{ flex: 1 }}>
+          📅 Schedule meeting
+        </Button>
+      </div>
+
       <div style={{ display: "flex", gap: 6, padding: 16 }}>
         {[["meetings", "Meetings"], ["queue", "Scheduled"]].map(([key, label]) => (
           <button key={key} onClick={() => setTab(key)}
@@ -96,6 +148,15 @@ export default function Planner({ toast, onOpenChat, chats }) {
                   ))}
                 </div>
               )}
+
+              {(meeting.status === "scheduled" || meeting.status === "live") && (
+                <Button onClick={() => joinMeeting(meeting)} style={{
+                  width: "100%", marginTop: 10, padding: "8px",
+                  background: meeting.status === "live" ? G.green : undefined,
+                }}>
+                  {meeting.status === "live" ? "Join now — live" : "Join now"}
+                </Button>
+              )}
             </div>
           ))
       )}
@@ -149,6 +210,61 @@ export default function Planner({ toast, onOpenChat, chats }) {
         <RescheduleSheet item={editingItem} onClose={() => setEditingItem(null)}
                          onDone={() => { setEditingItem(null); reload(); }} toast={toast}/>
       )}
+      {pickingChat && (
+        <ChatPickerSheet chats={chats} onClose={() => setPickingChat(false)}
+                        onPick={pickingChat === "instant" ? startInstant : pickChatToSchedule}/>
+      )}
+      {schedulingChat && (
+        <MeetingSheet chat={schedulingChat} toast={toast}
+                     onClose={() => setSchedulingChat(null)}
+                     onCreated={() => {
+                       reload();
+                       if (["group", "channel", "community"].includes(schedulingChat.type)
+                           && confirm("Share this meeting's link now?")) {
+                         Chats.createInvite(schedulingChat.id)
+                           .then(async ({ invite_code: code }) => {
+                             const url = `${window.location.origin}/?invite=${code}`;
+                             if (navigator.share) await navigator.share({ url, text: `Join ${schedulingChat.name || "the chat"} on TalkEx` });
+                             else { await navigator.clipboard.writeText(url); toast("Link copied"); }
+                           })
+                           .catch((problem) => toast(problem.message || "Could not create a link"));
+                       }
+                     }}/>
+      )}
+    </div>
+  );
+}
+
+function ChatPickerSheet({ chats, onClose, onPick }) {
+  const eligible = chats.filter((chat) => !chat.archived);
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "#000000aa", zIndex: 60,
+      display: "flex", alignItems: "flex-end", justifyContent: "center",
+    }}>
+      <div onClick={(event) => event.stopPropagation()} style={{
+        width: "100%", maxWidth: 430, background: G.surface, padding: 20,
+        borderTopLeftRadius: 22, borderTopRightRadius: 22, maxHeight: "70vh", overflowY: "auto",
+      }}>
+        <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 4 }}>Start a meeting in…</div>
+        <div style={{ fontSize: 12.5, color: G.muted, marginBottom: 14 }}>
+          Everyone currently in that chat is invited straight away.
+        </div>
+        {eligible.length === 0 ? (
+          <div style={{ fontSize: 13, color: G.muted, padding: "10px 0" }}>No chats yet</div>
+        ) : eligible.map((chat) => (
+          <div key={chat.id} onClick={() => onPick(chat)} style={{
+            display: "flex", alignItems: "center", gap: 12, padding: "10px 4px", cursor: "pointer",
+          }}>
+            <div style={{
+              width: 36, height: 36, borderRadius: "50%", background: chat.color || G.accent,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              color: "#fff", fontSize: 14, fontWeight: 700, flexShrink: 0,
+            }}>{(chat.avatar_letter || chat.name || "?")[0]}</div>
+            <div style={{ fontSize: 14 }}>{chat.name || "Direct message"}</div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

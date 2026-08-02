@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Actions, Chats, Contacts, Me, Meetings, Messages, Pins, Scheduled, Search, Uploads, Users,
+  Actions, Chats, Contacts, Me, Meetings, Messages, Pins, Report, Scheduled, Search, Uploads, Users,
   sendReliably, sendFileReliably, newClientMessageId,
 } from "../api.js";
 import * as offlineDb from "../offlineDb.js";
@@ -49,6 +49,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   const [replyTo, setReplyTo] = useState(null);
   const [editing, setEditing] = useState(null);
   const [menuFor, setMenuFor] = useState(null);
+  const [infoFor, setInfoFor] = useState(null); // message currently showing the "Message info" sheet
   const [bgMenu, setBgMenu] = useState(null); // { x, y } for right-click/long-press on empty chat background
   const [forwarding, setForwarding] = useState(null);
   const [selectMode, setSelectMode] = useState(false);
@@ -70,6 +71,9 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   const [mutedUntilTop, setMutedUntilTop] = useState(chat.muted_until || 0);
   const [lockSheetTop, setLockSheetTop] = useState(null); // 'set' | 'remove'
   const [lockedTop, setLockedTop] = useState(Boolean(chat.is_locked));
+  const [favoriteTop, setFavoriteTop] = useState(Boolean(chat.is_favorite));
+  const [folderSheetOpen, setFolderSheetOpen] = useState(false);
+  const [reportSheetOpen, setReportSheetOpen] = useState(false);
   const inputRef = useRef(chat.draft || "");
   const bottom = useRef(null);
   const bgLongPressTimer = useRef(null);
@@ -450,6 +454,22 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
     }
   }
 
+  async function downloadMessageFile(message) {
+    const attachmentId = message.payload?.attachment_id;
+    if (!attachmentId) return;
+    try {
+      const blobUrl = message.payload?._localUrl || await Uploads.fetchBlobUrl(attachmentId, { cache: true });
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = message.payload?.file_name || "file";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch {
+      toast("Could not download");
+    }
+  }
+
   async function clearThisChat() {
     if (!confirm("Clear this chat? This only clears your own copy.")) return;
     await Chats.clear(chat.id);
@@ -460,24 +480,11 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
 
   // Right-click (desktop) or long-press/tap (mobile, mirroring the
   // per-message menu's onClick+onContextMenu pattern) on empty space in the
-  // message list — distinct from the per-message menu above, this is for
-  // chat-wide actions rather than anything about one message.
+  // message list — same full action set as the header's ⋮ button
+  // (headerMenuItems, defined below), just reached a second way. Kept as
+  // one shared list rather than two so they can't quietly drift apart.
   function bgMenuItems() {
-    return [
-      {
-        label: "Select messages",
-        icon: I.check(G.sub, 16),
-        onClick: () => { setSelectMode(true); setSelectedMsgIds(new Set()); },
-      },
-      {
-        label: "Search in chat",
-        icon: I.search(G.sub, 16),
-        onClick: () => { setChatSearchOpen(true); setChatSearchQuery(""); setChatSearchResults([]); },
-      },
-      { label: "Chat info", icon: I.user(G.sub, 16), onClick: () => setSheet("info") },
-      { divider: true },
-      { label: "Clear chat", icon: I.broom(G.sub, 16), danger: true, onClick: clearThisChat },
-    ];
+    return headerMenuItems();
   }
 
   async function toggleArchiveTop() {
@@ -485,6 +492,51 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
     await Chats.settings(chat.id, { archived: next });
     toast(next ? "Chat archived" : "Chat unarchived");
     onChanged();
+  }
+
+  // Moves a still-scheduled meeting to 'live' if it isn't already (a no-op
+  // otherwise), then joins the in-app call for this chat — meetings have no
+  // room of their own; a meeting IS the call happening in the chat it was
+  // created in, whoever joins it first is starting it.
+  async function joinMeeting(meeting) {
+    let password;
+    if (meeting.has_password) {
+      password = window.prompt("This meeting has a password:");
+      if (password === null) return; // cancelled
+    }
+    try {
+      await Meetings.start(meeting.id);
+      if (chat.type === "dm") onStartCall("video"); else onStartGroupCall("video", password);
+    } catch (problem) {
+      toast(problem.message || "Could not join the meeting");
+    }
+  }
+
+  async function toggleFavoriteTop() {
+    const next = !favoriteTop;
+    setFavoriteTop(next);
+    await Chats.settings(chat.id, { is_favorite: next });
+    toast(next ? "Added to favourites" : "Removed from favourites");
+    onChanged();
+  }
+
+  async function sendCallLink() {
+    try {
+      let code = chat.invite_code;
+      if (!code) {
+        const result = await Chats.createInvite(chat.id);
+        code = result.invite_code;
+      }
+      const url = `${window.location.origin}/?invite=${code}`;
+      if (navigator.share) {
+        await navigator.share({ url, text: `Join ${chat.name || "the chat"} on TalkEx` });
+      } else {
+        await navigator.clipboard.writeText(url);
+        toast("Call link copied");
+      }
+    } catch (problem) {
+      if (problem?.name !== "AbortError") toast(problem.message || "Could not create a call link");
+    }
   }
 
   async function blockPeer() {
@@ -513,6 +565,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   // deeper inside the full Chat info sheet.
   function headerMenuItems() {
     const isMutedTop = mutedUntilTop > Date.now() / 1000;
+    const canManageTop = chat.role === "owner" || chat.role === "admin";
     return [
       { label: "Chat info", icon: I.user(G.sub, 16), onClick: () => setSheet("info") },
       {
@@ -536,11 +589,34 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         icon: I.lock(lockedTop ? G.accent : G.sub, 16),
         onClick: () => setLockSheetTop(lockedTop ? "remove" : "set"),
       },
+      {
+        label: favoriteTop ? "Remove from favourites" : "Add to favourites",
+        icon: <span style={{ fontSize: 15, color: favoriteTop ? G.accent : G.sub, width: 16, textAlign: "center", lineHeight: 1 }}>★</span>,
+        onClick: toggleFavoriteTop,
+      },
+      { label: "Add to list", icon: I.archive(G.sub, 16), onClick: () => setFolderSheetOpen(true) },
       { divider: true },
+      ...(chat.type === "dm" || chat.type === "group"
+        ? [
+            {
+              label: "Voice call", icon: I.phone(G.sub, 16),
+              onClick: () => (chat.type === "dm" ? onStartCall("voice") : onStartGroupCall("voice")),
+            },
+            {
+              label: "Video call", icon: I.video(G.sub, 16),
+              onClick: () => (chat.type === "dm" ? onStartCall("video") : onStartGroupCall("video")),
+            },
+          ]
+        : []),
+      ...(["group", "channel", "community"].includes(chat.type) && canManageTop
+        ? [{ label: "Send call link", icon: I.link(G.sub, 16), onClick: sendCallLink }]
+        : []),
+      { label: "Close chat", icon: I.back(G.sub, 16), onClick: onBack },
       { label: chat.archived ? "Unarchive chat" : "Archive chat", icon: I.archive(G.sub, 16), onClick: toggleArchiveTop },
       ...(chat.type === "dm" && chat.peer_id
         ? [{ label: "Block", icon: I.ban(G.red, 16), danger: true, onClick: blockPeer }]
         : []),
+      { label: "Report", icon: I.ban(G.sub, 16), onClick: () => setReportSheetOpen(true) },
       { label: "Clear chat", icon: I.broom(G.sub, 16), onClick: clearThisChat },
       { label: "Delete chat", icon: I.trash(G.red, 16), danger: true, onClick: deleteThisChat },
     ];
@@ -814,6 +890,31 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
                      if (nowLocked) onChatLocked?.(chat.id);
                    }}/>
       )}
+      {folderSheetOpen && (
+        <FolderSheet current={chat.folder || ""} onClose={() => setFolderSheetOpen(false)}
+                     onPicked={async (folder) => {
+                       setFolderSheetOpen(false);
+                       await Chats.settings(chat.id, { folder });
+                       toast(folder ? `Added to "${folder}"` : "Removed from list");
+                       onChanged();
+                     }}/>
+      )}
+      {reportSheetOpen && (
+        <ReportSheet onClose={() => setReportSheetOpen(false)}
+                     onSubmit={async (reason) => {
+                       setReportSheetOpen(false);
+                       try {
+                         await Report.submit(
+                           chat.type === "dm" ? "user" : "chat",
+                           chat.type === "dm" ? chat.peer_id : chat.id,
+                           reason,
+                         );
+                         toast("Reported — thanks for letting us know");
+                       } catch (problem) {
+                         toast(problem.message || "Could not send the report");
+                       }
+                     }}/>
+      )}
 
       {chatSearchOpen && (
         <ChatSearchBar chatId={chat.id} query={chatSearchQuery}
@@ -942,7 +1043,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
                         }
                       }}
                       onVote={(index) => vote(message, index)}
-                      onCallAgain={(kind) => onStartCall(kind)} toast={toast}/>
+                      onCallAgain={(kind) => onStartCall(kind)} onJoinMeeting={joinMeeting} toast={toast}/>
             </div>
           </div>
         ))}
@@ -998,7 +1099,13 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
             setSelectMode(true);
             setSelectedMsgIds(new Set([menuFor.id]));
             setMenuFor(null);
-          }}/>
+          }}
+          onDownload={() => downloadMessageFile(menuFor)}
+          onInfo={() => { setInfoFor(menuFor); setMenuFor(null); }}/>
+      )}
+      {infoFor && (
+        <MessageInfoSheet message={infoFor} chat={chat} members={members} readState={readState}
+                          onClose={() => setInfoFor(null)}/>
       )}
 
       {forwarding && (
@@ -1025,7 +1132,12 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
       )}
 
       {sheet === "meeting" && (
-        <MeetingSheet chat={chat} onClose={() => setSheet(null)} toast={toast}/>
+        <MeetingSheet chat={chat} onClose={() => setSheet(null)} toast={toast}
+                     onCreated={() => {
+                       if (["group", "channel", "community"].includes(chat.type) && confirm("Share this meeting's link now?")) {
+                         sendCallLink();
+                       }
+                     }}/>
       )}
 
       {sheet === "poll" && (
@@ -1384,7 +1496,7 @@ function renderWithMentions(text, mine) {
 }
 
 function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead,
-                  onLongPress, onVote, onCallAgain, toast }) {
+                  onLongPress, onVote, onCallAgain, onJoinMeeting, toast }) {
   const mine = message.sender_id === me.id;
   const gone = message.deleted_at || message.expired;
 
@@ -1428,9 +1540,19 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead,
     onContextMenu: (event) => { event.preventDefault(); onLongPress(); },
   };
 
+  // The little "⌄" WhatsApp Web shows at a bubble's corner on hover — a
+  // direct-click alternative to right-click/long-press, desktop-only by
+  // nature since there's no such thing as "hovering" on touch. A ref rather
+  // than component state: touching opacity on mouse in/out shouldn't cost a
+  // re-render of the message it's sitting on.
+  const chevronRef = useRef(null);
+  const showChevron = () => { if (chevronRef.current) chevronRef.current.style.opacity = "1"; };
+  const hideChevron = () => { if (chevronRef.current) chevronRef.current.style.opacity = "0"; };
+
   if (message.kind === "meeting") {
     return <MeetingCard message={message} mine={mine}
-                        update={meetingUpdates?.[message.payload?.meeting_id]}/>;
+                        update={meetingUpdates?.[message.payload?.meeting_id]}
+                        onJoin={onJoinMeeting}/>;
   }
 
   // Stickers render borderless, without the chat-bubble background — same
@@ -1453,6 +1575,7 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead,
          style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start", marginBottom: 8 }}>
       <div
         {...pressHandlers}
+        onMouseEnter={showChevron} onMouseLeave={hideChevron}
         style={{
           position: "relative", maxWidth: "78%", padding: "9px 13px", borderRadius: 16,
           borderBottomRightRadius: mine ? 4 : 16,
@@ -1461,6 +1584,14 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead,
           border: mine ? "none" : `1px solid ${G.border}`,
           cursor: "pointer",
         }}>
+
+        <div ref={chevronRef} onClick={(event) => { event.stopPropagation(); onLongPress(); }} style={{
+          position: "absolute", top: 2, right: mine ? 2 : "auto", left: mine ? "auto" : 2,
+          opacity: 0, transition: "opacity 0.15s", cursor: "pointer",
+          width: 20, height: 20, borderRadius: "50%",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          background: mine ? "#ffffff26" : G.dim,
+        }}>{I.chevronDown(mine ? "#fff" : G.sub, 12)}</div>
 
         {message.forwarded_from && (
           <div style={{ fontSize: 11, color: mine ? "#ffffffaa" : G.muted, marginBottom: 3 }}>
@@ -1975,7 +2106,7 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function MeetingCard({ message, mine, update }) {
+function MeetingCard({ message, mine, update, onJoin }) {
   const [meeting, setMeeting] = useState(null);
   const meetingId = message.payload?.meeting_id;
 
@@ -2044,13 +2175,24 @@ function MeetingCard({ message, mine, update }) {
               </div>
             )}
 
-            {meeting.join_url && meeting.status === "live" && (
-              <a href={meeting.join_url} target="_blank" rel="noreferrer"
-                 style={{
-                   display: "block", marginTop: 8, padding: "9px", borderRadius: 10,
-                   background: G.green, color: "#fff", textAlign: "center",
-                   fontSize: 13, fontWeight: 600, textDecoration: "none",
-                 }}>Join now</a>
+            {(meeting.status === "scheduled" || meeting.status === "live") && (
+              meeting.join_url ? (
+                <a href={meeting.join_url} target="_blank" rel="noreferrer"
+                   style={{
+                     display: "block", marginTop: 8, padding: "9px", borderRadius: 10,
+                     background: G.green, color: "#fff", textAlign: "center",
+                     fontSize: 13, fontWeight: 600, textDecoration: "none",
+                   }}>Join now</a>
+              ) : (
+                // No external link was set — join means the in-app call for
+                // this chat, starting it for everyone if it hasn't already.
+                <button onClick={() => onJoin?.(meeting)}
+                   style={{
+                     display: "block", width: "100%", marginTop: 8, padding: "9px", borderRadius: 10,
+                     background: G.green, color: "#fff", textAlign: "center", border: "none",
+                     fontSize: 13, fontWeight: 600, cursor: "pointer",
+                   }}>{meeting.status === "live" ? "Join now — live" : "Join now"}</button>
+              )
             )}
           </>
         )}
@@ -2245,8 +2387,9 @@ function Sheet({ title, children, onClose }) {
 
 function MessageMenu({ message, me, isModerator, isPinned, isStarred, onClose, onReact, onReply,
                       onEdit, onUnsend, onDeleteForEveryone, onHide, onPin, onStar, onForward, onShare,
-                      onCopy, onSelect }) {
+                      onCopy, onSelect, onDownload, onInfo }) {
   const mine = message.sender_id === me.id;
+  const hasAttachment = Boolean(message.payload?.attachment_id);
   // Two genuinely different removals, not two labels on one action:
   //   Unsend — only the sender, on their own message, no trace left at all.
   //   Delete for everyone — sender OR a moderator; always leaves a visible
@@ -2266,12 +2409,22 @@ function MessageMenu({ message, me, isModerator, isPinned, isStarred, onClose, o
         ))}
       </div>
 
+      {mine && !message.deleted_at && (
+        <Button variant="ghost" onClick={onInfo} style={{ width: "100%", marginBottom: 8 }}>
+          Message info
+        </Button>
+      )}
       <Button variant="ghost" onClick={onReply} style={{ width: "100%", marginBottom: 8 }}>
         Reply
       </Button>
       <Button variant="ghost" onClick={onForward} style={{ width: "100%", marginBottom: 8 }}>
         Forward
       </Button>
+      {hasAttachment && !message.deleted_at && (
+        <Button variant="ghost" onClick={onDownload} style={{ width: "100%", marginBottom: 8 }}>
+          Download
+        </Button>
+      )}
       {typeof navigator !== "undefined" && navigator.share && !message.deleted_at && (
         <Button variant="ghost" onClick={onShare} style={{ width: "100%", marginBottom: 8 }}>
           Share
@@ -2314,6 +2467,66 @@ function MessageMenu({ message, me, isModerator, isPinned, isStarred, onClose, o
         <Button variant="danger" onClick={onDeleteForEveryone} style={{ width: "100%" }}>
           Delete for everyone
         </Button>
+      )}
+    </Sheet>
+  );
+}
+
+/**
+ * Who has (and hasn't yet) read a message you sent. There's no per-message
+ * read TIMESTAMP anywhere in this app — only each member's current
+ * last_read_seq watermark — so this can only say read/not-read, not "read
+ * at 3:42pm" the way WhatsApp's own Message Info does.
+ */
+function MessageInfoSheet({ message, chat, members, readState, onClose }) {
+  const isDm = chat.type === "dm";
+  const others = isDm
+    ? (chat.peer_id ? [{ id: chat.peer_id, name: chat.name, avatar_letter: chat.avatar_letter, color: chat.color }] : [])
+    : members.filter((m) => m.id !== message.sender_id);
+
+  const statusFor = (userId) => {
+    const row = readState.find((r) => r.user_id === userId);
+    if (!row) return null; // receipts off for this person, or not a member of readState at all
+    return row.last_read_seq >= message.seq ? "read" : "delivered";
+  };
+
+  const read = others.filter((person) => statusFor(person.id) === "read");
+  const delivered = others.filter((person) => statusFor(person.id) === "delivered");
+
+  return (
+    <Sheet title="Message info" onClose={onClose}>
+      {read.length === 0 && delivered.length === 0 && (
+        <div style={{ fontSize: 13, color: G.muted, padding: "10px 0" }}>
+          No read-receipt info available for this message.
+        </div>
+      )}
+      {read.length > 0 && (
+        <>
+          <div style={{ fontSize: 12, color: G.muted, marginBottom: 6, marginTop: 4 }}>
+            Read by
+          </div>
+          {read.map((person) => (
+            <div key={person.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0" }}>
+              <Av av={person.avatar_letter} color={person.color} size={30}/>
+              <div style={{ fontSize: 13.5, flex: 1 }}>{person.name}</div>
+              {I.checkDouble(G.accent, 14)}
+            </div>
+          ))}
+        </>
+      )}
+      {delivered.length > 0 && (
+        <>
+          <div style={{ fontSize: 12, color: G.muted, marginBottom: 6, marginTop: 14 }}>
+            Delivered, not yet read
+          </div>
+          {delivered.map((person) => (
+            <div key={person.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0" }}>
+              <Av av={person.avatar_letter} color={person.color} size={30}/>
+              <div style={{ fontSize: 13.5, flex: 1 }}>{person.name}</div>
+              {I.checkDouble(G.muted, 14)}
+            </div>
+          ))}
+        </>
       )}
     </Sheet>
   );
@@ -2439,10 +2652,12 @@ function ScheduleSheet({ chat, onClose, toast }) {
   );
 }
 
-function MeetingSheet({ chat, onClose, toast }) {
+export function MeetingSheet({ chat, onClose, toast, onCreated }) {
   const [form, setForm] = useState({
     title: "", agenda: "", when: "", duration: 30, reminder: 10, joinUrl: "",
+    waitingRoom: false, password: "",
   });
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
   const set = (key) => (event) => setForm({ ...form, [key]: event.target.value });
 
@@ -2455,7 +2670,7 @@ function MeetingSheet({ chat, onClose, toast }) {
     }
     setBusy(true);
     try {
-      await Meetings.create({
+      const meeting = await Meetings.create({
         chatId: chat.id,
         title: form.title.trim(),
         agenda: form.agenda.trim(),
@@ -2463,8 +2678,11 @@ function MeetingSheet({ chat, onClose, toast }) {
         durationMin: Number(form.duration) || 30,
         reminderMin: Number(form.reminder) || 0,
         joinUrl: form.joinUrl.trim(),
+        waitingRoom: form.waitingRoom,
+        password: form.password.trim(),
       });
       toast("Meeting scheduled");
+      onCreated?.(meeting);
       onClose();
     } catch (problem) {
       toast(problem.message || "Could not create meeting");
@@ -2490,6 +2708,28 @@ function MeetingSheet({ chat, onClose, toast }) {
       </div>
       <Field label="Join link (optional)" value={form.joinUrl} onChange={set("joinUrl")}
              placeholder="https://meet.example.com/abc"/>
+
+      <div onClick={() => setShowAdvanced((v) => !v)} style={{
+        display: "flex", alignItems: "center", gap: 6, cursor: "pointer",
+        fontSize: 12.5, color: G.accentText, margin: "4px 0 12px",
+      }}>{showAdvanced ? "Hide" : "Show"} security options {I.chevronDown(G.accentText, 12)}</div>
+
+      {showAdvanced && (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+            <Toggle on={form.waitingRoom} onChange={(value) => setForm({ ...form, waitingRoom: value })}/>
+            <div>
+              <div style={{ fontSize: 13.5 }}>Waiting room</div>
+              <div style={{ fontSize: 11.5, color: G.muted }}>
+                You approve everyone who isn't already the host before they join
+              </div>
+            </div>
+          </div>
+          <Field label="Password (optional)" value={form.password} onChange={set("password")}
+                 placeholder="Leave blank for none"/>
+        </>
+      )}
+
       <Button onClick={save} disabled={busy} style={{ width: "100%" }}>
         {busy ? "Saving…" : "Schedule meeting"}
       </Button>
@@ -3679,6 +3919,57 @@ function InviteLinkSheet({ chat, onClose, toast }) {
           </Button>
         </>
       )}
+    </Sheet>
+  );
+}
+
+const FOLDER_PRESETS = ["", "Work", "Family", "Friends"];
+
+export function FolderSheet({ current, onClose, onPicked }) {
+  const [custom, setCustom] = useState(FOLDER_PRESETS.includes(current) ? "" : current);
+
+  return (
+    <Sheet title="Add to list" onClose={onClose}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+        {FOLDER_PRESETS.map((option) => (
+          <button key={option || "none"} onClick={() => onPicked(option)}
+            style={{
+              padding: "8px 16px", borderRadius: 20, cursor: "pointer",
+              border: `1px solid ${current === option ? G.accent : G.border}`,
+              background: current === option ? G.accentSoft : "transparent",
+              color: current === option ? G.accentText : G.sub, fontSize: 13,
+            }}>{option || "None"}</button>
+        ))}
+      </div>
+      <div style={{ fontSize: 12.5, color: G.muted, marginBottom: 6 }}>Or a custom list name</div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input value={custom} onChange={(event) => setCustom(event.target.value.slice(0, 32))}
+               placeholder="e.g. Clients" style={{
+                 flex: 1, padding: "11px 13px", borderRadius: 10, border: `1px solid ${G.border}`,
+                 background: G.dim, color: G.text, fontSize: 14, boxSizing: "border-box",
+               }}/>
+        <Button onClick={() => custom.trim() && onPicked(custom.trim())} disabled={!custom.trim()}>Save</Button>
+      </div>
+    </Sheet>
+  );
+}
+
+const REPORT_REASONS = [
+  "Spam", "Scam or fraud", "Inappropriate content", "Harassment or abuse", "Something else",
+];
+
+function ReportSheet({ onClose, onSubmit }) {
+  return (
+    <Sheet title="Report" onClose={onClose}>
+      <div style={{ fontSize: 12.5, color: G.muted, marginBottom: 14 }}>
+        This is sent to us for review — the other person is never told you reported them.
+      </div>
+      {REPORT_REASONS.map((reason) => (
+        <div key={reason} onClick={() => onSubmit(reason)} style={{
+          padding: "13px 14px", borderRadius: 12, marginBottom: 8, cursor: "pointer",
+          background: G.dim, border: `1px solid ${G.border}`, fontSize: 14,
+        }}>{reason}</div>
+      ))}
     </Sheet>
   );
 }

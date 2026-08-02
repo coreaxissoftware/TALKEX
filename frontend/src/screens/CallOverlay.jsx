@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Av, G, I } from "../ui.jsx";
 
-function mmss(totalSeconds) {
+export function mmss(totalSeconds) {
   const seconds = Math.max(0, Math.round(totalSeconds || 0));
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
