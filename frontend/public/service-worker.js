@@ -58,7 +58,7 @@ self.addEventListener("fetch", (event) => {
           return response;
         })
         .catch(() =>
-          caches.match(request).then((cached) => cached || caches.match("/"))
+          caches.match(request).then((cached) => cached || caches.match("/talkex/"))
         )
     );
     return;
@@ -141,7 +141,7 @@ self.addEventListener("notificationclick", (event) => {
         existing.focus();
         return;
       }
-      await self.clients.openWindow("/");
+      await self.clients.openWindow("/talkex/");
     })()
   );
 });
