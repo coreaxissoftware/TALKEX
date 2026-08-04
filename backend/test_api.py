@@ -2851,6 +2851,96 @@ def test_a_call_invite_reaches_the_dm_peer(client):
             assert event["from_name"] == "Alice"
 
 
+# ── Push fallback for missed calls ──────────────────────────────────────────
+# call_invite/group_call_invite had exactly one delivery path — the live
+# WebSocket relay — with nothing behind it. Someone with no open connection at
+# all (app closed, a mobile browser that suspended a backgrounded tab's
+# socket) never learned they were being called; the caller's own ring
+# timeout would eventually show "No answer" with nothing having ever reached
+# the other side. notify_incoming_call is the fix: a push notification for
+# exactly that case, mirroring notify_offline_members' existing pattern for
+# ordinary messages.
+
+def test_call_invite_pushes_the_callee_when_they_have_no_open_socket(client, monkeypatch):
+    alice, alice_id, alice_name = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    client.post("/push/subscribe", headers=bob, json={
+        "endpoint": "https://push.example.com/bob-call", "p256dh": "key1", "auth": "auth1",
+    })
+    calls = []
+    monkeypatch.setattr(main.push, "send",
+                        lambda sub, title, body, data=None: calls.append((title, body, data)) or "ok")
+
+    # Bob has no open socket at all — the exact case this exists for.
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
+        alice_socket.send_json({
+            "type": "call_invite", "to": bob_id, "chat_id": chat_id,
+            "call_kind": "video", "sdp": {"type": "offer", "sdp": "v=0..."},
+        })
+        alice_socket.send_json({"type": "ping"})
+        assert alice_socket.receive_json()["type"] == "pong"
+
+    assert len(calls) == 1
+    title, body, data = calls[0]
+    assert "Alice" in title
+    assert data["chat_id"] == chat_id
+    assert data["incoming_call"] is True
+
+
+def test_call_invite_does_not_push_a_connected_but_backgrounded_callee(client, monkeypatch):
+    """A backgrounded tab still has its socket open and still receives the
+    live call_invite relay over it — no push needed, same as an ordinary
+    message wouldn't push someone with a live (even unfocused) connection."""
+    alice, alice_id, alice_name = make_user(client, "Alice")
+    bob, bob_id, bob_name = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    client.post("/push/subscribe", headers=bob, json={
+        "endpoint": "https://push.example.com/bob-call2", "p256dh": "key1", "auth": "auth1",
+    })
+    calls = []
+    monkeypatch.setattr(main.push, "send", lambda *a, **k: calls.append(1) or "ok")
+
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket:
+        bob_socket.send_json({"type": "focus", "focused": False})
+        with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
+            assert bob_socket.receive_json()["type"] == "presence"  # alice connecting
+
+            alice_socket.send_json({
+                "type": "call_invite", "to": bob_id, "chat_id": chat_id,
+                "call_kind": "voice", "sdp": {"type": "offer", "sdp": "v=0..."},
+            })
+            assert bob_socket.receive_json()["type"] == "call_invite"
+
+    assert len(calls) == 0
+
+
+def test_group_call_ring_pushes_members_with_no_open_socket(client, monkeypatch):
+    alice, alice_id, alice_name = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = make_group(client, alice, [bob_id])
+
+    client.post("/push/subscribe", headers=bob, json={
+        "endpoint": "https://push.example.com/bob-group-call", "p256dh": "key1", "auth": "auth1",
+    })
+    calls = []
+    monkeypatch.setattr(main.push, "send",
+                        lambda sub, title, body, data=None: calls.append((title, data)) or "ok")
+
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
+        alice_socket.send_json({"type": "group_call_start", "chat_id": chat_id, "call_kind": "voice"})
+        alice_socket.receive_json()  # group_call_roster
+        alice_socket.send_json({"type": "ping"})
+        assert alice_socket.receive_json()["type"] == "pong"
+
+    assert len(calls) == 1
+    title, data = calls[0]
+    assert "Alice" in title
+    assert data["chat_id"] == chat_id
+
+
 def test_call_signaling_round_trip_answer_ice_and_end(client):
     alice, alice_id, alice_name = make_user(client, "Alice")
     bob, bob_id, bob_name = make_user(client, "Bob")

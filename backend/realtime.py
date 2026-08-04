@@ -113,6 +113,19 @@ class Hub:
         must still receive events, not the presence indicator."""
         return set(self._connections.keys())
 
+    def has_connection(self, user_id: str) -> bool:
+        """
+        Whether this account has ANY open socket at all — connected but
+        backgrounded still counts, unlike is_online() above. This is the
+        right check before falling back to a push notification: a
+        backgrounded tab still receives a live send_to_user/send_to_chat
+        delivery over its open socket, so it needs no push; a user with
+        no socket at all (app closed, phone locked past whatever keeps a
+        mobile browser's WebSocket alive, a different idle device) will
+        never see the live event and is the actual case a push covers.
+        """
+        return bool(self._connections.get(user_id))
+
     async def send_to_user(self, user_id: str, event: dict[str, Any]):
         """
         Deliver to every device a user has open.

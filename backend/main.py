@@ -1349,6 +1349,34 @@ def push_preview_text(kind: str, text: str, payload: dict) -> str:
     return labels.get(kind, text or "New message")
 
 
+async def push_to_users(user_ids: list[str], title: str, body: str, data: dict):
+    """
+    Web Push to a specific set of accounts, regardless of their online
+    status — callers decide who actually needs one (see
+    notify_offline_members and notify_incoming_call below, which differ in
+    exactly that decision).
+    """
+    if not user_ids:
+        return
+    placeholders = ",".join("?" for _ in user_ids)
+    subs = db.query_all(
+        f"SELECT * FROM push_subscriptions WHERE user_id IN ({placeholders})",
+        tuple(user_ids),
+    )
+
+    for sub in subs:
+        subscription_info = {
+            "endpoint": sub["endpoint"],
+            "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]},
+        }
+        # webpush() does blocking network I/O (it's the `requests` library
+        # under the hood) — running it on the event loop thread would stall
+        # every other request for as long as the push service takes to answer.
+        result = await asyncio.to_thread(push.send, subscription_info, title, body, data)
+        if result == "gone":
+            db.execute("DELETE FROM push_subscriptions WHERE id = ?", (sub["id"],))
+
+
 async def notify_offline_members(chat_id: str, sender_id: str, title: str, body: str):
     """
     Web Push for whoever isn't reachable over the live socket right now.
@@ -1364,27 +1392,33 @@ async def notify_offline_members(chat_id: str, sender_id: str, title: str, body:
         (chat_id, sender_id),
     )
     offline_ids = [row["user_id"] for row in member_rows if not hub.is_online(row["user_id"])]
-    if not offline_ids:
+    await push_to_users(offline_ids, title, body, {"chat_id": chat_id})
+
+
+async def notify_incoming_call(user_id: str, chat_id: str, caller_name: str, call_kind: str):
+    """
+    A call/meeting invite has exactly one delivery path — the live
+    WebSocket relay in the "call_invite"/"group_call_start" handlers — with
+    no fallback of any kind before this existed. Someone whose app isn't
+    open (or whose browser suspended a backgrounded tab's WebSocket, common
+    on mobile — unlike an ordinary message, which still gets a push in that
+    case via notify_offline_members) would never learn they were being
+    called at all: the invite was simply dropped on the floor, and the
+    caller's own client-side ring timeout would eventually show "No answer"
+    with the other side never having heard anything ring.
+
+    Checked against has_connection (any open socket), not is_online
+    (focused only) — a backgrounded-but-connected tab still receives the
+    live call_invite relay over its open socket and needs no push; only
+    someone with no connection at all was actually going to miss this.
+    """
+    if hub.has_connection(user_id):
         return
-
-    placeholders = ",".join("?" for _ in offline_ids)
-    subs = db.query_all(
-        f"SELECT * FROM push_subscriptions WHERE user_id IN ({placeholders})",
-        tuple(offline_ids),
+    verb = "Video call" if call_kind == "video" else "Voice call"
+    await push_to_users(
+        [user_id], f"{verb} from {caller_name}", "Tap to open TalkEx and answer",
+        {"chat_id": chat_id, "incoming_call": True},
     )
-
-    for sub in subs:
-        subscription_info = {
-            "endpoint": sub["endpoint"],
-            "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]},
-        }
-        # webpush() does blocking network I/O (it's the `requests` library
-        # under the hood) — running it on the event loop thread would stall
-        # every other request for as long as the push service takes to answer.
-        result = await asyncio.to_thread(
-            push.send, subscription_info, title, body, {"chat_id": chat_id})
-        if result == "gone":
-            db.execute("DELETE FROM push_subscriptions WHERE id = ?", (sub["id"],))
 
 
 @app.post("/api/v1/messages")
@@ -5149,6 +5183,8 @@ async def websocket_endpoint(socket: WebSocket, ticket: str = Query(default=""))
                 # to tear its own call state down.
 
                 await hub.send_to_user(to_user_id, relay)
+                if kind == "call_invite":
+                    await notify_incoming_call(to_user_id, chat_id, relay["from_name"], call_kind)
 
             elif kind == "group_call_start":
                 # "Start" and "join" are the same message — whoever sends this
@@ -5264,6 +5300,7 @@ async def websocket_endpoint(socket: WebSocket, ticket: str = Query(default=""))
                             "type": "group_call_invite", "chat_id": chat_id, "call_kind": call_kind,
                             **room[user_id],
                         })
+                        await notify_incoming_call(row["user_id"], chat_id, room[user_id]["name"], call_kind)
                 else:
                     # Tell everyone ALREADY in the room about the new arrival,
                     # so their clients know to expect an offer from them.
@@ -5356,6 +5393,8 @@ async def websocket_endpoint(socket: WebSocket, ticket: str = Query(default=""))
                         "type": "group_call_invite", "chat_id": chat_id, "call_kind": call_kind,
                         **_participant_info(user_id),
                     })
+                    await notify_incoming_call(
+                        target_id, chat_id, _participant_info(user_id)["name"], call_kind)
 
             elif kind in GROUP_CALL_SIGNAL_TYPES:
                 chat_id = payload.get("chat_id", "")
