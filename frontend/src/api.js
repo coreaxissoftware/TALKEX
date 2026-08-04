@@ -882,6 +882,10 @@ export class Realtime {
     };
 
     this.socket.onmessage = (event) => {
+      // Any message from the server counts as proof the pipe is alive in
+      // the read direction, not just pongs — startHeartbeat's dead-pipe
+      // check reads this to decide whether to force a reconnect.
+      this.lastPongAt = Date.now();
       const payload = JSON.parse(event.data);
       if (payload.type === "pong") return;
       this.handlers.onEvent?.(payload);
@@ -931,9 +935,32 @@ export class Realtime {
 
   startHeartbeat() {
     this.stopHeartbeat();
-    // A socket whose network vanished looks open until you try to write to it.
-    // The ping is what turns a silently dead link into a close event.
-    this.heartbeat = setInterval(() => this.send({ type: "ping" }), HEARTBEAT_MS);
+    // A socket whose network vanished looks open until you try to write
+    // to it. The ping is what turns a silently dead link into a close
+    // event — and send()'s own broken-socket path (see above) now
+    // immediately kicks a reconnect on the very first failure instead of
+    // waiting for onclose to eventually fire the usual back-off flow.
+    let missedPongs = 0;
+    this.lastPongAt = Date.now();
+    this.heartbeat = setInterval(() => {
+      // Server sends {type:"pong"} for every ping (see main.py's
+      // websocket_endpoint) — a stretch of pings with no reply means the
+      // pipe is dead in ONE direction even if the write itself succeeded,
+      // which is a very common way a "connected" socket becomes useless.
+      // Two missed pongs (≥40s of silence from the server) trips a
+      // manual reconnect rather than trusting the underlying transport
+      // to eventually notice.
+      if (Date.now() - this.lastPongAt > HEARTBEAT_MS * 2 + 5000) {
+        missedPongs += 1;
+        if (missedPongs >= 1) {
+          this.socket?.close();  // triggers onclose → scheduleReconnect
+          return;
+        }
+      } else {
+        missedPongs = 0;
+      }
+      this.send({ type: "ping" });
+    }, HEARTBEAT_MS);
   }
 
   stopHeartbeat() {
@@ -943,8 +970,24 @@ export class Realtime {
 
   send(payload) {
     if (this.socket?.readyState === WebSocket.OPEN) {
-      this.socket.send(JSON.stringify(payload));
-      return true;
+      try {
+        this.socket.send(JSON.stringify(payload));
+        return true;
+      } catch {
+        // The socket said OPEN but write threw — a very-recently-dead
+        // connection the readyState hasn't caught up on yet. Fall through
+        // to the reconnect path below so this isn't silently lost.
+      }
+    }
+    // Socket isn't usable: kick a reconnect immediately (not the slow
+    // heartbeat-driven one) so the next attempt has a real chance, and
+    // report failure so the caller can surface an error instead of
+    // pretending the message went out. Nothing above ever checked this
+    // return value before — a call_invite quietly dropped on the floor
+    // is exactly what left "Calling…" spinning until the ring timeout.
+    if (!this.closedOnPurpose && !this.reconnectTimer && this.socket?.readyState !== WebSocket.CONNECTING) {
+      this.attempt = 0; // don't back off — this is a user-initiated action, not a passive drop
+      this.connect();
     }
     return false;
   }

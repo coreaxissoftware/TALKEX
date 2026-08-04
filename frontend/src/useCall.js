@@ -128,9 +128,22 @@ export function useCall(events, send, toast) {
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    sendRef.current({
+    // send() returns false when the WebSocket is dead — this used to be
+    // silently ignored (call_invite dropped on the floor, "Calling…"
+    // spinning forever until the 30-second ring timeout eventually logged
+    // "No answer" for a call the other side never heard of). Now we
+    // surface it as a real error and give up immediately: send() also
+    // kicks a reconnect internally, so the next attempt has a fresh
+    // socket to work with.
+    const sent = sendRef.current({
       type: "call_invite", to: peerId, chat_id: chat.id, call_kind: callKind, sdp: offer,
     });
+    if (!sent) {
+      toastRef.current?.("Connection lost — try again in a moment");
+      teardown();
+      setCall(null);
+      return;
+    }
 
     ringTimerRef.current = setTimeout(() => {
       const current = callRef.current;
