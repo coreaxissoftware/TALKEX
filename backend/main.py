@@ -1400,19 +1400,26 @@ async def notify_incoming_call(user_id: str, chat_id: str, caller_name: str, cal
     A call/meeting invite has exactly one delivery path — the live
     WebSocket relay in the "call_invite"/"group_call_start" handlers — with
     no fallback of any kind before this existed. Someone whose app isn't
-    open (or whose browser suspended a backgrounded tab's WebSocket, common
-    on mobile — unlike an ordinary message, which still gets a push in that
-    case via notify_offline_members) would never learn they were being
-    called at all: the invite was simply dropped on the floor, and the
-    caller's own client-side ring timeout would eventually show "No answer"
-    with the other side never having heard anything ring.
+    open would never learn they were being called at all: the invite was
+    simply dropped on the floor, and the caller's own client-side ring
+    timeout would eventually show "No answer" with the other side never
+    having heard anything ring.
 
-    Checked against has_connection (any open socket), not is_online
-    (focused only) — a backgrounded-but-connected tab still receives the
-    live call_invite relay over its open socket and needs no push; only
-    someone with no connection at all was actually going to miss this.
+    Checked against is_online (focused), not has_connection (any open
+    socket) — deliberately more aggressive than notify_offline_members'
+    equivalent choice for ordinary messages. A mobile browser routinely
+    keeps a backgrounded tab's WebSocket object technically open for a
+    while after suspending its JavaScript (common on iOS Safari and many
+    Android setups): has_connection would read that as "still reachable"
+    and skip the push, but the tab genuinely cannot process the incoming
+    call_invite it never stopped "having a connection" for. A live,
+    focused tab (a desktop window sitting behind others, say) DOES still
+    receive the socket event fine and also gets a redundant push here —
+    an acceptable cost against a call ringing into total silence, which is
+    a far worse failure for something this time-sensitive than it would be
+    for an ordinary message.
     """
-    if hub.has_connection(user_id):
+    if hub.is_online(user_id):
         return
     verb = "Video call" if call_kind == "video" else "Voice call"
     await push_to_users(

@@ -2889,10 +2889,16 @@ def test_call_invite_pushes_the_callee_when_they_have_no_open_socket(client, mon
     assert data["incoming_call"] is True
 
 
-def test_call_invite_does_not_push_a_connected_but_backgrounded_callee(client, monkeypatch):
-    """A backgrounded tab still has its socket open and still receives the
-    live call_invite relay over it — no push needed, same as an ordinary
-    message wouldn't push someone with a live (even unfocused) connection."""
+def test_call_invite_also_pushes_a_connected_but_unfocused_callee(client, monkeypatch):
+    """Deliberately more aggressive than the equivalent choice for ordinary
+    messages: a mobile browser routinely keeps a backgrounded tab's
+    WebSocket object technically open for a while after suspending its
+    JavaScript, so "has an open socket" is not proof the tab can actually
+    process the incoming call_invite it never stopped "having a
+    connection" for. A push fires whenever the callee isn't the FOCUSED
+    tab, even though the live relay is also attempted — a redundant
+    notification on an actually-live backgrounded desktop tab is a small
+    cost against a call ringing into total silence on a suspended one."""
     alice, alice_id, alice_name = make_user(client, "Alice")
     bob, bob_id, bob_name = make_user(client, "Bob")
     chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
@@ -2901,10 +2907,42 @@ def test_call_invite_does_not_push_a_connected_but_backgrounded_callee(client, m
         "endpoint": "https://push.example.com/bob-call2", "p256dh": "key1", "auth": "auth1",
     })
     calls = []
-    monkeypatch.setattr(main.push, "send", lambda *a, **k: calls.append(1) or "ok")
+    monkeypatch.setattr(main.push, "send",
+                        lambda sub, title, body, data=None: calls.append((title, data)) or "ok")
 
     with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket:
         bob_socket.send_json({"type": "focus", "focused": False})
+        with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
+            assert bob_socket.receive_json()["type"] == "presence"  # alice connecting
+
+            alice_socket.send_json({
+                "type": "call_invite", "to": bob_id, "chat_id": chat_id,
+                "call_kind": "voice", "sdp": {"type": "offer", "sdp": "v=0..."},
+            })
+            # The live relay still arrives too — the push is additive, not
+            # a replacement for it.
+            assert bob_socket.receive_json()["type"] == "call_invite"
+
+    assert len(calls) == 1
+    title, data = calls[0]
+    assert "Alice" in title
+    assert data["chat_id"] == chat_id
+
+
+def test_call_invite_does_not_push_a_focused_connected_callee(client, monkeypatch):
+    """The one case that genuinely needs no push: the callee's tab is
+    actually focused and will see the live relay arrive in real time."""
+    alice, alice_id, alice_name = make_user(client, "Alice")
+    bob, bob_id, bob_name = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    client.post("/push/subscribe", headers=bob, json={
+        "endpoint": "https://push.example.com/bob-call3", "p256dh": "key1", "auth": "auth1",
+    })
+    calls = []
+    monkeypatch.setattr(main.push, "send", lambda *a, **k: calls.append(1) or "ok")
+
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket:
         with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
             assert bob_socket.receive_json()["type"] == "presence"  # alice connecting
 

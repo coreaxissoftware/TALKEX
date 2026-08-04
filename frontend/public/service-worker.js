@@ -54,7 +54,18 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(
       fetch(request)
         .then((response) => {
-          caches.open(SHELL_CACHE).then((cache) => cache.put(request, response.clone()));
+          // Clone BEFORE anything else touches this response — a Response
+          // body can only ever be read once; cloning it after the caller
+          // (or another handler racing on the same underlying stream) has
+          // already started consuming it throws "body is already used."
+          // Cloning first and working only with clones from here on is the
+          // standard fix. cache.put() is also given its own .catch(): it
+          // rejects outright on some responses (opaque cross-origin,
+          // certain redirects) and an unhandled rejection in a fire-and-
+          // forget promise like this one surfaces as a console error for a
+          // cache write nobody needs to be told failed.
+          const forCache = response.clone();
+          caches.open(SHELL_CACHE).then((cache) => cache.put(request, forCache)).catch(() => {});
           return response;
         })
         .catch(() =>
@@ -74,7 +85,10 @@ self.addEventListener("fetch", (event) => {
       const network = fetch(request)
         .then((response) => {
           if (response && response.ok) {
-            caches.open(SHELL_CACHE).then((cache) => cache.put(request, response.clone()));
+            // See the navigate handler above for why clone-first and the
+            // separate .catch() both matter here.
+            const forCache = response.clone();
+            caches.open(SHELL_CACHE).then((cache) => cache.put(request, forCache)).catch(() => {});
           }
           return response;
         })
