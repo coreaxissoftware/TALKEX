@@ -539,6 +539,11 @@ def verify_phone_otp(request: VerifyOtpRequest):
     if existing:
         consume_otp(request.phone)
         token = start_session(existing["id"], request.device_label)
+        # start_session() may have just promoted this account to superadmin
+        # (see SUPERADMIN_USERNAME) — re-fetch rather than reusing `existing`,
+        # which was read BEFORE that write, so the very login response that
+        # triggers the promotion doesn't itself claim it never happened.
+        existing = db.query_one("SELECT * FROM users WHERE id = ?", (existing["id"],))
         return {
             "token": token, "user": public_user(existing), "created": False,
             "account_disabled": bool(existing["disabled_at"]),
@@ -677,6 +682,9 @@ def login(request: LoginRequest):
         return {"requires_pin": True, "pending_token": pending_token}
 
     token = start_session(user["id"], request.device_label)
+    # Re-fetch: start_session() may have just promoted this account to
+    # superadmin, a write that happens AFTER `user` was read above.
+    user = db.query_one("SELECT * FROM users WHERE id = ?", (user["id"],))
     # Still lets a deactivated account's own owner sign back in — that's how
     # reactivating works — the frontend just shows a "welcome back, want to
     # reactivate?" screen instead of the normal app when this is true.
@@ -735,6 +743,9 @@ def verify_two_step_pin(request: VerifyTwoStepRequest):
     if auth.verify_password(request.pin, user["two_step_pin_hash"]):
         del _pending_logins[request.pending_token]
         token = start_session(user["id"], entry["device_label"])
+        # See the matching re-fetch in login() above — start_session() may
+        # have just promoted this account and `user` predates that write.
+        user = db.query_one("SELECT * FROM users WHERE id = ?", (user["id"],))
         return {"token": token, "user": public_user(user)}
 
     # Not the PIN — check whether it is one of the recovery codes instead.
@@ -752,6 +763,7 @@ def verify_two_step_pin(request: VerifyTwoStepRequest):
             (user["id"],),
         )
         token = start_session(user["id"], entry["device_label"])
+        user = db.query_one("SELECT * FROM users WHERE id = ?", (user["id"],))
         return {"token": token, "user": public_user(user), "two_step_disabled": True}
 
     entry["attempts"] += 1

@@ -4105,6 +4105,55 @@ def test_an_ordinary_account_is_never_promoted(client, monkeypatch):
     assert client.get("/admin/stats", headers=alice).status_code == 403
 
 
+def test_promoting_an_account_that_already_existed_shows_up_on_that_same_login(client, monkeypatch):
+    """
+    The real-world case: an account signs up BEFORE anyone sets
+    SUPERADMIN_USERNAME to match it — a fresh /auth/register on an
+    already-matching username (make_superadmin above) never actually
+    exercises this, since start_session()'s promotion runs before the
+    request/response boundary either way there.
+
+    The bug this guards: start_session() promotes is_superadmin in the DB,
+    but every login endpoint used to read the user row BEFORE calling
+    start_session() and hand THAT stale snapshot to public_user() for the
+    response — so the very login that triggers the promotion reported the
+    account as an ordinary user, and the client had no idea anything had
+    changed until some later, unrelated request happened to re-fetch /me.
+    """
+    alice, alice_id, username = make_user(client, "Alice")
+    assert not client.get("/me", headers=alice).json().get("is_superadmin")
+
+    monkeypatch.setattr(main, "SUPERADMIN_USERNAME", username)
+    login = client.post("/auth/login", json={"username": username, "password": "correct horse battery"})
+    assert login.status_code == 200
+    assert login.json()["user"]["is_superadmin"]
+
+    # And a fresh call confirms it stuck, not just an artifact of this response.
+    assert client.get("/me", headers=alice).json()["is_superadmin"]
+
+
+def test_promoting_a_phone_signup_account_shows_up_on_that_same_otp_login(client, monkeypatch):
+    """Same bug as above, hit through the actual flow the app pushes people
+    toward — sign up by phone, no password ever known, sign back in later by
+    phone once SUPERADMIN_USERNAME has been pointed at the auto-generated
+    username (e.g. user9113107586) that phone signup produces."""
+    sent = capture_otp(monkeypatch)
+    client.post("/auth/phone/request-otp", json={"phone": "+15551230800"})
+    signup = client.post("/auth/phone/verify-otp", json={
+        "phone": "+15551230800", "code": sent["code"], "name": "Phone Only",
+    }).json()
+    username = signup["user"]["username"]
+    assert not signup["user"].get("is_superadmin")
+
+    monkeypatch.setattr(main, "SUPERADMIN_USERNAME", username)
+    client.post("/auth/phone/request-otp", json={"phone": "+15551230800"})
+    login = client.post("/auth/phone/verify-otp", json={
+        "phone": "+15551230800", "code": sent["code"],
+    })
+    assert login.status_code == 200
+    assert login.json()["user"]["is_superadmin"]
+
+
 ADMIN_ROUTES = [
     ("GET", "/admin/stats", None),
     ("GET", "/admin/users", None),
