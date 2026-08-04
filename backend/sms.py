@@ -66,20 +66,24 @@ def send_otp(phone: str, code: str) -> str:
     # MSG91 wants a bare country-code-prefixed number — no "+", no spaces.
     mobile = re.sub(r"[^0-9]", "", phone)
 
-    # authkey is a standing, reusable credential — unlike mobile/otp, which
-    # only matter for the few minutes this code is live, a leaked authkey
-    # (proxy/CDN access log, HTTP debug tooling, anything that records
-    # outbound request URLs) lets anyone send SMS on this account's bill
-    # until it's rotated. MSG91 accepts it as a header on this endpoint too,
-    # so it never has to appear in the URL.
+    # authkey back in the query string, matching the OTP-widget endpoint's
+    # confirmed-working shape (verified end-to-end: real OTPs arriving on a
+    # real phone). A later pass moved it to a header on the theory that
+    # MSG91 accepts authkey as a header the way its Flow API does — that
+    # was never actually verified against THIS endpoint specifically, and
+    # broke live delivery. Header auth support varies per MSG91 product;
+    # don't change this again without confirming against MSG91's docs for
+    # the OTP-widget endpoint specifically, not assumed from a different
+    # product's behavior.
     query = urllib.parse.urlencode({
         "template_id": template_id,
         "mobile": mobile,
+        "authkey": auth_key,
         "otp": code,
     })
     request = urllib.request.Request(
         f"https://control.msg91.com/api/v5/otp?{query}", method="POST",
-        headers={"Accept": "application/json", "authkey": auth_key},
+        headers={"Accept": "application/json"},
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
