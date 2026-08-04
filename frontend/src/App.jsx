@@ -64,6 +64,7 @@ export default function App() {
   const typingTimers = useRef({});
   const eventCounter = useRef(0);
   const reloadTimer = useRef(null);
+  const plannerReloadTimer = useRef(null);
   const [reconnectedAt, setReconnectedAt] = useState(0);
   const [theme, setThemeState] = useState(getStoredTheme);
   const [accent, setAccentState] = useState(getStoredAccent);
@@ -80,8 +81,16 @@ export default function App() {
   const hiddenAt = useRef(0);
 
   useEffect(() => {
-    if (!isAppLockEnabled()) return;
+    // isAppLockEnabled() is checked INSIDE the handler, on every visibility
+    // change, rather than once here at mount. The old version bailed out of
+    // attaching the listener at all when the lock happened to be off on
+    // first render — so a user who turned it on mid-session (Settings just
+    // writes to localStorage; it doesn't tell this component) got a "app
+    // lock turned on" toast for a listener that was never actually
+    // attached, and backgrounding the tab silently never re-locked for the
+    // rest of that session.
     function onVisibility() {
+      if (!isAppLockEnabled()) return;
       if (document.visibilityState === "hidden") {
         hiddenAt.current = Date.now();
       } else if (hiddenAt.current) {
@@ -199,12 +208,21 @@ export default function App() {
   // "What have I got waiting" mirrors Planner's own framing of the screen:
   // upcoming meetings plus messages still queued to send.
   const [plannerCount, setPlannerCount] = useState(0);
-  const reloadPlannerCount = useCallback(() => {
+  const reloadPlannerCountNow = useCallback(() => {
     if (!getToken()) return;
     Promise.all([Meetings.mine(true), Scheduled.list()])
       .then(([upcoming, pending]) => setPlannerCount(upcoming.length + pending.length))
       .catch(() => {});
   }, []);
+
+  // Same coalescing reloadChatsSoon above uses: a burst of meeting events
+  // (several RSVPs on one meeting, a few scheduled sends failing around the
+  // same time) used to fire one full pair of requests PER EVENT instead of
+  // one for the whole burst.
+  const reloadPlannerCount = useCallback(() => {
+    clearTimeout(plannerReloadTimer.current);
+    plannerReloadTimer.current = setTimeout(reloadPlannerCountNow, 400);
+  }, [reloadPlannerCountNow]);
 
   useEffect(() => {
     if (me) reloadPlannerCount();
@@ -564,8 +582,17 @@ export default function App() {
           )}
           {tab === "status" && <Status me={me} toast={toast}/>}
           {tab === "planner" && (
-            <Planner toast={toast} chats={chats} onOpenChat={setOpenChat}
-                     onJoinCall={(chatId, kind, password) => groupCall.join(chatId, kind, password)}/>
+            <Planner toast={toast} chats={chats} onOpenChat={setOpenChat} me={me}
+                     onJoinCall={(chatId, kind, password) => {
+                       // A meeting can be scheduled inside a DM, but group_call_start
+                       // (main.py) is deliberately a no-op there — DMs already have their
+                       // own ring/accept 1:1 call flow, and routing through the group-call
+                       // machinery instead would silently connect nothing (see
+                       // test_group_calling_is_restricted_to_group_chats on the backend).
+                       const target = chats.find((c) => c.id === chatId);
+                       if (target?.type === "dm") call.startCall(target, kind);
+                       else groupCall.join(chatId, kind, password);
+                     }}/>
           )}
           {tab === "settings" && (
             <Settings me={me} onUpdated={setMe} toast={toast}
@@ -892,8 +919,17 @@ function DesktopShell({
             )}
             {tab === "status" && <Status me={me} toast={toast}/>}
             {tab === "planner" && (
-              <Planner toast={toast} chats={chats} onOpenChat={onOpenChat}
-                       onJoinCall={(chatId, kind, password) => groupCall.join(chatId, kind, password)}/>
+              <Planner toast={toast} chats={chats} onOpenChat={onOpenChat} me={me}
+                       onJoinCall={(chatId, kind, password) => {
+                       // A meeting can be scheduled inside a DM, but group_call_start
+                       // (main.py) is deliberately a no-op there — DMs already have their
+                       // own ring/accept 1:1 call flow, and routing through the group-call
+                       // machinery instead would silently connect nothing (see
+                       // test_group_calling_is_restricted_to_group_chats on the backend).
+                       const target = chats.find((c) => c.id === chatId);
+                       if (target?.type === "dm") call.startCall(target, kind);
+                       else groupCall.join(chatId, kind, password);
+                     }}/>
             )}
             {tab === "settings" && (
               <Settings me={me} onUpdated={onMeUpdated} toast={toast}

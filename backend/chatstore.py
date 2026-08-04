@@ -275,12 +275,20 @@ def serialise_message(row, viewer_id: str = "", reactions=None) -> dict:
         message["payload"] = None
 
     # A view-once photo/video is only ever rendered for the recipient on the
-    # single request that opens it (see POST .../view-once/open, which stamps
-    # view_once_opened_at right before returning this same serialisation).
+    # single request that opens it (see download_file in main.py, which
+    # stamps view_once_opened_at right before serving the file). A view-once
+    # TEXT message has no separate "open" request to hang that stamp on —
+    # main.py's mark_read stamps it instead, the moment the recipient
+    # actually reads it, since there's nothing else to tap.
     # Every read after that — including the sender's own, so they can't
-    # replay it either — gets the attachment stripped, same as an expired
-    # disappearing message.
+    # replay it either — gets the content stripped, same as an expired
+    # disappearing message. Blanking `text` too (not just `payload`) matters
+    # for BOTH cases: a view-once text message's content lives in `text`
+    # with no payload at all, and a view-once photo can carry a caption in
+    # `text` that used to keep leaking forever after the photo itself was
+    # already gone.
     if message.get("view_once") and message.get("view_once_opened_at"):
+        message["text"] = ""
         message["payload"] = None
         message["view_once_consumed"] = True
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Actions, Chats, Contacts, Me, Meetings, Messages, Pins, Report, Scheduled, Search, Uploads, Users,
   sendReliably, sendFileReliably, newClientMessageId,
@@ -46,6 +46,10 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [input, setInput] = useState(chat.draft || "");
+  // Text's view-once equivalent of a view-once photo — armed per-message via
+  // the composer's eye-toggle, cleared again the moment a send actually
+  // goes out so it never silently stays on for the next message.
+  const [viewOnceText, setViewOnceText] = useState(false);
   const [replyTo, setReplyTo] = useState(null);
   const [editing, setEditing] = useState(null);
   const [menuFor, setMenuFor] = useState(null);
@@ -55,6 +59,14 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   const [selectMode, setSelectMode] = useState(false);
   const [selectedMsgIds, setSelectedMsgIds] = useState(new Set());
   const [pins, setPins] = useState([]);
+  // messages.find()/pins.some() inside the per-message render loop below
+  // turned an O(n) list render into O(n * (n + pins.length)) — for a chat
+  // with a few hundred messages that's on the order of 250k comparisons on
+  // every re-render (every incoming message, reaction, edit...). Building
+  // these once per messages/pins change and doing O(1) lookups per row
+  // fixes the complexity without changing what's rendered.
+  const messagesById = useMemo(() => new Map(messages.map((m) => [m.id, m])), [messages]);
+  const pinnedIds = useMemo(() => new Set(pins.map((p) => p.id)), [pins]);
   const [starredIds, setStarredIds] = useState(() => new Set());
   const [showPins, setShowPins] = useState(false);
   const [readState, setReadState] = useState([]);
@@ -267,21 +279,24 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
     // back over the socket. Without it the two look like different messages and
     // the send appears twice.
     const clientMsgId = newClientMessageId();
+    const sendingViewOnce = viewOnceText;
     const temporary = {
       id: "pending_" + clientMsgId,
       client_msg_id: clientMsgId,
       chat_id: chat.id, sender_id: me.id, text, kind: "text",
       created_at: Date.now() / 1000, seq: highestSeq + 1,
-      reactions: [], pending: true,
+      reactions: [], pending: true, view_once: sendingViewOnce,
       reply_to_id: replyTo?.id || null,
     };
     setMessages((current) => [...current, temporary]);
     setInput("");
     setReplyTo(null);
+    setViewOnceText(false);
 
     try {
       const stored = await sendReliably({
         chatId: chat.id, text, replyToId: temporary.reply_to_id, clientMsgId,
+        viewOnce: sendingViewOnce,
       });
       setMessages((current) =>
         stored
@@ -1022,9 +1037,9 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
             )}
             <div style={{ flex: 1 }}>
               <Bubble message={message} me={me}
-                      replyTarget={messages.find((m) => m.id === message.reply_to_id)}
+                      replyTarget={messagesById.get(message.reply_to_id)}
                       meetingUpdates={meetingUpdates}
-                      isPinned={pins.some((p) => p.id === message.id)}
+                      isPinned={pinnedIds.has(message.id)}
                       isRead={readUpToSeq !== null && message.seq <= readUpToSeq}
                       onLongPress={() => {
                         // Nothing sitting in the send queue has a real
@@ -1051,6 +1066,10 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         </div>
       </div>
 
+      {viewOnceText && !editing && (
+        <Banner label="View once — disappears the moment it's read"
+                onClear={() => setViewOnceText(false)}/>
+      )}
       {replyTo && (
         <Banner label={`Replying to: ${replyTo.text?.slice(0, 60) || "message"}`}
                 onClear={() => setReplyTo(null)}/>
@@ -1071,7 +1090,9 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         disappearSecs={chat.disappear_secs}
         editing={Boolean(editing)}
         members={members}
-        toast={toast}/>
+        toast={toast}
+        viewOnce={viewOnceText}
+        onToggleViewOnce={() => setViewOnceText((v) => !v)}/>
 
       {menuFor && (
         <MessageMenu
@@ -1643,6 +1664,29 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead,
           <ContactMessage message={message} mine={mine}/>
         ) : message.kind === "call" ? (
           <CallCard message={message} mine={mine} onCallAgain={onCallAgain}/>
+        ) : message.kind === "text" && message.view_once ? (
+          message.view_once_consumed ? (
+            // Same "opened" treatment a view-once photo gets once it's been
+            // seen — the text itself is gone server-side by this point
+            // (chatstore.serialise_message blanks it the moment
+            // mark_read's consume_view_once_text_messages stamps it), so
+            // there's nothing left to render but the fact that there was
+            // something here.
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13.5, fontStyle: "italic", color: mine ? "#ffffff99" : G.muted }}>
+              {I.eye(mine ? "#ffffff99" : G.muted, 14)}
+              <span>Opened</span>
+            </div>
+          ) : (
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 4, fontSize: 11, fontWeight: 600, color: mine ? "#ffffffcc" : G.accentText }}>
+                {I.eye(mine ? "#ffffffcc" : G.accentText, 13)}
+                <span>View once</span>
+              </div>
+              <div style={{ fontSize: 14.5, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>
+                {renderWithMentions(message.text, mine)}
+              </div>
+            </div>
+          )
         ) : (
           <div style={{ fontSize: 14.5, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>
             {renderWithMentions(message.text, mine)}
@@ -1917,7 +1961,7 @@ function ViewOnceAttachment({ message, mine }) {
   if (blobUrl) {
     return message.kind === "video"
       ? <video autoPlay controls src={blobUrl} style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 10 }}/>
-      : <img src={blobUrl} alt="" style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 10, display: "block" }}/>;
+      : <img src={blobUrl} alt={message.text || "Photo"} style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 10, display: "block" }}/>;
   }
 
   if (gone || alreadyOpened) {
@@ -2176,7 +2220,12 @@ function MeetingCard({ message, mine, update, onJoin }) {
             )}
 
             {(meeting.status === "scheduled" || meeting.status === "live") && (
-              meeting.join_url ? (
+              // The server rejects anything but http(s) on write (see
+              // _validate_join_url in main.py), but this renders straight
+              // into an href — checking again here means a value that
+              // somehow predates that check (or arrives from anywhere else
+              // that skips it) can't run as a `javascript:` navigation.
+              meeting.join_url && /^https?:\/\//i.test(meeting.join_url) ? (
                 <a href={meeting.join_url} target="_blank" rel="noreferrer"
                    style={{
                      display: "block", marginTop: 8, padding: "9px", borderRadius: 10,
@@ -2216,7 +2265,7 @@ function Banner({ label, onClear }) {
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
 function Composer({ value, onChange, onSend, onSchedule, onAttach, onVoice, uploading,
-                    disappearSecs, editing, members, toast }) {
+                    disappearSecs, editing, members, toast, viewOnce, onToggleViewOnce }) {
   const voice = useVoiceRecorder((blob) => onVoice(blob));
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [quickReplyOpen, setQuickReplyOpen] = useState(false);
@@ -2318,22 +2367,31 @@ function Composer({ value, onChange, onSend, onSchedule, onAttach, onVoice, uplo
       )}
 
       {cannedReplies.length > 0 && (
-        <div onClick={() => setQuickReplyOpen((v) => !v)} style={{ cursor: "pointer" }} title="Quick replies">
+        <IconButton onClick={() => setQuickReplyOpen((v) => !v)} label="Quick replies">
           {I.checkDouble(G.sub, 18)}
-        </div>
+        </IconButton>
       )}
 
-      <div onClick={() => !uploading && onAttach()}
-           style={{ cursor: uploading ? "default" : "pointer", opacity: uploading ? 0.5 : 1 }}
-           title="Attach">
+      <IconButton onClick={() => !uploading && onAttach()} label="Attach" disabled={uploading}
+                  style={{ opacity: uploading ? 0.5 : 1 }}>
         {uploading ? <Spinner small/> : I.paperclip(G.sub, 20)}
-      </div>
-      <div onClick={onSchedule} style={{ cursor: "pointer" }} title="Schedule this message">
+      </IconButton>
+      <IconButton onClick={onSchedule} label="Schedule this message">
         {I.clock(G.sub, 20)}
-      </div>
-      <div onClick={() => setEmojiOpen((v) => !v)} style={{ cursor: "pointer", fontSize: 19 }} title="Emoji">
+      </IconButton>
+      {!editing && (
+        <IconButton onClick={onToggleViewOnce}
+                    label={viewOnce ? "View once is on for this message" : "Send as view once"}
+                    style={{
+                      borderRadius: "50%",
+                      background: viewOnce ? G.accentSoft : "transparent",
+                    }}>
+          {I.eye(viewOnce ? G.accent : G.sub, 20)}
+        </IconButton>
+      )}
+      <IconButton onClick={() => setEmojiOpen((v) => !v)} label="Emoji" style={{ fontSize: 19 }}>
         🙂
-      </div>
+      </IconButton>
 
       <input
         value={value}
@@ -2355,28 +2413,75 @@ function Composer({ value, onChange, onSend, onSchedule, onAttach, onVoice, uplo
           display: "flex", alignItems: "center", justifyContent: "center",
         }}>{I.send()}</button>
       ) : (
-        <div onClick={voice.start} style={{
-          width: 42, height: 42, borderRadius: "50%", cursor: "pointer",
+        <IconButton onClick={voice.start} label="Record a voice note" style={{
+          width: 42, height: 42, borderRadius: "50%",
           background: G.dim, border: `1px solid ${G.border}`,
           display: "flex", alignItems: "center", justifyContent: "center",
-        }} title="Record a voice note">
+        }}>
           {I.mic(G.sub, 19)}
-        </div>
+        </IconButton>
       )}
     </div>
   );
 }
 
+// A `title` attribute alone is a hover tooltip — not reliably exposed to
+// screen readers, and never reachable by keyboard without a tabIndex. Every
+// icon-only composer action (quick replies, attach, schedule, emoji, voice
+// note) was a bare `<div onClick>` with just a title, so none of them could
+// be operated without a mouse. This wraps that same visual shape with the
+// role/focus/keyboard handling all five were missing.
+function IconButton({ onClick, label, disabled, children, style }) {
+  return (
+    <div
+      onClick={disabled ? undefined : onClick}
+      role="button"
+      aria-label={label}
+      aria-disabled={disabled || undefined}
+      tabIndex={disabled ? -1 : 0}
+      onKeyDown={(event) => {
+        if (disabled) return;
+        if (event.key === " " || event.key === "Enter") {
+          event.preventDefault();
+          onClick?.(event);
+        }
+      }}
+      title={label}
+      style={{ cursor: disabled ? "default" : "pointer", ...style }}>
+      {children}
+    </div>
+  );
+}
+
 function Sheet({ title, children, onClose }) {
+  const panelRef = useRef(null);
+
+  // A modal that only closes on a backdrop click traps a keyboard user
+  // inside it — Escape is the standard way out of any native dialog, and
+  // moving focus into the panel on open means Tab starts somewhere sane
+  // instead of leaving focus behind on whatever opened this.
+  useEffect(() => {
+    function onKeyDown(event) {
+      if (event.key === "Escape") onClose();
+    }
+    document.addEventListener("keydown", onKeyDown);
+    panelRef.current?.focus();
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
   return (
     <div onClick={onClose} style={{
       position: "fixed", inset: 0, background: "#000000aa", zIndex: 50,
       display: "flex", alignItems: "flex-end", justifyContent: "center",
     }}>
-      <div onClick={(event) => event.stopPropagation()} style={{
+      <div ref={panelRef} onClick={(event) => event.stopPropagation()}
+           role="dialog" aria-modal="true" aria-label={typeof title === "string" ? title : undefined}
+           tabIndex={-1}
+           style={{
         width: "100%", maxWidth: 430, background: G.surface, padding: 20,
         borderTopLeftRadius: 22, borderTopRightRadius: 22,
         border: `1px solid ${G.border}`, maxHeight: "80vh", overflowY: "auto",
+        outline: "none",
       }}>
         <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 14 }}>{title}</div>
         {children}
@@ -2922,7 +3027,7 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
            onClose={onClose}>
       <div style={{ display: "flex", justifyContent: "center", marginBottom: 14, position: "relative" }}>
         {isImage && previewUrl ? (
-          <img src={previewUrl} alt="" style={{
+          <img src={previewUrl} alt={firstFile?.name ? `Preview of ${firstFile.name}` : "Selected photo preview"} style={{
             maxWidth: "100%", maxHeight: 220, borderRadius: 10,
             filter: viewOnce ? "blur(14px)" : "none",
           }}/>
@@ -3749,7 +3854,8 @@ function MediaThumb({ message, onOpen }) {
 
   if (!blobUrl) return <div style={boxStyle}/>;
   if (message.kind === "photo") {
-    return <img src={blobUrl} alt="" onClick={onOpen} style={{ ...boxStyle, cursor: onOpen ? "pointer" : "default" }}/>;
+    return <img src={blobUrl} alt={message.text || "Photo"} onClick={onOpen}
+                style={{ ...boxStyle, cursor: onOpen ? "pointer" : "default" }}/>;
   }
   if (message.kind === "video") {
     return (
@@ -3848,7 +3954,7 @@ function MediaLightbox({ items, index, onIndexChange, onClose }) {
         <video src={blobUrl} controls autoPlay onClick={(e) => e.stopPropagation()}
                style={{ maxWidth: "92vw", maxHeight: "88vh" }}/>
       ) : (
-        <img src={blobUrl} alt="" onClick={(e) => e.stopPropagation()}
+        <img src={blobUrl} alt={current.text || "Photo"} onClick={(e) => e.stopPropagation()}
              style={{ maxWidth: "92vw", maxHeight: "88vh", objectFit: "contain" }}/>
       )}
     </div>

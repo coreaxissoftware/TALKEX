@@ -148,6 +148,14 @@ async def send_due_messages(now: float):
     )
 
     for item in due:
+        # A burst of due work (many scheduled sends landing in the same
+        # 5-second window) would otherwise run its synchronous db.execute()
+        # calls back-to-back with no guaranteed yield point until the first
+        # `await` further down — this hands control back to the event loop
+        # once per item up front, so live request/websocket traffic isn't
+        # starved for the whole batch's duration.
+        await asyncio.sleep(0)
+
         # Claim it first. The WHERE clause repeats status = 'pending', so if
         # another tick got here first this updates nothing and we skip.
         claimed = db.execute(
@@ -307,6 +315,7 @@ async def _send_meeting_reminders(now: float):
     )
 
     for meeting in due:
+        await asyncio.sleep(0)  # see the matching note in send_due_messages
         claimed = db.execute(
             "UPDATE meetings SET reminded_at = ? WHERE id = ? AND reminded_at IS NULL",
             (now, meeting["id"]),
@@ -334,36 +343,40 @@ async def _send_meeting_reminders(now: float):
 
 
 async def _advance_meeting_status(now: float):
-    """Move meetings to live when they start and ended when they finish."""
-    starting = db.query_all(
-        "SELECT * FROM meetings WHERE status = 'scheduled' AND starts_at <= ? LIMIT ?",
-        (now, BATCH_LIMIT),
-    )
-    for meeting in starting:
-        claimed = db.execute(
-            "UPDATE meetings SET status = 'live' WHERE id = ? AND status = 'scheduled'",
-            (meeting["id"],),
-        )
-        if claimed.rowcount:
-            await hub.send_to_chat(meeting["chat_id"], {
-                "type": "meeting_started",
-                "meeting_id": meeting["id"],
-                "chat_id": meeting["chat_id"],
-                "title": meeting["title"],
-                "join_url": meeting["join_url"],
-            })
+    """
+    Expire scheduled meetings nobody ever joined — NOT a general
+    scheduled-to-live-to-ended clock.
 
-    ending = db.query_all(
+    'live' is deliberately never set here. It used to flip to 'live' the
+    instant starts_at passed, whether or not anyone actually joined, and
+    flip to 'ended' the instant the scheduled duration elapsed, whether or
+    not the call was still going. A meeting only actually starting/ending
+    is decided by real activity — someone tapping Join (start_meeting /
+    group_call_start in main.py, which sets 'live'), the host explicitly
+    ending it, or the call room emptying out on its own
+    (_end_live_meeting_for_chat in main.py, which sets 'ended'). Ending a
+    call the instant its ESTIMATED duration elapsed, even though people
+    were still actively on it, is exactly the kind of bug that erodes trust
+    in a "scheduled" feature.
+
+    What's still handled here: a meeting that was scheduled and never
+    started by the time its window closes would otherwise sit in everyone's
+    "upcoming" list forever (list_my_meetings filters to status IN
+    ('scheduled','live')) — this is the one case none of those
+    activity-driven paths can catch, since nothing ever happened to trigger
+    them.
+    """
+    expired = db.query_all(
         """
         SELECT * FROM meetings
-        WHERE status = 'live' AND starts_at + (duration_min * 60) <= ?
+        WHERE status = 'scheduled' AND starts_at + (duration_min * 60) <= ?
         LIMIT ?
         """,
         (now, BATCH_LIMIT),
     )
-    for meeting in ending:
+    for meeting in expired:
         claimed = db.execute(
-            "UPDATE meetings SET status = 'ended' WHERE id = ? AND status = 'live'",
+            "UPDATE meetings SET status = 'ended' WHERE id = ? AND status = 'scheduled'",
             (meeting["id"],),
         )
         if claimed.rowcount:

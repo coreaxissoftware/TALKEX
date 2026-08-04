@@ -24,11 +24,22 @@ export default function Discover({ onOpenChat, onChanged, toast }) {
   const [addingContact, setAddingContact] = useState(false);
 
   useEffect(() => {
+    // Every keystroke fires a new request set with no debounce and — until
+    // this guard — no way to tell a stale one from the latest. Typing
+    // "a" then "al" then "ali" fires three overlapping fetches; if "a"'s
+    // (broader, plausibly slower) response resolved last, it used to
+    // overwrite "ali"'s results with no sign anything was stale. Same
+    // `cancelled` pattern ChatView's message-loading effect already uses.
+    let cancelled = false;
     setLoading(true);
     Promise.all([Users.list(query), Chats.discover(), Contacts.list()])
-      .then(([users, chats, mine]) => { setPeople(users); setPublic(chats); setContacts(mine); })
+      .then(([users, chats, mine]) => {
+        if (cancelled) return;
+        setPeople(users); setPublic(chats); setContacts(mine);
+      })
       .catch(() => {})
-      .finally(() => setLoading(false));
+      .finally(() => !cancelled && setLoading(false));
+    return () => { cancelled = true; };
   }, [query]);
 
   function reloadContacts() {

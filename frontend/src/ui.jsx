@@ -9,6 +9,43 @@ import {
 // split view.
 export const DESKTOP_QUERY = "(min-width: 900px)";
 
+/**
+ * Device-appropriate call layout: fills the real desktop viewport (and asks
+ * the browser for true fullscreen, Zoom/Meet-style) on web, stays the
+ * existing single-column phone layout on a phone — where the viewport IS
+ * already that width, so there's nothing to expand into. `toggle` is the
+ * manual override in either direction, exposed as a button in the call UI.
+ *
+ * requestFullscreen() only works from inside a user-gesture handler (a
+ * plain click, same as this toggle), which is why it's never called
+ * automatically on mount — only `expanded`'s initial value responds to
+ * device type; entering real OS fullscreen always needs an explicit tap.
+ */
+export function useCallLayout() {
+  const isDesktop = useIsDesktop();
+  const [expanded, setExpanded] = useState(isDesktop);
+
+  useEffect(() => {
+    setExpanded(isDesktop);
+  }, [isDesktop]);
+
+  const toggle = () => {
+    setExpanded((current) => {
+      const next = !current;
+      if (typeof document !== "undefined") {
+        if (next && isDesktop && document.documentElement.requestFullscreen) {
+          document.documentElement.requestFullscreen().catch(() => {});
+        } else if (!next && document.fullscreenElement && document.exitFullscreen) {
+          document.exitFullscreen().catch(() => {});
+        }
+      }
+      return next;
+    });
+  };
+
+  return { expanded, toggle, isDesktop };
+}
+
 export function useIsDesktop() {
   const [isDesktop, setIsDesktop] = useState(
     () => typeof window !== "undefined" && window.matchMedia(DESKTOP_QUERY).matches
@@ -362,7 +399,11 @@ const THEMES = {
   dark: {
     bg: "#0b1420", surface: "#0f1b2b", card: "#142235", card2: "#17293f",
     border: "#233247",
-    text: "#eaf2fb", sub: "#8ca3bb", muted: "#4c5f76", dim: "#182a3d",
+    // muted was #4c5f76 — ~2.8:1 against bg, under WCAG AA's 4.5:1 floor for
+    // normal text (empty-state copy, captions, timestamps all use it). This
+    // keeps it visually the dimmest of the three text tones while clearing
+    // the bar (~4.65:1).
+    text: "#eaf2fb", sub: "#8ca3bb", muted: "#6b8299", dim: "#182a3d",
     red: "#ff6b6b", yellow: "#ffc24b", green: "#3ecf8e",
   },
 };
@@ -606,7 +647,16 @@ export const I = {
   rotateRight: (c = G.sub, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 14l4-4-4-4"/><path d="M19 10h-9a5 5 0 0 0-5 5v1a5 5 0 0 0 5 5h6"/></svg>,
   phone: (c = G.sub, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.362 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.338 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>,
   phoneOff: (c = "#fff", s = 22) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.338 1.85.573 2.81.7A2 2 0 0 1 22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.11-2.51m-2.7-3.4A19.8 19.8 0 0 1 2.05 5.18 2 2 0 0 1 4.11 3h3a2 2 0 0 1 2 1.72c.127.96.362 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.1 10.9"/><line x1="1" y1="1" x2="23" y2="23"/></svg>,
+  // The classic iOS "decline/end call" glyph — a solid handset silhouette
+  // rotated 135° (pointing away, receiver-down), unlike the generic
+  // outlined phone-with-slash above. Used specifically for the red
+  // end/decline/leave call buttons.
+  callEnd: (c = "#fff", s = 24) => <svg width={s} height={s} viewBox="0 0 24 24"><path fill={c} transform="rotate(135 12 12)" d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>,
   video: (c = G.sub, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>,
+  // Call layout mode switch: fill the whole desktop viewport vs a compact
+  // windowed panel — see CallOverlay/GroupCallOverlay's `expanded` state.
+  expand: (c = "#fff", s = 18) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>,
+  shrink: (c = "#fff", s = 18) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>,
   videoOff: (c = G.sub, s = 22) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 16v1a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2"/><path d="M9.5 5H14a2 2 0 0 1 2 2v3.5"/><polygon points="23 7 16 12 23 17 23 7"/><line x1="1" y1="1" x2="23" y2="23"/></svg>,
   micOff: (c = "#fff", s = 22) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>,
   sticker: (c = G.sub, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 7a2 2 0 0 1 2-2h9l5 5v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"/><path d="M15 5v4a1 1 0 0 0 1 1h4"/><circle cx="9" cy="13" r="1"/><circle cx="14" cy="13" r="1"/></svg>,
@@ -688,9 +738,24 @@ export function Av({ av, color, size = 44, online, hasStory, isMe, photoId }) {
   );
 }
 
-export function Toggle({ on, onChange }) {
+export function Toggle({ on, onChange, label }) {
   return (
-    <div onClick={() => onChange(!on)} style={{
+    <div
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      tabIndex={0}
+      onClick={() => onChange(!on)}
+      onKeyDown={(event) => {
+        // Space/Enter are what every native checkbox/switch responds to —
+        // without this a keyboard user can Tab to a toggle (now that it's
+        // focusable) but still has no way to actually flip it.
+        if (event.key === " " || event.key === "Enter") {
+          event.preventDefault();
+          onChange(!on);
+        }
+      }}
+      style={{
       width: 44, height: 26, borderRadius: 13, background: on ? G.accent : G.dim,
       position: "relative", cursor: "pointer", transition: "background 0.2s",
       border: `1px solid ${on ? G.accent : G.border}`, flexShrink: 0,
@@ -724,11 +789,23 @@ export function ContextMenu({ x, y, items, onClose }) {
     setPos({ left: Math.max(8, left), top: Math.max(8, top), visible: true });
   }, [x, y]);
 
+  // No keyboard dismissal previously existed anywhere in this menu — a
+  // keyboard user who opened it (or a mouse user who just wants to tap
+  // Escape, the universal "back out of this" key) had no way to close it
+  // except clicking the transparent backdrop.
+  useEffect(() => {
+    function onKeyDown(event) {
+      if (event.key === "Escape") onClose();
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
   return (
     <div onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }} style={{
       position: "fixed", inset: 0, zIndex: 1200, background: "transparent",
     }}>
-      <div ref={ref} onClick={(e) => e.stopPropagation()} style={{
+      <div ref={ref} role="menu" onClick={(e) => e.stopPropagation()} style={{
         position: "fixed", left: pos.left, top: pos.top, opacity: pos.visible ? 1 : 0,
         minWidth: 200, maxWidth: 260, background: G.card, border: `1px solid ${G.border}`,
         borderRadius: 12, boxShadow: "0 8px 28px #00000033", padding: 6, color: G.text,
@@ -789,6 +866,21 @@ export function Spinner({ small } = {}) {
 export function SRow({ icon, label, sub, right, onClick, danger }) {
   return (
     <div onClick={onClick}
+      // role/tabIndex/onKeyDown only when this row actually does something —
+      // a display-only SRow (no onClick) stays a plain div, same as before.
+      // The accessible name comes from the visible label/sub text itself
+      // (the standard behavior for a role="button" with no aria-label), so
+      // nothing else needs to change at any of this component's ~37 call sites.
+      {...(onClick ? {
+        role: "button",
+        tabIndex: 0,
+        onKeyDown: (event) => {
+          if (event.key === " " || event.key === "Enter") {
+            event.preventDefault();
+            onClick(event);
+          }
+        },
+      } : {})}
       style={{
         display: "flex", alignItems: "center", gap: 14, padding: "14px 20px",
         borderBottom: `1px solid ${G.border}`, cursor: onClick ? "pointer" : "default",

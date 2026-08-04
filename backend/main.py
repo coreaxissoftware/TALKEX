@@ -26,6 +26,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import os
 import secrets
 import socket
@@ -37,8 +38,10 @@ import urllib.request
 from collections import defaultdict
 from contextlib import asynccontextmanager
 
+logger = logging.getLogger("talkex.main")
+
 from fastapi import (
-    BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, UploadFile,
+    BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Request, UploadFile,
     WebSocket, WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
@@ -256,25 +259,34 @@ def start_session(user_id: str, device_label: str = "Unknown device") -> str:
 
 
 @app.post("/auth/register")
-def register(request: RegisterRequest):
+def register(request: RegisterRequest, http_request: Request):
+    ip_register_rate_limiter.check(client_ip(http_request))
+
     taken = db.query_one("SELECT 1 FROM users WHERE lower(username) = ?",
                          (request.username.lower(),))
     if taken:
         raise HTTPException(400, "Username already taken")
 
     user_id = new_id("user")
-    db.execute(
-        """
-        INSERT INTO users (id, name, username, phone, bio, color, avatar_letter,
-                           password_hash, created_at, last_seen)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            user_id, request.name, request.username.lower(), request.phone, request.bio,
-            avatar_color_for(user_id), request.name[0].upper(),
-            auth.hash_password(request.password), time.time(), time.time(),
-        ),
-    )
+    try:
+        db.execute(
+            """
+            INSERT INTO users (id, name, username, phone, bio, color, avatar_letter,
+                               password_hash, created_at, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id, request.name, request.username.lower(), request.phone, request.bio,
+                avatar_color_for(user_id), request.name[0].upper(),
+                auth.hash_password(request.password), time.time(), time.time(),
+            ),
+        )
+    except sqlite3.IntegrityError:
+        # Two requests for the same username can both pass the "taken" check
+        # above before either commits — the UNIQUE index is the real
+        # guarantee, this just turns its failure into the same 400 the
+        # up-front check gives instead of an unhandled 500.
+        raise HTTPException(400, "Username already taken")
 
     # Everyone gets a private notes chat, the way Telegram's Saved Messages works.
     create_saved_messages_chat(user_id)
@@ -296,10 +308,18 @@ class RateLimiter:
     upgrade if that ever changes.
     """
 
+    # A caller that varies the key on every request (e.g. a different phone
+    # number each time) adds a permanent dict entry that's only ever pruned
+    # the next time THAT SAME key is checked — which never happens again.
+    # Sweeping every SWEEP_EVERY calls bounds memory growth without paying
+    # the cost of a full scan on every single check().
+    SWEEP_EVERY = 500
+
     def __init__(self, max_events: int, window_seconds: float):
         self.max_events = max_events
         self.window_seconds = window_seconds
         self.history: dict[str, list[float]] = defaultdict(list)
+        self._checks_since_sweep = 0
 
     def check(self, key: str):
         now = time.time()
@@ -310,6 +330,17 @@ class RateLimiter:
         recent.append(now)
         self.history[key] = recent
 
+        self._checks_since_sweep += 1
+        if self._checks_since_sweep >= self.SWEEP_EVERY:
+            self._checks_since_sweep = 0
+            self._sweep(now)
+
+    def _sweep(self, now: float):
+        stale_keys = [k for k, at_list in self.history.items()
+                      if not at_list or now - at_list[-1] >= self.window_seconds]
+        for k in stale_keys:
+            del self.history[k]
+
 
 # Failed sign-in attempts, per username. Kept in memory on purpose: it is a
 # speed bump against online guessing, not an audit trail, and it resets on
@@ -319,6 +350,8 @@ MAX_FAILED_LOGINS = 8
 LOCKOUT_SECONDS = 300
 
 _failed_logins: dict[str, list[float]] = defaultdict(list)
+_failed_login_checks_since_sweep = 0
+_FAILED_LOGIN_SWEEP_EVERY = 500
 
 # A signed-in account sending faster than this is spamming, not chatting.
 # 20 messages / 10s is generous for a human typing fast in several chats at
@@ -341,18 +374,53 @@ otp_rate_limiter = RateLimiter(max_events=5, window_seconds=300)
 # user filing a few real reports.
 report_rate_limiter = RateLimiter(max_events=10, window_seconds=600)
 
+# otp_rate_limiter above is keyed by the phone/email being texted, which
+# does nothing to stop one caller from working through many DIFFERENT
+# numbers — each stays under its own per-number cap while the caller
+# racks up real, billed provider sends (SMS-pumping fraud). This one is
+# keyed by caller IP instead, as a second, independent dimension.
+ip_otp_rate_limiter = RateLimiter(max_events=15, window_seconds=300)
+
+# Registration has no natural per-account key (there's no account yet), so
+# this is IP-only — a speed bump against scripted mass account creation.
+ip_register_rate_limiter = RateLimiter(max_events=10, window_seconds=600)
+
 OTP_LIFETIME_SECONDS = 5 * 60
 OTP_MAX_ATTEMPTS = 5
+
+
+def client_ip(request: Request) -> str:
+    """
+    Best-effort caller IP for rate limiting.
+
+    Render (and any reverse proxy) terminates the real connection, so
+    request.client.host is the proxy's address, not the caller's — the
+    actual client IP arrives in X-Forwarded-For instead. There's exactly
+    one hop between the internet and this app (Render's edge), so the LAST
+    entry is the one that hop itself appended and can be trusted; anything
+    earlier in the list could have been set by the client itself and isn't
+    proof of anything. Falls back to the direct socket address, then "" —
+    an empty key still gets its own bucket, so it degrades to "one shared
+    limit for anyone we can't identify" rather than throwing.
+    """
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+        if parts:
+            return parts[-1]
+    return request.client.host if request.client else ""
 
 
 def generate_otp() -> str:
     return f"{secrets.randbelow(1_000_000):06d}"
 
 
-def issue_otp(phone: str):
+def issue_otp(phone: str, ip: str = ""):
     """Generate, store (hashed) and 'send' a fresh code for this phone. A new
     call always invalidates whatever code was issued before it."""
     otp_rate_limiter.check(phone)
+    if ip:
+        ip_otp_rate_limiter.check(ip)
     code = generate_otp()
     db.execute(
         """
@@ -362,7 +430,7 @@ def issue_otp(phone: str):
             code_hash = excluded.code_hash, expires_at = excluded.expires_at,
             attempts = 0, created_at = excluded.created_at
         """,
-        (phone, auth.hash_password(code), time.time() + OTP_LIFETIME_SECONDS, time.time()),
+        (phone, auth.hash_otp(code), time.time() + OTP_LIFETIME_SECONDS, time.time()),
     )
     # A silently-swallowed provider failure here is exactly what makes an
     # undelivered OTP invisible: the endpoint would answer {"sent": true}
@@ -389,7 +457,7 @@ def check_otp(phone: str, code: str):
         raise HTTPException(400, "Code expired or never requested — request a new one")
     if row["attempts"] >= OTP_MAX_ATTEMPTS:
         raise HTTPException(429, "Too many attempts — request a new code")
-    if not auth.verify_password(code, row["code_hash"]):
+    if not auth.verify_otp(code, row["code_hash"]):
         db.execute("UPDATE phone_otps SET attempts = attempts + 1 WHERE phone = ?", (phone,))
         raise HTTPException(401, "Incorrect code")
 
@@ -398,9 +466,11 @@ def consume_otp(phone: str):
     db.execute("DELETE FROM phone_otps WHERE phone = ?", (phone,))
 
 
-def issue_email_otp(email: str):
+def issue_email_otp(email: str, ip: str = ""):
     """Exact mirror of issue_otp above, for email_otps instead of phone_otps."""
     otp_rate_limiter.check(email)
+    if ip:
+        ip_otp_rate_limiter.check(ip)
     code = generate_otp()
     db.execute(
         """
@@ -410,7 +480,7 @@ def issue_email_otp(email: str):
             code_hash = excluded.code_hash, expires_at = excluded.expires_at,
             attempts = 0, created_at = excluded.created_at
         """,
-        (email, auth.hash_password(code), time.time() + OTP_LIFETIME_SECONDS, time.time()),
+        (email, auth.hash_otp(code), time.time() + OTP_LIFETIME_SECONDS, time.time()),
     )
     if email_delivery.send_otp(email, code, OTP_LIFETIME_SECONDS) == "error":
         raise HTTPException(502, "Could not send the verification code — please try again in a moment")
@@ -422,7 +492,7 @@ def check_email_otp(email: str, code: str):
         raise HTTPException(400, "Code expired or never requested — request a new one")
     if row["attempts"] >= OTP_MAX_ATTEMPTS:
         raise HTTPException(429, "Too many attempts — request a new code")
-    if not auth.verify_password(code, row["code_hash"]):
+    if not auth.verify_otp(code, row["code_hash"]):
         db.execute("UPDATE email_otps SET attempts = attempts + 1 WHERE email = ?", (email,))
         raise HTTPException(401, "Incorrect code")
 
@@ -449,10 +519,10 @@ def unique_username_from_phone(phone: str) -> str:
 
 
 @app.post("/auth/phone/request-otp")
-def request_phone_otp(request: RequestOtpRequest):
+def request_phone_otp(request: RequestOtpRequest, http_request: Request):
     """Step 1 of WhatsApp-style sign-in: text a code to this number, whether
     it belongs to a brand new account or an existing one."""
-    issue_otp(request.phone)
+    issue_otp(request.phone, client_ip(http_request))
     return {"sent": True, "expires_in": OTP_LIFETIME_SECONDS}
 
 
@@ -505,7 +575,8 @@ def verify_phone_otp(request: VerifyOtpRequest):
 
 
 @app.post("/me/phone/request-change-otp")
-def request_phone_change_otp(request: RequestOtpRequest, user: dict = Depends(current_user)):
+def request_phone_change_otp(request: RequestOtpRequest, http_request: Request,
+                              user: dict = Depends(current_user)):
     """Changing your number reuses the exact same OTP mechanism as signing
     up with one — the only difference is what happens after it's verified."""
     taken = db.query_one(
@@ -514,7 +585,7 @@ def request_phone_change_otp(request: RequestOtpRequest, user: dict = Depends(cu
     )
     if taken:
         raise HTTPException(400, "This number is already in use by another account")
-    issue_otp(request.phone)
+    issue_otp(request.phone, client_ip(http_request))
     return {"sent": True, "expires_in": OTP_LIFETIME_SECONDS}
 
 
@@ -533,8 +604,9 @@ def confirm_phone_change(request: VerifyOtpRequest, user: dict = Depends(current
 # request a code, then confirm it.
 
 @app.post("/me/email/request-otp")
-def request_email_otp(request: RequestEmailOtpRequest, user: dict = Depends(current_user)):
-    issue_email_otp(request.email.lower())
+def request_email_otp(request: RequestEmailOtpRequest, http_request: Request,
+                       user: dict = Depends(current_user)):
+    issue_email_otp(request.email.lower(), client_ip(http_request))
     return {"sent": True, "expires_in": OTP_LIFETIME_SECONDS}
 
 
@@ -555,12 +627,23 @@ def remove_email(user: dict = Depends(current_user)):
 
 
 def check_login_allowed(username: str):
+    global _failed_login_checks_since_sweep
     now = time.time()
     recent = [at for at in _failed_logins[username] if now - at < LOCKOUT_SECONDS]
     _failed_logins[username] = recent
     if len(recent) >= MAX_FAILED_LOGINS:
         wait = int(LOCKOUT_SECONDS - (now - recent[0]))
         raise HTTPException(429, f"Too many failed attempts. Try again in {wait} seconds.")
+
+    # Same unbounded-growth hazard as RateLimiter above — a username tried
+    # once and never retried keeps a permanent entry otherwise.
+    _failed_login_checks_since_sweep += 1
+    if _failed_login_checks_since_sweep >= _FAILED_LOGIN_SWEEP_EVERY:
+        _failed_login_checks_since_sweep = 0
+        stale = [k for k, at_list in _failed_logins.items()
+                 if not at_list or now - at_list[-1] >= LOCKOUT_SECONDS]
+        for k in stale:
+            del _failed_logins[k]
 
 
 @app.post("/auth/login")
@@ -743,6 +826,50 @@ def logout(credentials: HTTPAuthorizationCredentials = Depends(security),
     db.execute("DELETE FROM sessions WHERE token_hash = ?",
                (auth.hash_token(credentials.credentials),))
     return {"ok": True}
+
+
+# ── WebSocket connect tickets ─────────────────────────────────────────────────
+# A browser WebSocket handshake can't carry a custom Authorization header, so
+# the socket has always been opened as `/ws?token=<session token>`. That puts
+# the same 30-day bearer token every REST call sends as a header into a URL
+# instead — which reverse proxies, CDNs, error trackers and browser history
+# routinely log in full. A short-lived, single-use ticket (minted over the
+# already-authenticated REST API, right before connecting) means whatever
+# ends up in a URL/log is worthless within seconds and only once, instead of
+# being a live credential for a month.
+WS_TICKET_TTL_SECONDS = 30
+_ws_tickets: dict[str, tuple[str, float]] = {}
+_ws_ticket_issues_since_sweep = 0
+
+
+@app.post("/auth/ws-ticket")
+def create_ws_ticket(user: dict = Depends(current_user)):
+    global _ws_ticket_issues_since_sweep
+    ticket = secrets.token_urlsafe(24)
+    _ws_tickets[ticket] = (user["id"], time.time() + WS_TICKET_TTL_SECONDS)
+
+    # Tickets that are issued and never redeemed (client fetched one, then
+    # never actually connected) would otherwise sit in this dict forever.
+    _ws_ticket_issues_since_sweep += 1
+    if _ws_ticket_issues_since_sweep >= 200:
+        _ws_ticket_issues_since_sweep = 0
+        now = time.time()
+        for stale in [t for t, (_, exp) in _ws_tickets.items() if exp <= now]:
+            del _ws_tickets[stale]
+
+    return {"ticket": ticket, "expires_in": WS_TICKET_TTL_SECONDS}
+
+
+def redeem_ws_ticket(ticket: str) -> str | None:
+    """Consume a ticket and return the user id it was minted for, or None if
+    it's missing, already used, or expired."""
+    entry = _ws_tickets.pop(ticket, None)
+    if entry is None:
+        return None
+    user_id, expires_at = entry
+    if expires_at <= time.time():
+        return None
+    return user_id
 
 
 # ── Linked devices ────────────────────────────────────────────────────────────
@@ -1337,13 +1464,20 @@ def set_story_audience(request: StoryAudienceRequest, user: dict = Depends(curre
     """Replaces the whole exception/inclusion list in one call rather than
     incremental add/remove — the settings screen always has the full set in
     hand already, so there is nothing an incremental API would save."""
-    db.execute("UPDATE users SET story_audience = ? WHERE id = ?", (request.mode, user["id"]))
-    db.execute("DELETE FROM story_audience_list WHERE user_id = ?", (user["id"],))
-    if request.mode in ("except", "only"):
-        for other_id in set(request.user_ids):
-            db.execute(
+    # All in one transaction: up to 2000 ids (StoryAudienceRequest caps it),
+    # each previously its own individually-committed db.execute() call. An
+    # interrupted request (client disconnect, worker restart) between two of
+    # those commits used to leave `mode` durably set to 'only'/'except'
+    # while the list itself held just some prefix of the intended ids —
+    # silently exposing or hiding status updates for whoever fell on the
+    # wrong side of that partial write. One transaction makes it all-or-nothing.
+    with db.transaction() as conn:
+        conn.execute("UPDATE users SET story_audience = ? WHERE id = ?", (request.mode, user["id"]))
+        conn.execute("DELETE FROM story_audience_list WHERE user_id = ?", (user["id"],))
+        if request.mode in ("except", "only"):
+            conn.executemany(
                 "INSERT OR IGNORE INTO story_audience_list (user_id, other_user_id) VALUES (?, ?)",
-                (user["id"], other_id),
+                [(user["id"], other_id) for other_id in set(request.user_ids)],
             )
     return {"mode": request.mode, "user_ids": request.user_ids}
 
@@ -1449,6 +1583,7 @@ def delete_account(user: dict = Depends(current_user)):
 @app.get("/users")
 def list_users(q: str = Query(default="", max_length=64),
                limit: int = Query(default=50, ge=1, le=200),
+               offset: int = Query(default=0, ge=0),
                user: dict = Depends(current_user)):
     """Directory search. Excludes yourself, anyone who has blocked you, and
     anyone who has deactivated their account."""
@@ -1460,9 +1595,9 @@ def list_users(q: str = Query(default="", max_length=64),
           AND (lower(name) LIKE ? OR lower(username) LIKE ?)
           AND id NOT IN (SELECT blocker_id FROM blocks WHERE blocked_id = ?)
         ORDER BY name
-        LIMIT ?
+        LIMIT ? OFFSET ?
         """,
-        (user["id"], like, like, user["id"], limit),
+        (user["id"], like, like, user["id"], limit, offset),
     )
     return [public_user(row, viewer_id=user["id"]) for row in rows]
 
@@ -1728,12 +1863,20 @@ def redact_chat(row) -> dict:
 
 
 @app.get("/chats")
-def list_chats(user: dict = Depends(current_user)):
+def list_chats(user: dict = Depends(current_user),
+                limit: int = Query(default=500, ge=1, le=1000),
+                offset: int = Query(default=0, ge=0)):
     """
     Every chat you are in, newest activity first.
 
     The unread count is `last_seq - last_read_seq`, which is a subtraction of two
     integers already on the row rather than a scan of the message table.
+
+    limit/offset default high enough that no real account today notices
+    them — this used to have no ceiling at all, so an account with an
+    unusually large number of chats (a heavy group/channel/community user)
+    paid for three unbounded queries and a full serialization on every
+    single load of this screen, with no way for the client to ask for less.
     """
     rows = db.query_all(
         """
@@ -1746,28 +1889,33 @@ def list_chats(user: dict = Depends(current_user)):
         JOIN chats AS c ON c.id = m.chat_id
         WHERE m.user_id = ?
         ORDER BY m.is_pinned DESC, c.last_seq DESC
+        LIMIT ? OFFSET ?
         """,
-        (user["id"],),
+        (user["id"], limit, offset),
     )
+    if not rows:
+        return []
+    chat_ids = [row["id"] for row in rows]
+    placeholders = ",".join("?" for _ in chat_ids)
 
-    # The newest message in every one of this user's chats, in one query rather
-    # than one per chat. Joining against MAX(seq) works because seq is unique
-    # per chat, so exactly one row matches each pair.
+    # The newest message in every chat ON THIS PAGE, in one query rather than
+    # one per chat. Joining against MAX(seq) works because seq is unique per
+    # chat, so exactly one row matches each pair.
     last_messages = {
         row["chat_id"]: row
         for row in db.query_all(
-            """
+            f"""
             SELECT m.* FROM messages AS m
             JOIN (
                 SELECT chat_id, MAX(seq) AS seq
                 FROM messages
-                WHERE chat_id IN (SELECT chat_id FROM chat_members WHERE user_id = ?)
+                WHERE chat_id IN ({placeholders})
                   AND unsent_at IS NULL
                   AND id NOT IN (SELECT message_id FROM message_hidden_for WHERE user_id = ?)
                 GROUP BY chat_id
             ) AS newest ON newest.chat_id = m.chat_id AND newest.seq = m.seq
             """,
-            (user["id"], user["id"]),
+            (*chat_ids, user["id"]),
         )
     }
 
@@ -1777,18 +1925,26 @@ def list_chats(user: dict = Depends(current_user)):
     peers = {
         row["chat_id"]: row
         for row in db.query_all(
-            """
+            f"""
             SELECT cm.chat_id, u.id AS peer_id, u.name, u.color, u.avatar_letter,
                    u.avatar_attachment_id
             FROM chat_members AS cm
             JOIN chats AS c ON c.id = cm.chat_id AND c.type = 'dm'
             JOIN users AS u ON u.id = cm.user_id
             WHERE cm.user_id != ?
-              AND cm.chat_id IN (SELECT chat_id FROM chat_members WHERE user_id = ?)
+              AND cm.chat_id IN ({placeholders})
             """,
-            (user["id"], user["id"]),
+            (user["id"], *chat_ids),
         )
     }
+
+    # serialise_message() falls back to one reactions query per message when
+    # `reactions` isn't passed in — harmless for a single message, but this
+    # loop calls it once per chat, and skipping this would silently
+    # reintroduce the exact N+1 reactions_for_many exists to eliminate (see
+    # its docstring) on the single highest-traffic read path in the app.
+    reactions_by_message = chatstore.reactions_for_many(
+        [row["id"] for row in last_messages.values()], user["id"])
 
     chats = []
     for row in rows:
@@ -1804,7 +1960,10 @@ def list_chats(user: dict = Depends(current_user)):
             chat["peer_online"] = hub.is_online(peer["peer_id"])
 
         last = last_messages.get(chat["id"])
-        chat["last_message"] = chatstore.serialise_message(last, user["id"]) if last else None
+        chat["last_message"] = (
+            chatstore.serialise_message(last, user["id"], reactions_by_message.get(last["id"], []))
+            if last else None
+        )
         chat.pop("pin_hash", None)          # never leave the hash on a list response
         chat["is_locked"] = bool(row["pin_hash"])
         chats.append(chat)
@@ -2057,27 +2216,36 @@ def add_broadcast_recipients(chat_id: str, request: BroadcastRecipientsRequest,
                              user: dict = Depends(current_user)):
     require_broadcast_owner(chat_id, user["id"])
 
-    current_count = db.query_one(
-        "SELECT COUNT(*) AS n FROM broadcast_recipients WHERE chat_id = ?", (chat_id,))["n"]
-    incoming = set(request.user_ids) - {user["id"]}
-    existing_ids = {
-        row["user_id"] for row in
-        db.query_all("SELECT user_id FROM broadcast_recipients WHERE chat_id = ?", (chat_id,))
-    }
-    new_ids = incoming - existing_ids
-    if current_count + len(new_ids) > MAX_BROADCAST_RECIPIENTS:
-        raise HTTPException(400, f"A broadcast list can have at most {MAX_BROADCAST_RECIPIENTS} recipients")
-
     now = time.time()
     added = []
-    for recipient_id in new_ids:
-        if db.query_one("SELECT 1 FROM users WHERE id = ?", (recipient_id,)) is None:
-            continue
-        db.execute(
-            "INSERT OR IGNORE INTO broadcast_recipients (chat_id, user_id, added_at) VALUES (?, ?, ?)",
-            (chat_id, recipient_id, now),
-        )
-        added.append(recipient_id)
+    # Reading the current count and then inserting were previously two
+    # separate, uncoordinated steps: two near-simultaneous requests could
+    # both read the same current_count before either had inserted anything,
+    # both pass the cap check against that stale number, and together push
+    # the list past MAX_BROADCAST_RECIPIENTS with nothing to catch it (there
+    # is no DB-level constraint capping rows per chat_id either). Holding
+    # the whole read-check-insert sequence inside one transaction serialises
+    # it against any other write, closing that race.
+    with db.transaction() as conn:
+        current_count = conn.execute(
+            "SELECT COUNT(*) AS n FROM broadcast_recipients WHERE chat_id = ?", (chat_id,)).fetchone()["n"]
+        incoming = set(request.user_ids) - {user["id"]}
+        existing_ids = {
+            row["user_id"] for row in
+            conn.execute("SELECT user_id FROM broadcast_recipients WHERE chat_id = ?", (chat_id,)).fetchall()
+        }
+        new_ids = incoming - existing_ids
+        if current_count + len(new_ids) > MAX_BROADCAST_RECIPIENTS:
+            raise HTTPException(400, f"A broadcast list can have at most {MAX_BROADCAST_RECIPIENTS} recipients")
+
+        for recipient_id in new_ids:
+            if conn.execute("SELECT 1 FROM users WHERE id = ?", (recipient_id,)).fetchone() is None:
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO broadcast_recipients (chat_id, user_id, added_at) VALUES (?, ?, ?)",
+                (chat_id, recipient_id, now),
+            )
+            added.append(recipient_id)
     return {"added": added}
 
 
@@ -2198,7 +2366,8 @@ def create_sub_channel(chat_id: str, request: CreateSubChannelRequest,
 
 
 @app.get("/discover")
-def discover(limit: int = Query(default=50, ge=1, le=200), user: dict = Depends(current_user)):
+def discover(limit: int = Query(default=50, ge=1, le=200), offset: int = Query(default=0, ge=0),
+             user: dict = Depends(current_user)):
     """Public channels and communities you could join."""
     rows = db.query_all(
         """
@@ -2208,9 +2377,9 @@ def discover(limit: int = Query(default=50, ge=1, le=200), user: dict = Depends(
         FROM chats AS c
         WHERE c.type IN ('channel', 'community')
         ORDER BY member_count DESC
-        LIMIT ?
+        LIMIT ? OFFSET ?
         """,
-        (user["id"], limit),
+        (user["id"], limit, offset),
     )
     result = []
     for row in rows:
@@ -2537,10 +2706,50 @@ def remove_chat_lock(chat_id: str, request: SetPinRequest, user: dict = Depends(
     return {"locked": False}
 
 
+def consume_view_once_text_messages(chat_id: str, reader_id: str, up_to_seq: int) -> list[dict]:
+    """
+    View-once TEXT messages have no separate "open" request the way a
+    view-once photo does (see download_file) — there's no file to fetch, so
+    there's nothing to tap. The recipient actually reading it — marking it
+    read — IS the view, so that's what stamps view_once_opened_at here.
+    Scoped to `kind = 'text'` and messages with no attachment_id: a
+    view-once PHOTO/video keeps using its existing tap-to-open flow even
+    though it's the same view_once column, so this must not double-consume it.
+    """
+    rows = db.query_all(
+        """
+        SELECT id FROM messages
+        WHERE chat_id = ? AND seq <= ? AND sender_id != ? AND kind = 'text'
+          AND view_once = 1 AND view_once_opened_at IS NULL
+          AND deleted_at IS NULL AND unsent_at IS NULL
+        """,
+        (chat_id, up_to_seq, reader_id),
+    )
+    consumed = []
+    for row in rows:
+        claimed = db.execute(
+            "UPDATE messages SET view_once_opened_at = ? WHERE id = ? AND view_once_opened_at IS NULL",
+            (time.time(), row["id"]),
+        )
+        if claimed.rowcount:
+            consumed.append(chatstore.serialise_message(
+                db.query_one("SELECT * FROM messages WHERE id = ?", (row["id"],)), reader_id))
+    return consumed
+
+
 @app.post("/chats/{chat_id}/read")
 async def mark_read(chat_id: str, request: ReadRequest, user: dict = Depends(current_user)):
     require_member(chat_id, user["id"])
     chatstore.set_last_read(chat_id, user["id"], request.seq)
+
+    # Fire before the read receipt: a message that's about to be reported as
+    # read should already be blanked by the time anyone hears about it.
+    # "message_edited" (not a new event type) — the frontend already
+    # handles it generically as "replace this message by id," which is
+    # exactly what a freshly-blanked view-once text needs.
+    consumed = consume_view_once_text_messages(chat_id, user["id"], request.seq)
+    for message in consumed:
+        await hub.send_to_chat(chat_id, {"type": "message_edited", "message": message})
 
     # Only tell the room if this user allows read receipts. WhatsApp's rule:
     # switching them off means you stop sending them.
@@ -2696,6 +2905,16 @@ async def send_message(
 
     if not request.text and not payload:
         raise HTTPException(400, "Message is empty")
+
+    # The FK on messages.reply_to_id only proves the id exists SOMEWHERE in
+    # the table — it says nothing about which chat that message belongs to.
+    # Without this check, anyone who knows (or enumerates) a message id from
+    # a chat they're not in could set it as reply_to_id here and produce a
+    # message that semantically points across chat boundaries.
+    if request.reply_to_id:
+        target = db.query_one("SELECT chat_id FROM messages WHERE id = ?", (request.reply_to_id,))
+        if target is None or target["chat_id"] != request.chat_id:
+            raise HTTPException(400, "reply_to_id must be a message in this chat")
 
     message, created = chatstore.insert_message(
         chat_id=request.chat_id,
@@ -3191,10 +3410,20 @@ def download_file(attachment_id: str, user: dict = Depends(current_user)):
         if message["view_once"]:
             if message["sender_id"] == user["id"]:
                 raise HTTPException(403, "You cannot reopen a view-once file you sent")
-            if message["view_once_opened_at"]:
+            # Claim the "opened" stamp atomically in the UPDATE itself rather
+            # than checking view_once_opened_at with a separate SELECT first
+            # — two near-simultaneous requests (two tabs/devices, or a
+            # retried request) could otherwise both read it as NULL and both
+            # walk away with the file. Only whichever request's UPDATE
+            # actually changes a row wins the race; the other sees rowcount
+            # 0 and is told it's already been opened, same as a genuine
+            # second request would be.
+            claimed = db.execute(
+                "UPDATE messages SET view_once_opened_at = ? WHERE id = ? AND view_once_opened_at IS NULL",
+                (time.time(), message["id"]),
+            )
+            if claimed.rowcount == 0:
                 raise HTTPException(410, "This has already been opened")
-            db.execute("UPDATE messages SET view_once_opened_at = ? WHERE id = ?",
-                      (time.time(), message["id"]))
     elif attachment["story_id"]:
         story = db.query_one(
             "SELECT s.user_id, s.status, u.story_audience FROM stories AS s "
@@ -3321,7 +3550,9 @@ def unstar_message(message_id: str, user: dict = Depends(current_user)):
 
 
 @app.get("/me/starred")
-def list_starred(user: dict = Depends(current_user)):
+def list_starred(user: dict = Depends(current_user),
+                  limit: int = Query(default=500, ge=1, le=1000),
+                  offset: int = Query(default=0, ge=0)):
     """Every message you have starred, across every chat, newest first."""
     rows = db.query_all(
         """
@@ -3332,8 +3563,9 @@ def list_starred(user: dict = Depends(current_user)):
         WHERE s.user_id = ? AND m.deleted_at IS NULL AND m.unsent_at IS NULL
           AND m.id NOT IN (SELECT message_id FROM message_hidden_for WHERE user_id = ?)
         ORDER BY s.starred_at DESC
+        LIMIT ? OFFSET ?
         """,
-        (user["id"], user["id"]),
+        (user["id"], user["id"], limit, offset),
     )
 
     # A DM stores no name of its own — the chat list resolves this the same
@@ -3467,6 +3699,8 @@ async def forward_message(request: ForwardRequest, user: dict = Depends(current_
 
     sender = db.query_one("SELECT name FROM users WHERE id = ?", (original["sender_id"],))
     forwarded_from = sender["name"] if sender else ""
+    original_payload = json.loads(original["payload"]) if original["payload"] else None
+    original_attachment_id = (original_payload or {}).get("attachment_id")
 
     sent = []
     for target_chat_id in request.to_chat_ids:
@@ -3474,59 +3708,142 @@ async def forward_message(request: ForwardRequest, user: dict = Depends(current_
         if not chatstore.is_member(target_chat_id, user["id"]):
             continue
 
+        payload = dict(original_payload) if original_payload else None
+        if original_attachment_id:
+            # Filled in below, after the message exists — an attachment row
+            # is a single-message binding (see uploads.attach_to_message),
+            # so the forwarded copy needs its OWN attachment row rather than
+            # pointing at the original message's, which download_file's
+            # membership check resolves back to the SOURCE chat. Left
+            # pointing there, a recipient of the forward who isn't a member
+            # of that original chat would get 404 on a message sitting
+            # right in front of them.
+            payload.pop("attachment_id", None)
+
         message, created = chatstore.insert_message(
             chat_id=target_chat_id,
             sender_id=user["id"],
             text=original["text"],
             kind=original["kind"],
-            payload=json.loads(original["payload"]) if original["payload"] else None,
+            payload=payload,
             forwarded_from=forwarded_from,
         )
-        if created:
-            await hub.send_to_chat(target_chat_id, {"type": "message", "message": message})
+        if not created:
+            sent.append(message)
+            continue
+
+        if original_attachment_id:
+            new_attachment_id = uploads.duplicate_for_message(original_attachment_id, message["id"])
+            if new_attachment_id:
+                payload = payload or {}
+                payload["attachment_id"] = new_attachment_id
+                db.execute("UPDATE messages SET payload = ? WHERE id = ?",
+                          (json.dumps(payload), message["id"]))
+                message = chatstore.serialise_message(
+                    db.query_one("SELECT * FROM messages WHERE id = ?", (message["id"],)), user["id"])
+
+        await hub.send_to_chat(target_chat_id, {"type": "message", "message": message})
         sent.append(message)
 
     return sent
+
+
+def _fts_match_query(term: str) -> str:
+    """
+    Turn free-text user input into a safe FTS5 MATCH query.
+
+    Quoting the whole term as one phrase means FTS5's own query syntax
+    (AND/OR/NOT, -, *, column filters, ...) is treated as literal text to
+    search for rather than parsed as operators — a search for `"` or `-x`
+    can't turn into a malformed or unexpectedly-scoped MATCH query. The
+    trailing `*` keeps prefix matching on the phrase's last token, so
+    typing "hel" while a message still finds "hello" mid-search, same as
+    substring search felt like.
+    """
+    return f'"{term.replace(chr(34), chr(34) * 2)}"*'
 
 
 @app.get("/search")
 def search(q: str = Query(min_length=1, max_length=100),
            chat_id: str | None = Query(default=None),
            limit: int = Query(default=50, ge=1, le=200),
+           offset: int = Query(default=0, ge=0),
            user: dict = Depends(current_user)):
     """
     Search your own conversations, optionally scoped to a single chat.
+
+    Uses the messages_fts index (db._build_search_index) when this SQLite
+    build has FTS5 — a leading-wildcard `LIKE '%q%'` can't use any index and
+    forces a full scan of every message in scope on every search, which
+    db.py already pays to keep an FTS index in sync for on every write and
+    this used to never actually read. Falls back to the old LIKE scan only
+    when FTS5 isn't compiled into this Python's sqlite3 (db.search_available()).
     """
+    use_fts = db.search_available()
+    match = _fts_match_query(q) if use_fts else None
+    like = f"%{q}%"
+
     if chat_id:
         require_member(chat_id, user["id"])
-        rows = db.query_all(
-            """
-            SELECT m.*, c.name AS chat_name, c.type AS chat_type
-            FROM messages AS m
-            JOIN chats AS c ON c.id = m.chat_id
-            WHERE m.chat_id = ? AND m.deleted_at IS NULL AND m.unsent_at IS NULL
-              AND m.text LIKE ?
-              AND m.id NOT IN (SELECT message_id FROM message_hidden_for WHERE user_id = ?)
-            ORDER BY m.created_at DESC
-            LIMIT ?
-            """,
-            (chat_id, f"%{q}%", user["id"], limit),
-        )
+        if use_fts:
+            rows = db.query_all(
+                """
+                SELECT m.*, c.name AS chat_name, c.type AS chat_type
+                FROM messages_fts AS fts
+                JOIN messages AS m ON m.rowid = fts.rowid
+                JOIN chats AS c ON c.id = m.chat_id
+                WHERE fts.text MATCH ? AND m.chat_id = ? AND m.deleted_at IS NULL AND m.unsent_at IS NULL
+                  AND m.id NOT IN (SELECT message_id FROM message_hidden_for WHERE user_id = ?)
+                ORDER BY m.created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (match, chat_id, user["id"], limit, offset),
+            )
+        else:
+            rows = db.query_all(
+                """
+                SELECT m.*, c.name AS chat_name, c.type AS chat_type
+                FROM messages AS m
+                JOIN chats AS c ON c.id = m.chat_id
+                WHERE m.chat_id = ? AND m.deleted_at IS NULL AND m.unsent_at IS NULL
+                  AND m.text LIKE ?
+                  AND m.id NOT IN (SELECT message_id FROM message_hidden_for WHERE user_id = ?)
+                ORDER BY m.created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (chat_id, like, user["id"], limit, offset),
+            )
     else:
-        rows = db.query_all(
-            """
-            SELECT m.*, c.name AS chat_name, c.type AS chat_type
-            FROM messages AS m
-            JOIN chat_members AS cm ON cm.chat_id = m.chat_id AND cm.user_id = ?
-            JOIN chats AS c ON c.id = m.chat_id
-            WHERE m.deleted_at IS NULL AND m.unsent_at IS NULL
-              AND m.text LIKE ?
-              AND m.id NOT IN (SELECT message_id FROM message_hidden_for WHERE user_id = ?)
-            ORDER BY m.created_at DESC
-            LIMIT ?
-            """,
-            (user["id"], f"%{q}%", user["id"], limit),
-        )
+        if use_fts:
+            rows = db.query_all(
+                """
+                SELECT m.*, c.name AS chat_name, c.type AS chat_type
+                FROM messages_fts AS fts
+                JOIN messages AS m ON m.rowid = fts.rowid
+                JOIN chat_members AS cm ON cm.chat_id = m.chat_id AND cm.user_id = ?
+                JOIN chats AS c ON c.id = m.chat_id
+                WHERE fts.text MATCH ? AND m.deleted_at IS NULL AND m.unsent_at IS NULL
+                  AND m.id NOT IN (SELECT message_id FROM message_hidden_for WHERE user_id = ?)
+                ORDER BY m.created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (user["id"], match, user["id"], limit, offset),
+            )
+        else:
+            rows = db.query_all(
+                """
+                SELECT m.*, c.name AS chat_name, c.type AS chat_type
+                FROM messages AS m
+                JOIN chat_members AS cm ON cm.chat_id = m.chat_id AND cm.user_id = ?
+                JOIN chats AS c ON c.id = m.chat_id
+                WHERE m.deleted_at IS NULL AND m.unsent_at IS NULL
+                  AND m.text LIKE ?
+                  AND m.id NOT IN (SELECT message_id FROM message_hidden_for WHERE user_id = ?)
+                ORDER BY m.created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (user["id"], like, user["id"], limit, offset),
+            )
     return [
         {**chatstore.serialise_message(row, user["id"]),
          "chat_name": row["chat_name"], "chat_type": row["chat_type"]}
@@ -3780,8 +4097,23 @@ def list_my_stories(user: dict = Depends(current_user)):
 
 @app.post("/stories/{story_id}/view")
 def view_story(story_id: str, user: dict = Depends(current_user)):
-    story = db.query_one("SELECT * FROM stories WHERE id = ? AND status = 'live'", (story_id,))
+    story = db.query_one(
+        "SELECT s.*, u.story_audience FROM stories AS s "
+        "JOIN users AS u ON u.id = s.user_id WHERE s.id = ? AND s.status = 'live'",
+        (story_id,),
+    )
     if story is None:
+        raise HTTPException(404, "Story not found")
+
+    # Same audience rule list_stories enforces before a story is ever shown
+    # — without it, anyone who has (or guesses) a live story_id can register
+    # a view directly, regardless of the author's contacts/except/only
+    # setting, and get silently counted in the author's viewer list.
+    is_author = story["user_id"] == user["id"]
+    if not is_author and not (
+        chatstore.shares_chat_with(user["id"], story["user_id"])
+        and _story_audience_allows(story["user_id"], story["story_audience"], user["id"])
+    ):
         raise HTTPException(404, "Story not found")
 
     db.execute(
@@ -3827,6 +4159,19 @@ def serialise_meeting(row, viewer_id: str = "") -> dict:
     return meeting
 
 
+def _validate_join_url(join_url: str) -> str:
+    """
+    Same rule Story.link_url already enforces (main.py's create_story) —
+    join_url is rendered straight into an <a href> on the meeting card, and
+    without a scheme check a value like `javascript:...` would run as script
+    in every invitee's session the moment they click "Join now."
+    """
+    url = (join_url or "").strip()
+    if url and not (url.startswith("http://") or url.startswith("https://")):
+        raise HTTPException(400, "join_url must start with http:// or https://")
+    return url
+
+
 async def _create_meeting_row(chat_id: str, host_id: str, title: str, agenda: str,
                               starts_at: float, duration_min: int, join_url: str,
                               reminder_min: int, invite_user_ids: list[str], status: str,
@@ -3834,6 +4179,7 @@ async def _create_meeting_row(chat_id: str, host_id: str, title: str, agenda: st
     """Shared by /meetings (scheduled) and /meetings/instant (live from the
     moment it's created) — everything past the initial status is identical:
     invite expansion, the RSVP rows, and the card posted into the chat."""
+    join_url = _validate_join_url(join_url)
     meeting_id = new_id("meet")
     now = time.time()
     password_hash = auth.hash_password(password) if password else None
@@ -3938,11 +4284,20 @@ async def start_meeting(meeting_id: str, user: dict = Depends(current_user)):
     if meeting["status"] in ("ended", "cancelled"):
         raise HTTPException(400, f"This meeting is already {meeting['status']}")
 
-    if meeting["status"] != "live":
+    just_started = meeting["status"] != "live"
+    if just_started:
         db.execute("UPDATE meetings SET status = 'live' WHERE id = ?", (meeting_id,))
 
     updated = serialise_meeting(
         db.query_one("SELECT * FROM meetings WHERE id = ?", (meeting_id,)), user["id"])
+    # Only on the real scheduled-to-live transition, not every subsequent
+    # "join" call once it's already live — those still get meeting_updated
+    # (for e.g. going_count), just not a second "it started" notice.
+    if just_started:
+        await hub.send_to_chat(meeting["chat_id"], {
+            "type": "meeting_started", "meeting_id": meeting_id, "chat_id": meeting["chat_id"],
+            "title": meeting["title"], "join_url": meeting["join_url"],
+        })
     await hub.send_to_chat(meeting["chat_id"], {"type": "meeting_updated", "meeting": updated})
     return updated
 
@@ -3963,6 +4318,9 @@ async def end_meeting(meeting_id: str, user: dict = Depends(current_user)):
     await hub.send_to_chat(meeting["chat_id"], {
         "type": "meeting_ended", "meeting_id": meeting_id, "chat_id": meeting["chat_id"],
     })
+    # The host ending the meeting ends the actual call too, for everyone on
+    # it right now — not just the calendar record.
+    await _force_end_group_call(meeting["chat_id"])
     return {"ended": True}
 
 
@@ -4072,6 +4430,8 @@ async def update_meeting(meeting_id: str, request: UpdateMeetingRequest,
     fields = request.model_dump(exclude_none=True)
     if request.starts_at is not None and request.starts_at <= time.time():
         raise HTTPException(400, "starts_at must be in the future")
+    if "join_url" in fields:
+        fields["join_url"] = _validate_join_url(fields["join_url"])
 
     # `password` isn't a real column — it maps to password_hash, and an
     # empty string means "clear it" rather than "hash an empty string."
@@ -4097,11 +4457,21 @@ async def update_meeting(meeting_id: str, request: UpdateMeetingRequest,
 
 @app.delete("/meetings/{meeting_id}")
 async def cancel_meeting(meeting_id: str, user: dict = Depends(current_user)):
+    """Calling off a meeting before it happens. A meeting already underway
+    is ended (POST /end), not cancelled — cancelling a 'live' one here would
+    mark the record 'cancelled' while leaving the actual call running with
+    no signal to anyone that anything's wrong."""
     meeting = db.query_one("SELECT * FROM meetings WHERE id = ?", (meeting_id,))
     if meeting is None:
         raise HTTPException(404, "Meeting not found")
     if meeting["host_id"] != user["id"]:
         raise HTTPException(403, "Only the host can cancel this meeting")
+    if meeting["status"] != "scheduled":
+        raise HTTPException(
+            400,
+            "This meeting is already live — end it instead" if meeting["status"] == "live"
+            else f"This meeting is already {meeting['status']}",
+        )
 
     db.execute("UPDATE meetings SET status = 'cancelled' WHERE id = ?", (meeting_id,))
     await hub.send_to_chat(meeting["chat_id"], {
@@ -4137,7 +4507,8 @@ async def rsvp(meeting_id: str, request: RsvpRequest, user: dict = Depends(curre
 # ── Call history ─────────────────────────────────────────────────────────────
 
 @app.get("/calls")
-def list_calls(limit: int = Query(default=50, ge=1, le=200), user: dict = Depends(current_user)):
+def list_calls(limit: int = Query(default=50, ge=1, le=200), offset: int = Query(default=0, ge=0),
+               user: dict = Depends(current_user)):
     """
     A call log across every chat you're in — the same 'call' kind message
     each call already writes into its chat, just gathered into one list
@@ -4153,9 +4524,9 @@ def list_calls(limit: int = Query(default=50, ge=1, le=200), user: dict = Depend
         WHERE m.kind = 'call' AND m.unsent_at IS NULL
           AND m.id NOT IN (SELECT message_id FROM message_hidden_for WHERE user_id = ?)
         ORDER BY m.created_at DESC
-        LIMIT ?
+        LIMIT ? OFFSET ?
         """,
-        (user["id"], user["id"], limit),
+        (user["id"], user["id"], limit, offset),
     )
 
     calls = []
@@ -4304,6 +4675,47 @@ async def _admit_to_group_call(chat_id: str, user_id: str):
     }, exclude_user=user_id)
 
 
+async def _force_end_group_call(chat_id: str):
+    """
+    Tear down an in-progress call room and tell everyone in it to hang up —
+    used when the HOST explicitly ends a meeting (POST /meetings/{id}/end).
+    Without this, ending a meeting only flipped the `meetings` row to
+    'ended' and posted a chat notice; anyone actually still on the call (in
+    _group_calls) had no idea anything happened and kept talking in a call
+    the meeting record now says is over.
+    """
+    if chat_id not in _group_calls:
+        return
+    del _group_calls[chat_id]
+    _group_call_hosts.pop(chat_id, None)
+    _group_call_waiting.pop(chat_id, None)
+    await hub.send_to_chat(chat_id, {"type": "group_call_ended", "chat_id": chat_id})
+
+
+async def _end_live_meeting_for_chat(chat_id: str):
+    """
+    Called whenever a chat's group-call room empties out naturally (the
+    last participant left or disconnected) — the counterpart to a host
+    explicitly ending a meeting (POST /meetings/{id}/end). Without this, a
+    meeting's `meetings.status` row could only ever reach 'ended' via that
+    explicit host action, so a meeting nobody remembered to formally "end"
+    stayed stuck at 'live' in every participant's meeting list forever,
+    even though the actual call was long over.
+    """
+    meeting = db.query_one(
+        "SELECT id FROM meetings WHERE chat_id = ? AND status = 'live' ORDER BY created_at DESC LIMIT 1",
+        (chat_id,),
+    )
+    if meeting is None:
+        return
+    claimed = db.execute(
+        "UPDATE meetings SET status = 'ended' WHERE id = ? AND status = 'live'", (meeting["id"],))
+    if claimed.rowcount:
+        await hub.send_to_chat(chat_id, {
+            "type": "meeting_ended", "meeting_id": meeting["id"], "chat_id": chat_id,
+        })
+
+
 async def _leave_all_group_calls(user_id: str):
     """Called when a socket disconnects — a dropped connection must not
     leave a phantom participant other clients keep trying to reach."""
@@ -4320,30 +4732,42 @@ async def _leave_all_group_calls(user_id: str):
             del _group_calls[chat_id]
             _group_call_hosts.pop(chat_id, None)
             _group_call_waiting.pop(chat_id, None)
+            await _end_live_meeting_for_chat(chat_id)
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(socket: WebSocket, token: str = Query(default="")):
+async def websocket_endpoint(socket: WebSocket, ticket: str = Query(default="")):
     """
     One authenticated socket per device.
 
-    The token is checked before the connection is accepted. The old endpoint took
-    the user id from the URL path and trusted it, so anyone could stream anyone
-    else's messages by typing their id.
+    Authenticated by a short-lived, single-use ticket (POST /auth/ws-ticket)
+    rather than the long-lived session token directly — a WebSocket
+    handshake can't carry a custom Authorization header, and putting the
+    real bearer token in the URL instead means it ends up in every reverse
+    proxy/CDN/error-tracker access log that records request URLs, live for
+    up to 30 days. A ticket that's worthless within 30 seconds and after one
+    use closes that hole even if it does end up somewhere it shouldn't.
     """
-    session = db.query_one(
-        "SELECT user_id, expires_at FROM sessions WHERE token_hash = ?",
-        (auth.hash_token(token),),
-    )
-    if session is None or session["expires_at"] <= time.time():
+    user_id = redeem_ws_ticket(ticket)
+    if user_id is None:
         # 1008 is "policy violation" — the client can tell this apart from a
         # network failure and knows to log in again rather than retry forever.
         await socket.close(code=1008)
         return
 
-    user_id = session["user_id"]
     await socket.accept()
     await hub.add(user_id, socket)
+    # Deliberately the plain sync db call, not the *_async/to_thread-offloaded
+    # version: this handler's cleanup path (the `finally` below) proved that
+    # moving a db call here onto a worker thread adds a real cancellation
+    # window — if the ASGI layer tears the connection down while a call is
+    # mid-flight on another thread, the awaiting coroutine can be cancelled
+    # before it resumes, silently dropping whatever came after it (observed
+    # as group_call_participant_left never reaching the other participant
+    # when a socket dropped mid-call). A brief lock wait on the event-loop
+    # thread is the safer trade until that's solved with something
+    # cancellation-aware, e.g. a dedicated writer task/queue instead of
+    # asyncio.to_thread.
     db.execute("UPDATE users SET last_seen = ? WHERE id = ?", (time.time(), user_id))
     await hub.broadcast_presence(user_id, online=True)
 
@@ -4522,6 +4946,7 @@ async def websocket_endpoint(socket: WebSocket, token: str = Query(default="")):
                         del _group_calls[chat_id]
                         _group_call_hosts.pop(chat_id, None)
                         _group_call_waiting.pop(chat_id, None)
+                        await _end_live_meeting_for_chat(chat_id)
 
             elif kind in ("group_call_admit", "group_call_deny"):
                 chat_id = payload.get("chat_id", "")
@@ -4794,16 +5219,29 @@ def admin_test_email(request: TestEmailRequest, admin: dict = Depends(require_su
     return {"result": result}
 
 
+TEMPLATE_STATUSES = ("pending", "approved", "rejected")
+
+
 @app.get("/admin/templates")
-def admin_list_templates(status: str = Query(default=""), admin: dict = Depends(require_superadmin)):
+def admin_list_templates(status: str = Query(default=""),
+                          limit: int = Query(default=200, ge=1, le=1000),
+                          offset: int = Query(default=0, ge=0),
+                          admin: dict = Depends(require_superadmin)):
+    if status and status not in TEMPLATE_STATUSES:
+        # A silently-empty [] here used to be indistinguishable from "no
+        # templates in that state" — a typo'd status (?status=aproved) would
+        # read as "nothing pending" instead of "you made a mistake."
+        raise HTTPException(400, f"status must be one of {', '.join(TEMPLATE_STATUSES)}")
+
     if status:
         rows = db.query_all(
             """
             SELECT t.*, u.name AS owner_name, u.username AS owner_username
             FROM message_templates t JOIN users u ON u.id = t.user_id
             WHERE t.status = ? ORDER BY t.created_at DESC
+            LIMIT ? OFFSET ?
             """,
-            (status,),
+            (status, limit, offset),
         )
     else:
         rows = db.query_all(
@@ -4811,7 +5249,9 @@ def admin_list_templates(status: str = Query(default=""), admin: dict = Depends(
             SELECT t.*, u.name AS owner_name, u.username AS owner_username
             FROM message_templates t JOIN users u ON u.id = t.user_id
             ORDER BY t.created_at DESC
+            LIMIT ? OFFSET ?
             """,
+            (limit, offset),
         )
     return [dict(row) for row in rows]
 
@@ -4861,5 +5301,11 @@ def ready():
     try:
         db.query_one("SELECT 1")
         return {"ready": True, "online_users": len(hub.online_users())}
-    except Exception as error:
-        raise HTTPException(503, f"Database unavailable: {error}")
+    except Exception:
+        # This endpoint has no auth (a load balancer needs to hit it before
+        # anyone is signed in), so the raw exception text — which can
+        # include filesystem paths or sqlite3's own internal diagnostics —
+        # goes to the server log instead of the response body. A generic
+        # message is all an unauthenticated caller needs: something's wrong.
+        logger.exception("Readiness check failed")
+        raise HTTPException(503, "Database unavailable")

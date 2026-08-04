@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Chats } from "../api.js";
-import { Av, Button, G, I } from "../ui.jsx";
+import { Av, Button, G, I, useCallLayout } from "../ui.jsx";
 import { AudioOutputPicker, CallButton, MoreMenu, VideoTag, canPickAudioOutput, mmss } from "./CallOverlay.jsx";
 import { useCallRecording } from "../useCallRecording.js";
 
@@ -188,6 +188,7 @@ export default function GroupCallOverlay({
 }) {
   const [sinkId, setSinkId] = useState(undefined);
   const [minimized, setMinimized] = useState(false);
+  const { expanded, toggle, isDesktop } = useCallLayout();
 
   if (!call) return null;
 
@@ -215,10 +216,19 @@ export default function GroupCallOverlay({
   return (
     <div style={{
       position: "fixed", inset: 0, zIndex: 999, // just under the 1:1 overlay's 1000 — a 1:1 call always wins focus
-      maxWidth: 430, margin: "0 auto",
+      maxWidth: expanded ? "none" : 430, margin: "0 auto",
       background: "#0b1220", color: "#fff",
       display: "flex", flexDirection: "column",
     }}>
+      {isDesktop && (
+        <div onClick={toggle} title={expanded ? "Exit full screen" : "Full screen"} style={{
+          position: "absolute", top: 14, right: 14, zIndex: 1,
+          width: 34, height: 34, borderRadius: "50%", cursor: "pointer",
+          background: "#ffffff1a", display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          {expanded ? I.shrink("#fff", 16) : I.expand("#fff", 16)}
+        </div>
+      )}
       {call.phase === "incoming"
         ? <IncomingGroupCall call={call} onAccept={onAccept} onDecline={onDecline}/>
         : call.phase === "waiting"
@@ -251,7 +261,7 @@ function WaitingForHost({ call, onLeave }) {
         <div style={{ fontSize: 13, color: "#ffffffaa" }}>This meeting has a waiting room turned on.</div>
       </div>
       <div style={{ display: "flex", justifyContent: "center", padding: "0 40px 60px" }}>
-        <CallButton onClick={onLeave} background="#ef4444" icon={I.phoneOff("#fff", 24)} label="Cancel"/>
+        <CallButton onClick={onLeave} background="#ef4444" icon={I.callEnd("#fff", 24)} label="Cancel"/>
       </div>
     </>
   );
@@ -268,7 +278,7 @@ function IncomingGroupCall({ call, onAccept, onDecline }) {
         </div>
       </div>
       <div style={{ display: "flex", justifyContent: "space-around", padding: "0 40px 60px" }}>
-        <CallButton onClick={onDecline} background="#ef4444" icon={I.phoneOff("#fff", 24)} label="Decline"/>
+        <CallButton onClick={onDecline} background="#ef4444" icon={I.callEnd("#fff", 24)} label="Decline"/>
         <CallButton onClick={onAccept} background="#22c55e" icon={I.phone("#fff", 24)} label="Join"/>
       </div>
     </>
@@ -449,7 +459,7 @@ function ActiveGroupCall({
         )}
         <CallButton onClick={() => setShowMore(true)} background="#ffffff26"
                     icon={I.moreVertical("#fff", 20)} label="More" small/>
-        <CallButton onClick={onLeave} background="#ef4444" icon={I.phoneOff("#fff", 24)} label="Leave"/>
+        <CallButton onClick={onLeave} background="#ef4444" icon={I.callEnd("#fff", 24)} label="Leave"/>
       </div>
 
       {showReactions && (

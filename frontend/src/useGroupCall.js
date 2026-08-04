@@ -6,7 +6,7 @@ const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
 const GROUP_CALL_EVENT_TYPES = new Set([
   "group_call_invite", "group_call_roster", "group_call_participant_joined",
   "group_call_participant_left", "group_call_offer", "group_call_answer", "group_call_ice",
-  "group_call_host_changed", "group_call_force_muted", "group_call_kicked",
+  "group_call_host_changed", "group_call_force_muted", "group_call_kicked", "group_call_ended",
   "call_error", "whiteboard_open", "whiteboard_close",
   "group_call_reaction", "group_call_raise_hand", "group_call_lower_hand",
   "group_call_caption", "breakout_rooms_created", "breakout_rooms_closed",
@@ -426,6 +426,14 @@ export function useGroupCall(events, send, toast) {
           toastRef.current?.("The host muted everyone");
         } else if (event.type === "group_call_kicked") {
           toastRef.current?.("You were removed from the call");
+          teardown();
+          setCall(null);
+        } else if (event.type === "group_call_ended") {
+          // The host tapped "End" on the meeting this call belongs to —
+          // main.py's end_meeting tears down the whole room server-side, so
+          // every participant's client needs to hang up in step rather than
+          // being left talking into a call the meeting record now says is over.
+          toastRef.current?.("The host ended this meeting");
           teardown();
           setCall(null);
         } else if (event.type === "group_call_waiting") {

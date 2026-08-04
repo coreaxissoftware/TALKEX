@@ -88,24 +88,40 @@ class Hub:
 
         Membership is read from the database rather than from a room the client
         joined, so a client cannot receive a chat's traffic by asking for it.
+
+        The db call here is deliberately the plain synchronous one, not
+        moved to a worker thread — this method is reached from a
+        connection's disconnect/cleanup path (see websocket_endpoint's
+        `finally`), and offloading it there proved to open a real
+        cancellation window: if the ASGI layer tears the socket down while
+        the call is mid-flight on another thread, the awaiting coroutine can
+        get cancelled before it resumes, and whoever this event was meant
+        for never receives it (reproduced as group_call_participant_left
+        silently never arriving when a participant's socket dropped
+        mid-call). A single indexed SELECT blocking the loop briefly is the
+        safer trade until this has a cancellation-aware fix — e.g. a
+        dedicated writer task fed by a queue instead of asyncio.to_thread.
         """
-        # Only members who actually have a socket open can receive anything, so
-        # the query is narrowed to those rather than fetching every member of a
-        # channel with thousands of subscribers and skipping almost all of them.
         online = self._connections.keys()
         if not online:
             return
 
-        placeholders = ",".join("?" for _ in online)
+        # Scoped by chat_id alone — bounded by that chat's membership, not by
+        # how many users are online site-wide. An IN (...) clause keyed by the
+        # online set (the previous approach) grows a bound parameter per
+        # connected user across the WHOLE server and raises
+        # sqlite3.OperationalError ("too many SQL variables") once concurrent
+        # connections pass SQLite's parameter limit — filtering against the
+        # online set in Python afterward avoids that ceiling entirely.
+        online_set = set(online)
         rows = db.query_all(
-            f"SELECT user_id FROM chat_members "
-            f"WHERE chat_id = ? AND user_id IN ({placeholders})",
-            (chat_id, *online),
+            "SELECT user_id FROM chat_members WHERE chat_id = ?", (chat_id,),
         )
         for row in rows:
-            if row["user_id"] == exclude_user:
+            user_id = row["user_id"]
+            if user_id == exclude_user or user_id not in online_set:
                 continue
-            await self.send_to_user(row["user_id"], event)
+            await self.send_to_user(user_id, event)
 
     async def broadcast_presence(self, user_id: str, online: bool):
         """
@@ -113,6 +129,8 @@ class Hub:
 
         Only members of a shared chat are told — presence is not public, and a
         user who has switched off "last seen" is not announced at all.
+        Same plain-sync-call reasoning as send_to_chat above — this runs on
+        both connect AND the disconnect path.
         """
         user = db.query_one("SELECT show_last_seen FROM users WHERE id = ?", (user_id,))
         if user is None or not user["show_last_seen"]:

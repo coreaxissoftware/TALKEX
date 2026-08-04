@@ -11,7 +11,7 @@ import { MeetingSheet } from "./ChatView.jsx";
  * These are two different tables on the server but one idea to a person — "what
  * have I got waiting" — so they share a screen.
  */
-export default function Planner({ toast, onOpenChat, chats, onJoinCall }) {
+export default function Planner({ toast, onOpenChat, chats, onJoinCall, me }) {
   const [tab, setTab] = useState("meetings");
   const [meetings, setMeetings] = useState([]);
   const [queue, setQueue] = useState([]);
@@ -73,6 +73,32 @@ export default function Planner({ toast, onOpenChat, chats, onJoinCall }) {
   function pickChatToSchedule(chat) {
     setPickingChat(false);
     setSchedulingChat(chat);
+  }
+
+  // Cancelling/ending is host-only server-side (main.py's cancel_meeting /
+  // end_meeting both 403 anyone else) — the button is hidden for everyone
+  // but the host to match, rather than letting a non-host tap it and land
+  // on a confusing permission error.
+  async function cancelMeeting(meeting) {
+    if (!window.confirm("Cancel this meeting for everyone?")) return;
+    try {
+      await Meetings.cancel(meeting.id);
+      toast("Meeting cancelled");
+      reload();
+    } catch (problem) {
+      toast(problem.message || "Could not cancel the meeting");
+    }
+  }
+
+  async function endMeeting(meeting) {
+    if (!window.confirm("End this meeting for everyone?")) return;
+    try {
+      await Meetings.end(meeting.id);
+      toast("Meeting ended");
+      reload();
+    } catch (problem) {
+      toast(problem.message || "Could not end the meeting");
+    }
   }
 
   return (
@@ -150,12 +176,22 @@ export default function Planner({ toast, onOpenChat, chats, onJoinCall }) {
               )}
 
               {(meeting.status === "scheduled" || meeting.status === "live") && (
-                <Button onClick={() => joinMeeting(meeting)} style={{
-                  width: "100%", marginTop: 10, padding: "8px",
-                  background: meeting.status === "live" ? G.green : undefined,
-                }}>
-                  {meeting.status === "live" ? "Join now — live" : "Join now"}
-                </Button>
+                <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+                  <Button onClick={() => joinMeeting(meeting)} style={{
+                    flex: 1, padding: "8px",
+                    background: meeting.status === "live" ? G.green : undefined,
+                  }}>
+                    {meeting.status === "live" ? "Join now — live" : "Join now"}
+                  </Button>
+                  {meeting.host_id === me?.id && meeting.status === "scheduled" && (
+                    <Button variant="danger" onClick={() => cancelMeeting(meeting)}
+                            style={{ padding: "8px 14px" }}>Cancel</Button>
+                  )}
+                  {meeting.host_id === me?.id && meeting.status === "live" && (
+                    <Button variant="danger" onClick={() => endMeeting(meeting)}
+                            style={{ padding: "8px 14px" }}>End</Button>
+                  )}
+                </div>
               )}
             </div>
           ))

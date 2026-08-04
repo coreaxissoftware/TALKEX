@@ -29,6 +29,7 @@ Four rules are doing real security work here, and none of them are optional:
       id would otherwise be able to read a private attachment.
 """
 
+import asyncio
 import os
 import shutil
 import time
@@ -98,27 +99,42 @@ async def store(upload, uploader_id: str) -> dict:
     destination = path_for(attachment_id)
 
     written = 0
+    # `store()` is `async def` and runs directly on the event loop (it's
+    # awaited from request handlers, not dispatched to a thread pool the way
+    # a sync `def` route is), so a plain blocking open()/write() here would
+    # freeze every other request and websocket message for as long as each
+    # disk write takes — for a large upload that's up to MAX_UPLOAD_BYTES /
+    # CHUNK_BYTES (~390 for a 25MB file) blocking syscalls in a row, all on
+    # the one thread the whole app's async I/O shares. asyncio.to_thread
+    # moves each write off the loop; upload.read() is already non-blocking.
+    target = await asyncio.to_thread(open, destination, "wb")
     try:
-        with open(destination, "wb") as target:
-            while True:
-                chunk = await upload.read(CHUNK_BYTES)
-                if not chunk:
-                    break
+        while True:
+            chunk = await upload.read(CHUNK_BYTES)
+            if not chunk:
+                break
 
-                written += len(chunk)
-                if written > MAX_UPLOAD_BYTES:
-                    # Stop as soon as the limit is passed rather than finishing
-                    # the write and rejecting afterwards.
-                    raise UploadTooLarge(
-                        f"Files must be under {MAX_UPLOAD_BYTES // (1024 * 1024)} MB")
+            written += len(chunk)
+            if written > MAX_UPLOAD_BYTES:
+                # Stop as soon as the limit is passed rather than finishing
+                # the write and rejecting afterwards.
+                raise UploadTooLarge(
+                    f"Files must be under {MAX_UPLOAD_BYTES // (1024 * 1024)} MB")
 
-                target.write(chunk)
-    except Exception:
-        # Never leave a partial file behind, whether the cause was the size
-        # limit or a disk error.
+            await asyncio.to_thread(target.write, chunk)
+    except BaseException:
+        # BaseException, not Exception: a request cancelled mid-upload (the
+        # client disconnected while a chunk write was in flight on another
+        # thread) raises asyncio.CancelledError, which does NOT subclass
+        # Exception — an `except Exception` here would let a cancelled
+        # upload skip this cleanup entirely and leave a partial file with no
+        # attachment row pointing at it.
+        await asyncio.to_thread(target.close)
         if os.path.exists(destination):
             os.remove(destination)
         raise
+    else:
+        await asyncio.to_thread(target.close)
 
     if written == 0:
         os.remove(destination)

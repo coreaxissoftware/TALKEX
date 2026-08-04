@@ -1,19 +1,25 @@
 """
 SMS delivery for phone number verification (signup and number-change OTPs).
 
-Sends via MSG91's Flow API (stdlib urllib + json — no extra dependency).
+Sends via MSG91's dedicated OTP product (stdlib urllib + json — no extra
+dependency), NOT the generic Flow API — this account's DLT-approved
+template lives under MSG91's "OTP Widget/SDK" > Templates, a distinct
+product from Flow with its own /api/v5/otp endpoint and request shape.
+Posting a Flow-shaped request against an OTP-product template_id is
+exactly what earned the "Template ID Missing or Invalid Template" error in
+MSG91's failed-logs dashboard — the id was real, just for the wrong API.
+
 Credentials come from the `settings` table first — set from the superadmin
 panel's Integrations tab, no redeploy needed — falling back to
-MSG91_AUTH_KEY/MSG91_TEMPLATE_ID/MSG91_VAR_NAME env vars if the panel has
-never been used. Until either is configured, an OTP is logged to the
-server console instead, exactly like before.
+MSG91_AUTH_KEY/MSG91_TEMPLATE_ID env vars if the panel has never been
+used. Until either is configured, an OTP is logged to the server console
+instead, exactly like before.
 
-The message text itself is registered separately on India's DLT platform
-under the CoreAxis entity (approved header "COREAX"), then wired into an
-MSG91 "Flow" — MSG91_TEMPLATE_ID is that flow's id, not the raw DLT
-template id, and MSG91_VAR_NAME is whatever the flow's single variable was
-named when it was created in the MSG91 dashboard (MSG91 lets you pick the
-name; there's no fixed convention, "var" is just the common default).
+MSG91_VAR_NAME still exists as a setting for backward compatibility with
+anyone who has it saved, but the OTP-product endpoint has no equivalent —
+it always binds the `otp` query parameter to the template's OTP variable
+regardless of what that variable was named when the template was created,
+so nothing here reads it anymore.
 
 Everything else — generating the code, hashing it at rest, expiry, rate
 limiting, retry counting — is already provider-agnostic (see phone_otps in
@@ -27,6 +33,7 @@ import logging
 import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import db
@@ -50,7 +57,7 @@ def send_otp(phone: str, code: str) -> str:
     configured — the same dev-mode behavior this always had, just now the
     honest fallback rather than the only path.
     """
-    auth_key, template_id, var_name = _config()
+    auth_key, template_id, _var_name = _config()
     if not (auth_key and template_id):
         logger.warning("[DEV SMS — no provider configured] OTP for %s: %s", phone, code)
         print(f"[DEV SMS — no provider configured] OTP for {phone}: {code}")
@@ -59,17 +66,20 @@ def send_otp(phone: str, code: str) -> str:
     # MSG91 wants a bare country-code-prefixed number — no "+", no spaces.
     mobile = re.sub(r"[^0-9]", "", phone)
 
-    body = json.dumps({
+    # authkey is a standing, reusable credential — unlike mobile/otp, which
+    # only matter for the few minutes this code is live, a leaked authkey
+    # (proxy/CDN access log, HTTP debug tooling, anything that records
+    # outbound request URLs) lets anyone send SMS on this account's bill
+    # until it's rotated. MSG91 accepts it as a header on this endpoint too,
+    # so it never has to appear in the URL.
+    query = urllib.parse.urlencode({
         "template_id": template_id,
-        "recipients": [{"mobiles": mobile, var_name: code}],
-    }).encode()
+        "mobile": mobile,
+        "otp": code,
+    })
     request = urllib.request.Request(
-        "https://control.msg91.com/api/v5/flow/", data=body, method="POST",
-        headers={
-            "authkey": auth_key,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
+        f"https://control.msg91.com/api/v5/otp?{query}", method="POST",
+        headers={"Accept": "application/json", "authkey": auth_key},
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
@@ -79,26 +89,26 @@ def send_otp(phone: str, code: str) -> str:
         # header, insufficient balance, etc.) in the body even on a 4xx —
         # log it, since "SMS request failed" alone gives no way to diagnose
         # a silently-undelivered OTP.
-        logger.error("MSG91 SMS request failed for %s: HTTP %s %s",
+        logger.error("MSG91 OTP request failed for %s: HTTP %s %s",
                      phone, exc.code, _safe_body(exc))
         return "error"
     except urllib.error.URLError:
-        logger.exception("MSG91 SMS request failed for %s", phone)
+        logger.exception("MSG91 OTP request failed for %s", phone)
         return "error"
 
-    # MSG91's Flow API returns HTTP 200 for both success AND rejection
-    # (invalid template variable, unapproved DLT entity, etc.) — the only
-    # way to tell them apart is the "type" field in the body, so a 200
-    # alone is not enough to call this "sent".
+    # MSG91 returns HTTP 200 for both success AND rejection (invalid
+    # template, unapproved DLT entity, etc.) — the only way to tell them
+    # apart is the "type" field in the body, so a 200 alone is not enough
+    # to call this "sent".
     try:
         parsed = json.loads(raw)
     except ValueError:
-        logger.error("MSG91 SMS response for %s was not JSON: %r", phone, raw[:300])
+        logger.error("MSG91 OTP response for %s was not JSON: %r", phone, raw[:300])
         return "error"
 
     if str(parsed.get("type", "")).lower() == "success":
         return "sent"
-    logger.error("MSG91 rejected the SMS for %s: %s", phone, parsed.get("message", parsed))
+    logger.error("MSG91 rejected the OTP for %s: %s", phone, parsed.get("message", parsed))
     return "error"
 
 

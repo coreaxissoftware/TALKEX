@@ -14,6 +14,29 @@ services:
         generateValue: true
       - key: DATA_DIR
         value: /data
+      # Without this, CORSMiddleware falls back to localhost-only dev
+      # origins and every request from the real frontend domain gets
+      # rejected by the browser before the API ever runs. Set to the
+      # actual frontend origin(s), comma-separated, no trailing slash.
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      # The one account whose username (case-insensitive) is promoted to
+      # superadmin the first time it signs in — with no value set here,
+      # a fresh deploy has no way for anyone to ever reach /admin/*.
+      - key: SUPERADMIN_USERNAME
+        sync: false
+      # SMS/email OTP delivery is silently a no-op (console-log fallback)
+      # until these are set, either here or later via the superadmin
+      # Integrations panel. Declared here so a fresh deploy shows them as
+      # required instead of failing invisibly.
+      - key: MSG91_AUTH_KEY
+        sync: false
+      - key: MSG91_TEMPLATE_ID
+        sync: false
+      - key: MAILGUN_API_KEY
+        sync: false
+      - key: MAILGUN_DOMAIN
+        sync: false
     healthCheckPath: /health
     disk:
       name: talkex-data

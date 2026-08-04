@@ -12,6 +12,7 @@ test that waits five seconds and hopes is a test that fails on a slow machine.
 """
 
 import asyncio
+import itertools
 import os
 import tempfile
 import time
@@ -37,6 +38,21 @@ def client():
         yield test_client
 
 
+# register()/OTP-request endpoints rate-limit by caller IP (client_ip() in
+# main.py reads X-Forwarded-For) as well as by account/phone/email, so that
+# one script working through many different target numbers or usernames
+# can't dodge the per-target cap. Real distinct users have distinct IPs;
+# this suite creates hundreds of accounts from what would otherwise be a
+# single TestClient "IP", so each helper hands out its own fake one —
+# matching real traffic rather than working around the limiter.
+_next_test_ip = itertools.count(1)
+
+
+def fake_client_ip() -> str:
+    n = next(_next_test_ip)
+    return f"10.{(n >> 16) & 255}.{(n >> 8) & 255}.{n & 255}"
+
+
 def make_user(client, name="Test User"):
     """Register a fresh account and return its auth header plus its id."""
     username = f"u{uuid.uuid4().hex[:10]}"
@@ -46,7 +62,7 @@ def make_user(client, name="Test User"):
         "password": "correct horse battery",
         "phone": "",
         "bio": "",
-    })
+    }, headers={"X-Forwarded-For": fake_client_ip()})
     assert response.status_code == 200, response.text
     body = response.json()
     return {"Authorization": f"Bearer {body['token']}"}, body["user"]["id"], username
@@ -88,7 +104,7 @@ def test_no_demo_password_bypass(client):
     client.post("/auth/register", json={
         "name": "Demo", "username": "demo",
         "password": "a real password", "phone": "", "bio": "",
-    })
+    }, headers={"X-Forwarded-For": fake_client_ip()})
     response = client.post("/auth/login", json={"username": "demo", "password": "anything"})
     assert response.status_code == 401
 
@@ -1003,12 +1019,71 @@ def test_meeting_lifecycle(client):
     row = db.query_one("SELECT reminded_at FROM meetings WHERE id = ?", (meeting["id"],))
     assert row["reminded_at"] == first_reminder
 
-    # Live at the start time, ended once the duration is up.
+    # The clock reaching starts_at does NOT flip status on its own — a
+    # meeting nobody has actually joined isn't "live" just because the
+    # scheduled time passed. Status is driven by real activity: someone
+    # tapping Join (POST /start), the host ending it, or the call room
+    # emptying out — never a wall-clock guess.
     run_tick(starts_at + 1)
+    assert client.get(f"/meetings/{meeting['id']}", headers=bob).json()["status"] == "scheduled"
+
+    # Bob actually joins — now it's genuinely live.
+    started = client.post(f"/meetings/{meeting['id']}/start", headers=bob).json()
+    assert started["status"] == "live"
+
+    # Running long past the scheduled duration must NOT auto-end a meeting
+    # that's actually still live — real calls routinely run over.
+    run_tick(starts_at + 46 * 60)
     assert client.get(f"/meetings/{meeting['id']}", headers=bob).json()["status"] == "live"
 
-    run_tick(starts_at + 46 * 60)
+    # Only the host explicitly ending it (or the call room emptying out —
+    # covered by test_disconnecting_mid_call_removes_the_participant-style
+    # scenarios) moves it to 'ended'.
+    client.post(f"/meetings/{meeting['id']}/end", headers=alice)
     assert client.get(f"/meetings/{meeting['id']}", headers=bob).json()["status"] == "ended"
+
+
+def test_a_never_joined_scheduled_meeting_expires_after_its_window(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    starts_at = time.time() + 2 * HOUR
+    meeting = client.post("/meetings", headers=alice, json={
+        "chat_id": chat_id, "title": "Ghost meeting", "starts_at": starts_at, "duration_min": 30,
+    }).json()
+
+    # Nobody ever taps Join. Once the scheduled window (start + duration)
+    # has fully passed, it's swept out of "upcoming" rather than sitting
+    # there forever.
+    run_tick(starts_at + 1)
+    assert client.get(f"/meetings/{meeting['id']}", headers=alice).json()["status"] == "scheduled"
+
+    run_tick(starts_at + 31 * 60)
+    assert client.get(f"/meetings/{meeting['id']}", headers=alice).json()["status"] == "ended"
+
+
+def test_a_meeting_ends_when_the_last_participant_disconnects(client):
+    alice, alice_id, alice_name = make_user(client, "Alice")
+    bob, bob_id, bob_name = make_user(client, "Bob")
+    chat_id = make_group(client, alice, [bob_id])
+
+    meeting = client.post("/meetings/instant", headers=alice,
+                          json={"chat_id": chat_id, "title": "Quick sync"}).json()
+    assert meeting["status"] == "live"
+
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
+        # No second socket connects in this test, so there's no presence
+        # event for alice to receive here (that only fires when someone ELSE
+        # she shares a chat with comes online) — straight to the call.
+        alice_socket.send_json({"type": "group_call_start", "chat_id": chat_id, "call_kind": "voice"})
+        alice_socket.receive_json()  # group_call_roster
+
+    # Alice's socket just closed without an explicit group_call_leave — the
+    # room empties out via disconnect cleanup, which must also close out
+    # the meeting record, not just the in-memory call state.
+    current = client.get(f"/meetings/{meeting['id']}", headers=bob).json()
+    assert current["status"] == "ended"
 
 
 def test_only_the_host_can_change_or_cancel_a_meeting(client):
@@ -1099,7 +1174,7 @@ def test_hiding_your_phone_number_scrubs_it_from_other_viewers(client):
     alice_reg = client.post("/auth/register", json={
         "name": "Alice", "username": f"u{uuid.uuid4().hex[:10]}",
         "password": "correct horse battery", "phone": "+15551112222", "bio": "",
-    })
+    }, headers={"X-Forwarded-For": fake_client_ip()})
     alice = {"Authorization": f"Bearer {alice_reg.json()['token']}"}
     alice_id = alice_reg.json()["user"]["id"]
     bob, bob_id, _ = make_user(client, "Bob")
@@ -1121,7 +1196,7 @@ def test_hidden_phone_number_is_scrubbed_from_the_directory_and_chat_members(cli
     alice_reg = client.post("/auth/register", json={
         "name": "Alice", "username": f"u{uuid.uuid4().hex[:10]}",
         "password": "correct horse battery", "phone": "+15559998888", "bio": "",
-    })
+    }, headers={"X-Forwarded-For": fake_client_ip()})
     alice = {"Authorization": f"Bearer {alice_reg.json()['token']}"}
     alice_id = alice_reg.json()["user"]["id"]
     client.patch("/me", headers=alice, json={"show_phone_number": False})
@@ -1144,7 +1219,7 @@ def test_adding_a_contact_that_matches_a_registered_phone_resolves_the_user(clie
     bob_response = client.post("/auth/register", json={
         "name": "Bob Baker", "username": f"u{uuid.uuid4().hex[:10]}",
         "password": "correct horse battery", "phone": "+15551234567", "bio": "",
-    })
+    }, headers={"X-Forwarded-For": fake_client_ip()})
     assert bob_response.status_code == 200
 
     contact = client.post("/contacts", headers=alice, json={
@@ -1173,7 +1248,7 @@ def test_a_contact_matches_once_that_phone_number_signs_up_later(client):
     client.post("/auth/register", json={
         "name": "Late Joiner", "username": f"u{uuid.uuid4().hex[:10]}",
         "password": "correct horse battery", "phone": "+12223334444", "bio": "",
-    })
+    }, headers={"X-Forwarded-For": fake_client_ip()})
 
     refreshed = next(c for c in client.get("/contacts", headers=alice).json()
                      if c["id"] == contact["id"])
@@ -2352,18 +2427,23 @@ def test_cannot_manage_someone_elses_api_key(client):
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
 
-def token_for(client, username):
-    return client.post("/auth/login", json={
+def ws_ticket_for(client, username):
+    """Log in, then mint the short-lived, single-use ticket /ws actually
+    authenticates with (see main.create_ws_ticket) — the socket handshake
+    can't carry the session token itself as a header."""
+    token = client.post("/auth/login", json={
         "username": username, "password": "correct horse battery"}).json()["token"]
+    return client.post("/auth/ws-ticket",
+                       headers={"Authorization": f"Bearer {token}"}).json()["ticket"]
 
 
-def test_websocket_rejects_a_bad_token(client):
+def test_websocket_rejects_a_bad_ticket(client):
     with pytest.raises(Exception):
-        with client.websocket_connect("/ws?token=not-a-real-token") as socket:
+        with client.websocket_connect("/ws?ticket=not-a-real-ticket") as socket:
             socket.receive_json()
 
 
-def test_websocket_rejects_no_token(client):
+def test_websocket_rejects_no_ticket(client):
     with pytest.raises(Exception):
         with client.websocket_connect("/ws") as socket:
             socket.receive_json()
@@ -2375,7 +2455,7 @@ def test_message_arrives_live_on_the_recipients_socket(client):
     chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
 
     # Bob connects once, for everything — not once per chat as the old client did.
-    with client.websocket_connect(f"/ws?token={token_for(client, bob_name)}") as socket:
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as socket:
         client.post("/messages", headers=alice,
                     json={"chat_id": chat_id, "text": "live delivery"})
 
@@ -2391,7 +2471,7 @@ def test_outsider_socket_receives_nothing_from_a_chat_they_are_not_in(client):
     mallory, _, mallory_name = make_user(client, "Mallory")
     chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
 
-    with client.websocket_connect(f"/ws?token={token_for(client, mallory_name)}") as socket:
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, mallory_name)}") as socket:
         client.post("/messages", headers=alice,
                     json={"chat_id": chat_id, "text": "not for mallory"})
 
@@ -2408,9 +2488,9 @@ def test_typing_cannot_be_broadcast_into_a_chat_you_are_not_in(client):
     mallory, _, mallory_name = make_user(client, "Mallory")
     chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
 
-    with client.websocket_connect(f"/ws?token={token_for(client, bob_name)}") as bob_socket:
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket:
         with client.websocket_connect(
-                f"/ws?token={token_for(client, mallory_name)}") as mallory_socket:
+                f"/ws?ticket={ws_ticket_for(client, mallory_name)}") as mallory_socket:
             # Mallory names a chat she is not in.
             mallory_socket.send_json({"type": "typing", "chat_id": chat_id})
             mallory_socket.send_json({"type": "ping"})
@@ -2433,7 +2513,7 @@ def test_scheduled_message_is_pushed_live_when_it_fires(client):
         "chat_id": chat_id, "text": "queued then pushed", "send_at": send_at,
     })
 
-    with client.websocket_connect(f"/ws?token={token_for(client, bob_name)}") as socket:
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as socket:
         run_tick(send_at + 1)
         event = socket.receive_json()
         assert event["type"] == "message"
@@ -2460,8 +2540,8 @@ def test_a_call_invite_reaches_the_dm_peer(client):
     bob, bob_id, bob_name = make_user(client, "Bob")
     chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
 
-    with client.websocket_connect(f"/ws?token={token_for(client, bob_name)}") as bob_socket:
-        with client.websocket_connect(f"/ws?token={token_for(client, alice_name)}") as alice_socket:
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket:
+        with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
             # Alice's own socket opening fires a presence event to Bob, since
             # they share this DM — drain it before looking for the call.
             assert bob_socket.receive_json()["type"] == "presence"
@@ -2484,8 +2564,8 @@ def test_call_signaling_round_trip_answer_ice_and_end(client):
     bob, bob_id, bob_name = make_user(client, "Bob")
     chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
 
-    with client.websocket_connect(f"/ws?token={token_for(client, alice_name)}") as alice_socket:
-        with client.websocket_connect(f"/ws?token={token_for(client, bob_name)}") as bob_socket:
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
+        with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket:
             assert alice_socket.receive_json()["type"] == "presence"
 
             bob_socket.send_json({
@@ -2514,7 +2594,7 @@ def test_call_invite_to_a_stranger_is_refused(client):
     mallory, mallory_id, mallory_name = make_user(client, "Mallory")
     chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
 
-    with client.websocket_connect(f"/ws?token={token_for(client, alice_name)}") as alice_socket:
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
         # Alice tries to ring Mallory by naming her Alice/Bob DM — Mallory is
         # not the peer in that chat.
         alice_socket.send_json({
@@ -2531,7 +2611,7 @@ def test_blocked_users_cannot_call_each_other(client):
     chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
     client.post(f"/users/{bob_id}/block", headers=alice)
 
-    with client.websocket_connect(f"/ws?token={token_for(client, alice_name)}") as alice_socket:
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
         alice_socket.send_json({
             "type": "call_invite", "to": bob_id, "chat_id": chat_id,
             "call_kind": "voice", "sdp": {"type": "offer", "sdp": "v=0..."},
@@ -2546,7 +2626,7 @@ def test_an_outsider_cannot_signal_into_a_chat_they_are_not_in(client):
     mallory, mallory_id, mallory_name = make_user(client, "Mallory")
     chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
 
-    with client.websocket_connect(f"/ws?token={token_for(client, mallory_name)}") as mallory_socket:
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, mallory_name)}") as mallory_socket:
         mallory_socket.send_json({
             "type": "call_invite", "to": alice_id, "chat_id": chat_id,
             "call_kind": "voice", "sdp": {"type": "offer", "sdp": "v=0..."},
@@ -2567,8 +2647,8 @@ def test_starting_a_group_call_rings_other_members(client):
     bob, bob_id, bob_name = make_user(client, "Bob")
     chat_id = make_group(client, alice, [bob_id])
 
-    with client.websocket_connect(f"/ws?token={token_for(client, bob_name)}") as bob_socket:
-        with client.websocket_connect(f"/ws?token={token_for(client, alice_name)}") as alice_socket:
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket:
+        with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
             assert bob_socket.receive_json()["type"] == "presence"
 
             alice_socket.send_json({
@@ -2589,8 +2669,8 @@ def test_joining_an_existing_group_call_gets_the_roster(client):
     bob, bob_id, bob_name = make_user(client, "Bob")
     chat_id = make_group(client, alice, [bob_id])
 
-    with client.websocket_connect(f"/ws?token={token_for(client, alice_name)}") as alice_socket:
-        with client.websocket_connect(f"/ws?token={token_for(client, bob_name)}") as bob_socket:
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
+        with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket:
             assert alice_socket.receive_json()["type"] == "presence"
 
             alice_socket.send_json({"type": "group_call_start", "chat_id": chat_id, "call_kind": "video"})
@@ -2614,8 +2694,8 @@ def test_group_call_signaling_relay(client):
     bob, bob_id, bob_name = make_user(client, "Bob")
     chat_id = make_group(client, alice, [bob_id])
 
-    with client.websocket_connect(f"/ws?token={token_for(client, alice_name)}") as alice_socket:
-        with client.websocket_connect(f"/ws?token={token_for(client, bob_name)}") as bob_socket:
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
+        with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket:
             assert alice_socket.receive_json()["type"] == "presence"
             alice_socket.send_json({"type": "group_call_start", "chat_id": chat_id, "call_kind": "voice"})
             alice_socket.receive_json()  # group_call_roster
@@ -2651,8 +2731,8 @@ def test_leaving_a_group_call_notifies_remaining_participants(client):
     bob, bob_id, bob_name = make_user(client, "Bob")
     chat_id = make_group(client, alice, [bob_id])
 
-    with client.websocket_connect(f"/ws?token={token_for(client, alice_name)}") as alice_socket:
-        with client.websocket_connect(f"/ws?token={token_for(client, bob_name)}") as bob_socket:
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
+        with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket:
             assert alice_socket.receive_json()["type"] == "presence"
             alice_socket.send_json({"type": "group_call_start", "chat_id": chat_id, "call_kind": "voice"})
             alice_socket.receive_json()  # group_call_roster
@@ -2671,8 +2751,8 @@ def test_disconnecting_mid_call_removes_the_participant(client):
     bob, bob_id, bob_name = make_user(client, "Bob")
     chat_id = make_group(client, alice, [bob_id])
 
-    with client.websocket_connect(f"/ws?token={token_for(client, alice_name)}") as alice_socket:
-        with client.websocket_connect(f"/ws?token={token_for(client, bob_name)}") as bob_socket:
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
+        with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket:
             assert alice_socket.receive_json()["type"] == "presence"
             alice_socket.send_json({"type": "group_call_start", "chat_id": chat_id, "call_kind": "voice"})
             alice_socket.receive_json()  # group_call_roster
@@ -2693,7 +2773,7 @@ def test_group_calling_is_restricted_to_group_chats(client):
     bob, bob_id, _ = make_user(client, "Bob")
     dm_chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
 
-    with client.websocket_connect(f"/ws?token={token_for(client, alice_name)}") as alice_socket:
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
         alice_socket.send_json({
             "type": "group_call_start", "chat_id": dm_chat_id, "call_kind": "voice",
         })
@@ -2709,7 +2789,7 @@ def test_outsider_cannot_start_a_group_call(client):
     mallory, _, mallory_name = make_user(client, "Mallory")
     chat_id = make_group(client, alice, [bob_id])
 
-    with client.websocket_connect(f"/ws?token={token_for(client, mallory_name)}") as mallory_socket:
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, mallory_name)}") as mallory_socket:
         mallory_socket.send_json({
             "type": "group_call_start", "chat_id": chat_id, "call_kind": "voice",
         })
@@ -3069,7 +3149,7 @@ def test_online_recipient_does_not_get_a_push(client, monkeypatch):
     calls = []
     monkeypatch.setattr(main.push, "send", lambda *a, **k: calls.append(1) or "ok")
 
-    with client.websocket_connect(f"/ws?token={token_for(client, bob_name)}"):
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}"):
         client.post("/messages", headers=alice, json={"chat_id": chat_id, "text": "hi bob"})
 
     assert len(calls) == 0
@@ -3262,6 +3342,13 @@ def capture_otp(monkeypatch):
     what would have been sent instead of actually sending it."""
     sent = {}
     monkeypatch.setattr(main.sms, "send_otp", lambda phone, code: sent.update(phone=phone, code=code) or "sent")
+    # main.issue_otp()/issue_email_otp() also rate-limit by caller IP. Every
+    # call from this module's TestClient would otherwise look like the same
+    # IP, so tests that fire several requests in a row (or run after other
+    # OTP tests within the same rate-limit window) would trip that limiter
+    # instead of exercising what they actually mean to test — give each
+    # request through this fixture its own fake IP instead.
+    monkeypatch.setattr(main, "client_ip", lambda request: fake_client_ip())
     return sent
 
 
@@ -3550,6 +3637,8 @@ def capture_email_otp(monkeypatch):
     sent = {}
     monkeypatch.setattr(main.email_delivery, "send_otp",
                         lambda email, code, expires_in_seconds=300: sent.update(email=email, code=code) or "sent")
+    # See capture_otp's note above — same per-IP OTP rate limit applies here.
+    monkeypatch.setattr(main, "client_ip", lambda request: fake_client_ip())
     return sent
 
 
@@ -3754,6 +3843,94 @@ def test_an_ordinary_photo_ignores_the_view_once_gate(client):
     assert second.status_code == 200
 
 
+# ── View-once TEXT messages ──────────────────────────────────────────────────
+# A view-once photo has an explicit "open" request (GET /uploads/{id}) to hang
+# the single-use gate on. A plain text message has no such request — the
+# recipient reading it (mark_read) IS the view, so consume_view_once_text_messages
+# is what stamps view_once_opened_at here instead.
+
+def test_view_once_text_message_disappears_once_the_recipient_reads_it(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    sent = client.post("/messages", headers=alice, json={
+        "chat_id": chat_id, "text": "self-destructing secret", "view_once": True,
+    }).json()
+    assert sent["view_once"]
+    assert not sent.get("view_once_consumed")
+
+    # Not consumed yet — Bob hasn't read it.
+    still_there = client.get(f"/chats/{chat_id}/messages", headers=bob).json()
+    fetched = next(m for m in still_there if m["id"] == sent["id"])
+    assert fetched["text"] == "self-destructing secret"
+
+    read = client.post(f"/chats/{chat_id}/read", headers=bob, json={"seq": sent["seq"]})
+    assert read.status_code == 200
+
+    after = client.get(f"/chats/{chat_id}/messages", headers=bob).json()
+    consumed = next(m for m in after if m["id"] == sent["id"])
+    assert consumed["text"] == ""
+    assert consumed["view_once_consumed"] is True
+
+
+def test_view_once_text_is_also_gone_for_the_sender_once_opened(client):
+    """The sender can't replay it either, once the recipient has seen it —
+    same rule chatstore.serialise_message applies to a view-once photo."""
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    sent = client.post("/messages", headers=alice, json={
+        "chat_id": chat_id, "text": "for your eyes only", "view_once": True,
+    }).json()
+    client.post(f"/chats/{chat_id}/read", headers=bob, json={"seq": sent["seq"]})
+
+    own_view = client.get(f"/chats/{chat_id}/messages", headers=alice).json()
+    mine = next(m for m in own_view if m["id"] == sent["id"])
+    assert mine["text"] == ""
+    assert mine["view_once_consumed"] is True
+
+
+def test_the_senders_own_read_receipt_does_not_consume_their_view_once_text(client):
+    """Marking your OWN chat as read (e.g. right after sending) must not
+    burn the message before the recipient has ever seen it."""
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    sent = client.post("/messages", headers=alice, json={
+        "chat_id": chat_id, "text": "still unread by bob", "view_once": True,
+    }).json()
+    client.post(f"/chats/{chat_id}/read", headers=alice, json={"seq": sent["seq"]})
+
+    still_there = client.get(f"/chats/{chat_id}/messages", headers=bob).json()
+    fetched = next(m for m in still_there if m["id"] == sent["id"])
+    assert fetched["text"] == "still unread by bob"
+
+
+def test_view_once_text_read_event_notifies_the_chat_live(client):
+    """The sender's own open socket has to hear about the blanking too —
+    otherwise their screen keeps showing content that's already gone
+    server-side until they reload."""
+    alice, alice_id, alice_name = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    sent = client.post("/messages", headers=alice, json={
+        "chat_id": chat_id, "text": "watch this vanish", "view_once": True,
+    }).json()
+
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as socket:
+        client.post(f"/chats/{chat_id}/read", headers=bob, json={"seq": sent["seq"]})
+
+        event = socket.receive_json()
+        assert event["type"] == "message_edited"
+        assert event["message"]["id"] == sent["id"]
+        assert event["message"]["text"] == ""
+        assert event["message"]["view_once_consumed"] is True
+
+
 # ── Chat-scoped search ────────────────────────────────────────────────────────
 
 def test_search_can_be_scoped_to_a_single_chat(client):
@@ -3834,3 +4011,121 @@ def test_storage_usage_excludes_never_sent_uploads(client):
     usage = client.get("/me/storage", headers=alice).json()
     assert usage["total_bytes"] == 0
     assert usage["chats"] == []
+
+
+# ── Superadmin promotion and /admin/* access control ────────────────────────────
+# Previously untested entirely: a regression that weakened require_superadmin
+# (or a new /admin route that forgot to depend on it) could ship with a fully
+# green suite and let any signed-in account manage other users' accounts or
+# read the masked integration config.
+
+def make_superadmin(client, monkeypatch, name="Admin"):
+    """Register a fresh account whose username exactly matches
+    SUPERADMIN_USERNAME — the only way any account ever becomes a
+    superadmin (see start_session in main.py). Monkeypatched per-test since
+    it's read once from the environment at import time in the real app."""
+    username = f"admin{uuid.uuid4().hex[:10]}"
+    monkeypatch.setattr(main, "SUPERADMIN_USERNAME", username)
+    response = client.post("/auth/register", json={
+        "name": name, "username": username,
+        "password": "correct horse battery", "phone": "", "bio": "",
+    }, headers={"X-Forwarded-For": fake_client_ip()})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    return {"Authorization": f"Bearer {body['token']}"}, body["user"]["id"]
+
+
+def test_superadmin_username_promotes_matching_account_on_session_start(client, monkeypatch):
+    admin, admin_id = make_superadmin(client, monkeypatch)
+    assert client.get("/admin/stats", headers=admin).status_code == 200
+
+
+def test_an_ordinary_account_is_never_promoted(client, monkeypatch):
+    # SUPERADMIN_USERNAME is set, but this account's username doesn't match it.
+    monkeypatch.setattr(main, "SUPERADMIN_USERNAME", f"nomatch{uuid.uuid4().hex[:10]}")
+    alice, _, _ = make_user(client, "Alice")
+    assert client.get("/admin/stats", headers=alice).status_code == 403
+
+
+ADMIN_ROUTES = [
+    ("GET", "/admin/stats", None),
+    ("GET", "/admin/users", None),
+    ("POST", "/admin/users/nonexistent-id/disable", None),
+    ("POST", "/admin/users/nonexistent-id/enable", None),
+    ("DELETE", "/admin/users/nonexistent-id", None),
+    ("GET", "/admin/integrations", None),
+    ("PUT", "/admin/integrations", {}),
+    ("POST", "/admin/integrations/test-sms", {"phone": "+15550001111"}),
+    ("POST", "/admin/integrations/test-email", {"email": "nobody@example.com"}),
+    ("GET", "/admin/templates", None),
+    ("POST", "/admin/templates/nonexistent-id/approve", None),
+    ("POST", "/admin/templates/nonexistent-id/reject", None),
+]
+
+
+def test_non_superadmin_is_refused_on_every_admin_route(client):
+    alice, _, _ = make_user(client, "Alice")
+    for method, path, body in ADMIN_ROUTES:
+        response = client.request(method, path, headers=alice, json=body)
+        assert response.status_code == 403, f"{method} {path} should be 403 for a non-admin, got {response.status_code}"
+
+
+def test_signed_out_caller_is_refused_on_every_admin_route(client):
+    for method, path, body in ADMIN_ROUTES:
+        response = client.request(method, path, json=body)
+        assert response.status_code == 401, f"{method} {path} should be 401 signed out, got {response.status_code}"
+
+
+def test_superadmin_can_reach_admin_routes(client, monkeypatch):
+    admin, admin_id = make_superadmin(client, monkeypatch)
+    alice, alice_id, _ = make_user(client, "Alice")
+
+    assert client.get("/admin/stats", headers=admin).status_code == 200
+
+    users = client.get("/admin/users", headers=admin).json()
+    assert any(u["id"] == alice_id for u in users)
+
+    assert client.post(f"/admin/users/{alice_id}/disable", headers=admin).status_code == 200
+    disabled = next(u for u in client.get("/admin/users", headers=admin).json() if u["id"] == alice_id)
+    assert disabled["disabled_at"] is not None
+
+    assert client.post(f"/admin/users/{alice_id}/enable", headers=admin).status_code == 200
+
+    integrations = client.get("/admin/integrations", headers=admin).json()
+    assert "sms" in integrations and "email" in integrations
+
+
+def test_admin_cannot_delete_their_own_account_from_the_admin_panel(client, monkeypatch):
+    admin, admin_id = make_superadmin(client, monkeypatch)
+    denied = client.delete(f"/admin/users/{admin_id}", headers=admin)
+    assert denied.status_code == 400
+
+
+# ── SMS provider failure surfaces to the caller ─────────────────────────────────
+# The codebase's own history is exactly this class of bug: sms.py once posted
+# a Flow-shaped request against an OTP-product template id and every OTP
+# silently failed to send while the API still answered normally. issue_otp()
+# has an explicit branch for send_otp() returning "error" — nothing before
+# this exercised it, so a future regression that makes send_otp() return
+# anything else on failure (None, "", a raised exception) would bypass the
+# 502 guard invisibly, same as the original bug did.
+
+def test_phone_otp_request_surfaces_502_when_the_sms_provider_fails(client, monkeypatch):
+    monkeypatch.setattr(main.sms, "send_otp", lambda phone, code: "error")
+    monkeypatch.setattr(main, "client_ip", lambda request: fake_client_ip())
+    response = client.post("/auth/phone/request-otp", json={"phone": "+15551239999"})
+    assert response.status_code == 502
+
+    # And the failed attempt must not leave a usable code behind.
+    verify = client.post("/auth/phone/verify-otp", json={
+        "phone": "+15551239999", "code": "000000", "name": "X",
+    })
+    assert verify.status_code in (400, 401)
+
+
+def test_email_otp_request_surfaces_502_when_the_provider_fails(client, monkeypatch):
+    alice, _, _ = make_user(client, "Alice")
+    monkeypatch.setattr(main.email_delivery, "send_otp", lambda email, code, expires_in_seconds=300: "error")
+    monkeypatch.setattr(main, "client_ip", lambda request: fake_client_ip())
+    response = client.post("/me/email/request-otp", headers=alice, json={"email": "fails@example.com"})
+    assert response.status_code == 502

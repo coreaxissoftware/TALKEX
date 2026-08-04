@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
  * Records a voice note with MediaRecorder.
@@ -81,6 +81,14 @@ export function useVoiceRecorder(onFinished) {
     if (recorder.current?.state === "recording") recorder.current.stop();
     else { releaseStream(); setState("idle"); setSeconds(0); }
   }, [releaseStream]);
+
+  // The docstring above already says this has to happen on unmount too —
+  // it just never did. Without it, navigating away mid-recording (tapping
+  // back to the chat list) leaves the MediaRecorder running: the mic stays
+  // captured (browser mic-in-use indicator stuck on) and the seconds timer
+  // keeps firing setState on a hook instance nothing renders anymore, for
+  // the rest of the page's life.
+  useEffect(() => cancel, [cancel]);
 
   return { state, seconds, error, start, stop, cancel };
 }

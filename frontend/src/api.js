@@ -167,6 +167,14 @@ export const Auth = {
   requestPhoneOtp: (phone) => post("/auth/phone/request-otp", { phone }),
   verifyPhoneOtp: (phone, code, name) =>
     post("/auth/phone/verify-otp", { phone, code, name, device_label: guessDeviceLabel() }),
+
+  // A one-time, ~30-second ticket for opening the WebSocket. The socket
+  // handshake can't send a custom Authorization header, so without this the
+  // only way to authenticate it is putting the real session token in the
+  // connection URL — which reverse proxies/CDNs/browser history routinely
+  // log, live for up to 30 days. This gets minted fresh (over a normal,
+  // header-authenticated request) right before each connect instead.
+  wsTicket: () => post("/auth/ws-ticket"),
 };
 
 export const Me = {
@@ -789,7 +797,12 @@ export class Realtime {
     this.socket = null;
     this.attempt = 0;
     this.heartbeat = null;
+    this.reconnectTimer = null;
     this.closedOnPurpose = false;
+    // Bumped on every connect() call so a ticket fetch that's still in
+    // flight when a NEWER connect() (or close()) happens can tell it's been
+    // superseded and must not go on to open a socket.
+    this.connectId = 0;
     // False until the first successful open, so the initial connection is not
     // treated as a reconnect — the screen has just loaded its data anyway.
     this.hasConnectedBefore = false;
@@ -798,8 +811,27 @@ export class Realtime {
   connect() {
     if (!token) return;
     this.closedOnPurpose = false;
+    this.connectId += 1;
+    const connectId = this.connectId;
 
-    this.socket = new WebSocket(`${WS_BASE}/ws?token=${encodeURIComponent(token)}`);
+    // The handshake can't carry a custom Authorization header, so a fresh,
+    // single-use ticket is minted over the normal (header-authenticated)
+    // API right before opening the socket, instead of putting the real
+    // session token in the connection URL — see Auth.wsTicket.
+    Auth.wsTicket()
+      .then(({ ticket }) => {
+        if (this.closedOnPurpose || connectId !== this.connectId) return;
+        this.openSocket(ticket);
+      })
+      .catch(() => {
+        if (this.closedOnPurpose || connectId !== this.connectId) return;
+        this.setStatus("reconnecting");
+        this.scheduleReconnect();
+      });
+  }
+
+  openSocket(ticket) {
+    this.socket = new WebSocket(`${WS_BASE}/ws?ticket=${encodeURIComponent(ticket)}`);
 
     this.socket.onopen = () => {
       // Reset the backoff only once a connection actually succeeds. Resetting
@@ -854,7 +886,18 @@ export class Realtime {
     const base = Math.min(1000 * 2 ** this.attempt, MAX_BACKOFF_MS);
     const delay = base * (0.5 + Math.random() / 2);
     this.attempt += 1;
-    setTimeout(() => this.connect(), delay);
+    this.clearReconnectTimer();
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, delay);
+  }
+
+  clearReconnectTimer() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
   }
 
   startHeartbeat() {
@@ -887,6 +930,7 @@ export class Realtime {
 
   close() {
     this.closedOnPurpose = true;
+    this.clearReconnectTimer();
     this.stopHeartbeat();
     this.socket?.close();
     this.socket = null;
@@ -979,7 +1023,7 @@ export function newClientMessageId() {
 // it was queued for later — the caller shows it optimistically either way.
 export async function sendReliably({ chatId, text, kind = "text", payload = null,
                                      replyToId = null, disappearSecs = null,
-                                     clientMsgId = null }) {
+                                     clientMsgId = null, viewOnce = false }) {
   const message = {
     chat_id: chatId,
     text,
@@ -987,6 +1031,7 @@ export async function sendReliably({ chatId, text, kind = "text", payload = null
     payload,
     reply_to_id: replyToId,
     disappear_secs: disappearSecs,
+    view_once: viewOnce,
     // The caller passes this in when it has already drawn the message
     // optimistically, so the copy on screen and the copy that comes back over
     // the socket can be recognised as the same thing.

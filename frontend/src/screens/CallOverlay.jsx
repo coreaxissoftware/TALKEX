@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Av, G, I } from "../ui.jsx";
+import { Av, G, I, useCallLayout } from "../ui.jsx";
 
 export function mmss(totalSeconds) {
   const seconds = Math.max(0, Math.round(totalSeconds || 0));
@@ -114,16 +114,31 @@ export default function CallOverlay({
   call, onAccept, onReject, onEnd, onToggleMute, onToggleCamera, onShareScreen,
 }) {
   const [sinkId, setSinkId] = useState(undefined);
+  const { expanded, toggle, isDesktop } = useCallLayout();
 
   if (!call) return null;
 
   return (
     <div style={{
       position: "fixed", inset: 0, zIndex: 1000,
-      maxWidth: 430, margin: "0 auto",
+      // Desktop defaults to filling the real browser viewport (Zoom/Meet
+      // style) instead of staying pinned to the app's mobile-width column;
+      // a phone's viewport already IS that width, so there's nothing this
+      // does there. `toggle` (the expand/shrink button below) overrides
+      // either way, per device or by preference.
+      maxWidth: expanded ? "none" : 430, margin: "0 auto",
       background: "#0b1220", color: "#fff",
       display: "flex", flexDirection: "column",
     }}>
+      {isDesktop && (
+        <div onClick={toggle} title={expanded ? "Exit full screen" : "Full screen"} style={{
+          position: "absolute", top: 14, right: 14, zIndex: 1,
+          width: 34, height: 34, borderRadius: "50%", cursor: "pointer",
+          background: "#ffffff1a", display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          {expanded ? I.shrink("#fff", 16) : I.expand("#fff", 16)}
+        </div>
+      )}
       {call.phase === "incoming" && <IncomingCall call={call} onAccept={onAccept} onReject={onReject}/>}
       {call.phase === "outgoing" && <OutgoingCall call={call} onEnd={onEnd}/>}
       {call.phase === "active" && (
@@ -168,7 +183,7 @@ function IncomingCall({ call, onAccept, onReject }) {
       </div>
 
       <div style={{ display: "flex", justifyContent: "space-around", padding: "0 40px 60px" }}>
-        <CallButton onClick={() => onReject()} background="#ef4444" icon={I.phoneOff("#fff", 24)} label="Decline"/>
+        <CallButton onClick={() => onReject()} background="#ef4444" icon={I.callEnd("#fff", 24)} label="Decline"/>
         <CallButton onClick={onAccept} background="#22c55e" icon={I.phone("#fff", 24)} label="Accept"/>
       </div>
     </>
@@ -182,7 +197,7 @@ function OutgoingCall({ call, onEnd }) {
         <PeerIdentity call={call} subtitle="Calling…"/>
       </div>
       <div style={{ display: "flex", justifyContent: "center", padding: "0 40px 60px" }}>
-        <CallButton onClick={onEnd} background="#ef4444" icon={I.phoneOff("#fff", 24)} label="Cancel"/>
+        <CallButton onClick={onEnd} background="#ef4444" icon={I.callEnd("#fff", 24)} label="Cancel"/>
       </div>
     </>
   );
@@ -246,7 +261,7 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onShareScreen, 
         )}
         <CallButton onClick={() => setShowMore(true)} background="#ffffff26"
                     icon={I.moreVertical("#fff", 20)} label="More" small/>
-        <CallButton onClick={onEnd} background="#ef4444" icon={I.phoneOff("#fff", 24)} label="End"/>
+        <CallButton onClick={onEnd} background="#ef4444" icon={I.callEnd("#fff", 24)} label="End"/>
       </div>
 
       {showSpeakerPicker && (

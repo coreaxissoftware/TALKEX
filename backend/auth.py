@@ -90,6 +90,33 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def hash_otp(code: str) -> str:
+    """
+    Hash a short-lived OTP code for storage.
+
+    Deliberately NOT hash_password's PBKDF2: a 6-digit OTP's brute-force
+    risk is already covered by a 5-minute expiry, a capped attempt count and
+    a rate limiter, so 600,000 KDF iterations buy no extra security — only
+    ~100-300ms of wasted CPU per OTP issued, which on FastAPI's sync-route
+    thread pool is throughput an attacker can burn through by requesting
+    many codes. Plain SHA-256 (like hash_token) is the right cost here.
+    """
+    return "sha256$" + hashlib.sha256(code.encode()).hexdigest()
+
+
+def verify_otp(code: str, stored: str) -> bool:
+    """Check an OTP code against a hash produced by hash_otp(). Returns False
+    on anything malformed, same convention as verify_password."""
+    try:
+        algorithm, digest_hex = stored.split("$")
+    except ValueError:
+        return False
+    if algorithm != "sha256":
+        return False
+    actual = hashlib.sha256(code.encode()).hexdigest()
+    return hmac.compare_digest(actual, digest_hex)
+
+
 def new_api_key() -> tuple[str, str, str]:
     """
     Mint a bulk-sending API key.

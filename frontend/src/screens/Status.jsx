@@ -476,7 +476,7 @@ function Compose({ onClose, onDone, toast }) {
                 border: `1px solid ${G.border}`,
               }}>
                 {kind === "photo" && (
-                  <img src={upload.previewUrl} alt="" style={{ width: "100%", maxHeight: 220, objectFit: "cover", display: "block" }}/>
+                  <img src={upload.previewUrl} alt="Selected photo preview" style={{ width: "100%", maxHeight: 220, objectFit: "cover", display: "block" }}/>
                 )}
                 {kind === "video" && (
                   <video src={upload.previewUrl} controls style={{ width: "100%", maxHeight: 220, display: "block" }}/>
@@ -657,7 +657,7 @@ function StoryMedia({ story }) {
   if (!blobUrl) return <Spinner/>;
 
   if (story.kind === "photo") {
-    return <img src={blobUrl} alt="" style={{ maxWidth: "100%", maxHeight: "70vh", borderRadius: 10 }}/>;
+    return <img src={blobUrl} alt={story.text || "Status photo"} style={{ maxWidth: "100%", maxHeight: "70vh", borderRadius: 10 }}/>;
   }
   if (story.kind === "video") {
     return <video src={blobUrl} controls autoPlay style={{ maxWidth: "100%", maxHeight: "70vh", borderRadius: 10 }}/>;

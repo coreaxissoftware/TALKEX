@@ -3,6 +3,29 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+  <!--
+    No script-src injection surface beyond our own bundle: blocks inline
+    <script> and any third-party script/plugin from ever running, which is
+    the actual backstop an XSS finding like an unvalidated href scheme
+    (see join_url in ChatView.jsx) has nothing to fall back on without.
+    connect-src is scoped to the real API origin (VITE_API_URL) plus the
+    STUN lookup WebRTC calling needs — not to `*`, or this would stop being
+    a backstop against a script trying to exfiltrate data anywhere else.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'self';
+    script-src 'self';
+    worker-src 'self';
+    style-src 'self' 'unsafe-inline';
+    img-src 'self' data: blob: https://talkex-backend.onrender.com;
+    media-src 'self' blob: https://talkex-backend.onrender.com;
+    font-src 'self';
+    connect-src 'self' https://talkex-backend.onrender.com wss://talkex-backend.onrender.com http://localhost:8090 ws://localhost:8090 stun: turn:;
+    object-src 'none';
+    base-uri 'self';
+    form-action 'self';
+    frame-ancestors 'none';
+  "/>
   <title>TalkEx ⚡</title>
   <meta name="description" content="TalkEx — Chat • Meetings • Business • Automation"/>
   <link rel="icon" href="/icon.png"/>
@@ -23,18 +46,7 @@
     ::-webkit-scrollbar-thumb{background:#88888899;border-radius:10px;}
     ::-webkit-scrollbar-thumb:hover{background:#888888cc;}
   </style>
-  <script>
-    // Paint the remembered theme's background before React ever mounts, so a
-    // returning dark-mode user does not see a flash of the light background
-    // (or vice versa) while the bundle loads. Kept to one property — anything
-    // more belongs in ui.jsx once React is running.
-    (function () {
-      try {
-        var isDark = localStorage.getItem("ht_theme") === "dark";
-        document.body.style.background = isDark ? "#0b1420" : "#f5f9fc";
-      } catch (e) { /* localStorage blocked — light default stands */ }
-    })();
-  </script>
+  <script src="/theme-init.js"></script>
 </head>
 <body>
   <div id="root"></div>
