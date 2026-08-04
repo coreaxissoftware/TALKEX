@@ -3501,6 +3501,64 @@ def test_otp_requests_are_rate_limited_per_phone(client, monkeypatch):
     assert denied.status_code == 429
 
 
+# ── Setting a password directly ──────────────────────────────────────────────
+# A phone-signup account's password (register()/verify_phone_otp) is a random
+# token nobody ever saw — PUT /me/password is the only way such an account
+# can ever gain a real, known password and sign in without a phone code.
+
+def test_set_password_lets_a_phone_signup_account_log_in_with_it(client, monkeypatch):
+    sent = capture_otp(monkeypatch)
+    client.post("/auth/phone/request-otp", json={"phone": "+15551230700"})
+    signup = client.post("/auth/phone/verify-otp", json={
+        "phone": "+15551230700", "code": sent["code"], "name": "Passwordless",
+    }).json()
+    headers = {"Authorization": f"Bearer {signup['token']}"}
+    username = signup["user"]["username"]
+
+    # No password known yet — the random one from signup was never returned.
+    blind_login = client.post("/auth/login", json={"username": username, "password": "anything"})
+    assert blind_login.status_code == 401
+
+    set_response = client.put("/me/password", headers=headers, json={"new_password": "a whole new password"})
+    assert set_response.status_code == 200
+
+    now_works = client.post("/auth/login", json={"username": username, "password": "a whole new password"})
+    assert now_works.status_code == 200
+
+
+def test_setting_a_new_password_requires_no_current_password(client):
+    """The whole point — an endpoint that DID require current_password would
+    be permanently unusable for exactly the accounts that need it most."""
+    alice, alice_id, _ = make_user(client, "Alice")
+    response = client.put("/me/password", headers=alice, json={"new_password": "brand new secret"})
+    assert response.status_code == 200
+
+
+def test_set_password_rejects_a_short_password(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    response = client.put("/me/password", headers=alice, json={"new_password": "short"})
+    assert response.status_code == 422
+
+
+def test_set_password_signs_out_other_sessions_but_not_this_one(client):
+    alice, alice_id, username = make_user(client, "Alice")
+    other_login = client.post("/auth/login", json={"username": username, "password": "correct horse battery"})
+    other_headers = {"Authorization": f"Bearer {other_login.json()['token']}"}
+    assert client.get("/me", headers=other_headers).status_code == 200
+
+    client.put("/me/password", headers=alice, json={"new_password": "a different password now"})
+
+    # The session that made the change is still good...
+    assert client.get("/me", headers=alice).status_code == 200
+    # ...but the other device was signed out.
+    assert client.get("/me", headers=other_headers).status_code == 401
+
+
+def test_set_password_is_refused_when_signed_out(client):
+    response = client.put("/me/password", json={"new_password": "doesnt matter here"})
+    assert response.status_code == 401
+
+
 # ── Deactivate / reactivate / delete account ──────────────────────────────────
 
 def test_deactivating_hides_the_account_from_search_and_new_dms(client):

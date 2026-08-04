@@ -57,6 +57,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
   const [appLockOn, setAppLockOn] = useState(isAppLockEnabled);
   const [appLockSheet, setAppLockSheet] = useState(false);
   const [changingPhone, setChangingPhone] = useState(false);
+  const [settingPassword, setSettingPassword] = useState(false);
   const [connectingEmail, setConnectingEmail] = useState(false);
   const [deactivating, setDeactivating] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
@@ -731,6 +732,9 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
               }}/>
         <SRow icon={I.phone(G.accent, 18)} label="Change phone number" sub={me.phone || "Not set"}
               onClick={() => setChangingPhone(true)}/>
+        <SRow icon={I.lock(G.accent, 18)} label="Set password"
+              sub="For signing in with a username, without a phone code"
+              onClick={() => setSettingPassword(true)}/>
         <SRow icon={I.mail(G.accent, 18)} label="Email address"
               sub={me.email_verified_at ? `${me.email} · verified` : "Not connected — used to recover a forgotten PIN"}
               onClick={() => setConnectingEmail(true)}/>
@@ -788,6 +792,12 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
       {changingPhone && (
         <ChangePhoneSheet currentPhone={me.phone} onClose={() => setChangingPhone(false)}
                           onChanged={(updated) => { setChangingPhone(false); onUpdated(updated); }}
+                          toast={toast}/>
+      )}
+
+      {settingPassword && (
+        <SetPasswordSheet onClose={() => setSettingPassword(false)}
+                          onSet={() => { setSettingPassword(false); toast("Password set — other devices signed out"); }}
                           toast={toast}/>
       )}
 
@@ -973,6 +983,76 @@ function ChangePhoneSheet({ currentPhone, onClose, onChanged, toast }) {
             </Button>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Setting a password directly — no "current password" step. An account
+ * created via phone sign-in got a random one nobody, including its owner,
+ * ever saw (see main.py's verify_phone_otp), so there is nothing to prove
+ * here beyond already being signed in, same trust level the account
+ * deletion button below already relies on for something far more
+ * permanent than this. Setting it revokes every OTHER session — this
+ * device's own stays signed in.
+ */
+function SetPasswordSheet({ onClose, onSet, toast }) {
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const tooShort = password.length > 0 && password.length < 8;
+  const mismatched = confirmPassword.length > 0 && password !== confirmPassword;
+  const canSubmit = password.length >= 8 && password === confirmPassword;
+
+  async function submit() {
+    if (!canSubmit) return;
+    setBusy(true);
+    try {
+      await Me.setPassword(password);
+      onSet();
+    } catch (problem) {
+      toast(problem.message || "Could not set password");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "#000000aa", zIndex: 60,
+      display: "flex", alignItems: "flex-end", justifyContent: "center",
+    }}>
+      <div onClick={(event) => event.stopPropagation()} style={{
+        width: "100%", maxWidth: 430, background: G.surface, padding: 20,
+        borderTopLeftRadius: 22, borderTopRightRadius: 22,
+      }}>
+        <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 6 }}>Set password</div>
+        <div style={{ fontSize: 12.5, color: G.muted, marginBottom: 14 }}>
+          Lets you sign in with your username instead of a phone code. Other
+          signed-in devices will be signed out once this is set.
+        </div>
+        <Field label="New password" type="password" value={password} autoComplete="new-password"
+               onChange={(event) => setPassword(event.target.value)}
+               placeholder="At least 8 characters"/>
+        {tooShort && (
+          <div style={{ fontSize: 11.5, color: G.red, marginTop: -8, marginBottom: 12 }}>
+            At least 8 characters.
+          </div>
+        )}
+        <Field label="Confirm new password" type="password" value={confirmPassword} autoComplete="new-password"
+               onChange={(event) => setConfirmPassword(event.target.value)}
+               onKeyDown={(event) => event.key === "Enter" && canSubmit && submit()}
+               placeholder="Type it again"/>
+        {mismatched && (
+          <div style={{ fontSize: 11.5, color: G.red, marginTop: -8, marginBottom: 12 }}>
+            Passwords don't match.
+          </div>
+        )}
+        <Button onClick={submit} disabled={busy || !canSubmit} style={{ width: "100%" }}>
+          {busy ? "Setting…" : "Set password"}
+        </Button>
       </div>
     </div>
   );

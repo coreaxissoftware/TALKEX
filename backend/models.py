@@ -29,6 +29,20 @@ class LoginRequest(BaseModel):
     device_label: str = Field(default="Unknown device", max_length=80)
 
 
+class SetPasswordRequest(BaseModel):
+    """
+    No current_password field, unlike a typical "change password" form —
+    and deliberately so. A phone-signup account's password is a random
+    token nobody, including its owner, ever saw (see verify_phone_otp in
+    main.py, which mints one with secrets.token_urlsafe), so there is no
+    "current password" a legitimate owner could ever prove they know. The
+    signed-in session itself is the proof of identity here, same trust
+    level main.py's DELETE /me (account deletion) already relies on for an
+    even more destructive action.
+    """
+    new_password: str = Field(min_length=8, max_length=128)
+
+
 class VerifyTwoStepRequest(BaseModel):
     """The second step of login when the account has a PIN set."""
     pending_token: str = Field(min_length=1, max_length=128)

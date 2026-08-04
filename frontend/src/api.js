@@ -203,6 +203,12 @@ export const Me = {
   reactivate: () => post("/me/reactivate"),
   deleteAccount: () => remove("/me"),
 
+  // No currentPassword param — a phone-signup account's password was a
+  // random value nobody, including its owner, ever saw, so there's never
+  // one to prove. The signed-in session is the only proof of identity this
+  // needs, same as account deletion above. Revokes every other session.
+  setPassword: (newPassword) => put("/me/password", { new_password: newPassword }),
+
   sessions: () => get("/me/sessions"),
   revokeSession: (sessionId) => remove(`/me/sessions/${sessionId}`),
 

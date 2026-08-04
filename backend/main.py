@@ -68,7 +68,7 @@ from models import (
     PushSubscribeRequest, PushUnsubscribeRequest, ReactRequest, ReadRequest,
     RegisterRequest, RemoveTwoStepRequest, RequestEmailOtpRequest, RequestOtpRequest,
     ReportRequest, RescheduleRequest, RsvpRequest,
-    ScheduleRequest, SendMessageRequest, SetPinRequest, SetRoleRequest,
+    ScheduleRequest, SendMessageRequest, SetPasswordRequest, SetPinRequest, SetRoleRequest,
     SetTwoStepRequest, StartLinkRequest, StoryAudienceRequest, StoryRequest,
     TestEmailRequest, TestSmsRequest,
     UpdateContactRequest, UpdateIntegrationSettingsRequest, UpdateMeetingRequest,
@@ -1446,6 +1446,27 @@ def update_me(request: UpdateProfileRequest, user: dict = Depends(current_user))
         db.execute(f"UPDATE users SET {assignments} WHERE id = ?",
                    (*fields.values(), user["id"]))
     return public_user(db.query_one("SELECT * FROM users WHERE id = ?", (user["id"],)))
+
+
+@app.put("/me/password")
+def set_password(request: SetPasswordRequest,
+                  credentials: HTTPAuthorizationCredentials = Depends(security),
+                  user: dict = Depends(current_user)):
+    """
+    Set (or replace) this account's password — a self-service path that
+    was missing entirely; the only way a password ever got set was at
+    /auth/register, or a random, never-shown one minted for a phone-signup
+    account (see SetPasswordRequest's docstring for why there's no
+    current_password field here). Every OTHER session is revoked, the same
+    rule /me/deactivate already applies — changing your password should
+    mean a stolen or shared session stops working silently, not keep
+    riding along on the old credentials.
+    """
+    db.execute("UPDATE users SET password_hash = ? WHERE id = ?",
+               (auth.hash_password(request.new_password), user["id"]))
+    db.execute("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?",
+               (user["id"], auth.hash_token(credentials.credentials)))
+    return {"ok": True}
 
 
 @app.get("/me/story-audience")
