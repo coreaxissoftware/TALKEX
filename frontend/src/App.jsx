@@ -381,7 +381,7 @@ export default function App() {
   // is replaced if a different account signs in later.
   const realtime = useRealtime(onEvent, me?.id, onReconnect);
   const call = useCall(events, realtime.send, toast);
-  const groupCall = useGroupCall(events, realtime.send, toast);
+  const groupCall = useGroupCall(events, realtime.send, toast, reconnectedAt);
 
   // The composer fires this instead of importing the connection directly, so
   // typing signals do not force the socket through the component tree.

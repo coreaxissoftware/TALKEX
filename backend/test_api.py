@@ -1259,7 +1259,12 @@ def test_a_never_joined_scheduled_meeting_expires_after_its_window(client):
     assert client.get(f"/meetings/{meeting['id']}", headers=alice).json()["status"] == "ended"
 
 
-def test_a_meeting_ends_when_the_last_participant_disconnects(client):
+def test_a_meeting_ends_when_the_last_participant_disconnects(client, monkeypatch):
+    # Shrunk to near-zero — see the un-patched constant's docstring
+    # (GROUP_CALL_RECONNECT_GRACE_SECONDS in main.py) for why a disconnect
+    # no longer ends things instantly.
+    monkeypatch.setattr(main, "GROUP_CALL_RECONNECT_GRACE_SECONDS", 0.05)
+
     alice, alice_id, alice_name = make_user(client, "Alice")
     bob, bob_id, bob_name = make_user(client, "Bob")
     chat_id = make_group(client, alice, [bob_id])
@@ -1276,8 +1281,13 @@ def test_a_meeting_ends_when_the_last_participant_disconnects(client):
         alice_socket.receive_json()  # group_call_roster
 
     # Alice's socket just closed without an explicit group_call_leave — the
-    # room empties out via disconnect cleanup, which must also close out
-    # the meeting record, not just the in-memory call state.
+    # room empties out via disconnect cleanup once the (here, near-instant)
+    # grace window passes, which must also close out the meeting record,
+    # not just the in-memory call state. The finalize runs as a background
+    # task on the app's own event loop, so give it a moment to actually run
+    # before checking — nothing here blocks on a socket read the way the
+    # equivalent group-call test does to get that for free.
+    time.sleep(0.3)
     current = client.get(f"/meetings/{meeting['id']}", headers=bob).json()
     assert current["status"] == "ended"
 
@@ -3028,7 +3038,12 @@ def test_leaving_a_group_call_notifies_remaining_participants(client):
             assert left["type"] == "group_call_participant_left" and left["user_id"] == bob_id
 
 
-def test_disconnecting_mid_call_removes_the_participant(client):
+def test_disconnecting_mid_call_removes_the_participant_after_the_grace_window(client, monkeypatch):
+    # Shrunk to near-zero so the test doesn't have to actually wait out the
+    # real reconnect grace window (see the un-patched version of this
+    # constant in main.py, and the resume test right below this one).
+    monkeypatch.setattr(main, "GROUP_CALL_RECONNECT_GRACE_SECONDS", 0.05)
+
     alice, alice_id, alice_name = make_user(client, "Alice")
     bob, bob_id, bob_name = make_user(client, "Bob")
     chat_id = make_group(client, alice, [bob_id])
@@ -3044,13 +3059,65 @@ def test_disconnecting_mid_call_removes_the_participant(client):
             alice_socket.receive_json()  # group_call_participant_joined
 
         # Bob's socket just closed (the `with` block exited) without an
-        # explicit group_call_leave — the server's disconnect cleanup has to
-        # catch this exactly like a clean leave would.
+        # explicit group_call_leave. The ordinary online/offline presence
+        # update fires immediately (unrelated to the call-specific grace
+        # window — see the finally block in websocket_endpoint); drain that
+        # first before the call's own disconnect cleanup catches up, once
+        # the (here, near-instant) grace window has passed.
+        assert alice_socket.receive_json()["type"] == "presence"
         left = alice_socket.receive_json()
         assert left["type"] == "group_call_participant_left" and left["user_id"] == bob_id
 
 
-def test_group_calling_is_restricted_to_group_chats(client):
+def test_a_quick_reconnect_mid_call_resumes_silently_within_the_grace_window(client):
+    """The actual bug this whole mechanism exists for: a dropped socket
+    (WiFi hiccup, phone briefly locking) used to eject a participant from
+    the call instantly and tell everyone else they'd left — indistinguishable
+    from actually hanging up. A reconnect that re-sends group_call_start
+    before the grace window elapses must resume with no
+    group_call_participant_left ever observed by the other participant."""
+    alice, alice_id, alice_name = make_user(client, "Alice")
+    bob, bob_id, bob_name = make_user(client, "Bob")
+    chat_id = make_group(client, alice, [bob_id])
+
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
+        alice_socket.send_json({"type": "group_call_start", "chat_id": chat_id, "call_kind": "voice"})
+        alice_socket.receive_json()  # group_call_roster
+
+        with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket:
+            assert alice_socket.receive_json()["type"] == "presence"
+            bob_socket.send_json({"type": "group_call_start", "chat_id": chat_id, "call_kind": "voice"})
+            bob_socket.receive_json()  # group_call_roster
+            alice_socket.receive_json()  # group_call_participant_joined
+
+        # Bob's socket dropped — the ordinary online/offline presence
+        # update fires immediately (see the finally block in
+        # websocket_endpoint; unrelated to the call-specific grace window),
+        # but nothing CALL-related is observable yet, well within the
+        # (real, un-patched) grace window.
+        assert alice_socket.receive_json()["type"] == "presence"  # bob went offline
+        with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket_2:
+            assert alice_socket.receive_json()["type"] == "presence"  # bob's back online
+            bob_socket_2.send_json({"type": "group_call_start", "chat_id": chat_id, "call_kind": "voice"})
+            resumed_roster = bob_socket_2.receive_json()
+            assert resumed_roster["type"] == "group_call_roster"
+            # Alice, not Bob's own stale entry from before the drop.
+            assert [p["user_id"] for p in resumed_roster["participants"]] == [alice_id]
+
+            # Alice was never told Bob left, and the reconnect itself isn't
+            # re-announced as a fresh join either — nothing group-call
+            # related should be waiting on her socket at all.
+            alice_socket.send_json({"type": "ping"})
+            next_event = alice_socket.receive_json()
+            assert next_event["type"] == "pong"
+
+
+def test_group_calling_is_refused_on_a_dm(client):
+    """DMs use the separate 1:1 call_invite/call_answer/call_ice relay
+    instead — this used to silently drop group_call_start on a DM with no
+    reply at all, leaving the client's optimistic "active" call state stuck
+    forever with nothing telling it to give up. A real call_error now comes
+    back instead."""
     alice, alice_id, alice_name = make_user(client, "Alice")
     bob, bob_id, _ = make_user(client, "Bob")
     dm_chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
@@ -3059,10 +3126,27 @@ def test_group_calling_is_restricted_to_group_chats(client):
         alice_socket.send_json({
             "type": "group_call_start", "chat_id": dm_chat_id, "call_kind": "voice",
         })
-        alice_socket.send_json({"type": "ping"})
-        # Nothing came back for the group_call_start on a DM — the very next
-        # thing on the socket is the ping's own pong.
-        assert alice_socket.receive_json()["type"] == "pong"
+        error = alice_socket.receive_json()
+        assert error["type"] == "call_error"
+        assert error["chat_id"] == dm_chat_id
+
+
+def test_group_calling_works_in_a_channel_not_just_a_plain_group(client):
+    """Only DMs are excluded — a meeting or ad-hoc call started in a
+    channel/community must actually work, not just in a 'group'-type chat.
+    create_meeting has no chat-type restriction of its own, so this used to
+    be a real dead end: schedule a meeting in a channel, tap Join, and
+    nothing ever came back."""
+    alice, alice_id, alice_name = make_user(client, "Alice")
+    channel = client.post("/chats/channel", headers=alice, json={"name": "Announcements"}).json()
+
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
+        alice_socket.send_json({
+            "type": "group_call_start", "chat_id": channel["id"], "call_kind": "voice",
+        })
+        roster = alice_socket.receive_json()
+        assert roster["type"] == "group_call_roster"
+        assert roster["participants"] == []
 
 
 def test_outsider_cannot_start_a_group_call(client):

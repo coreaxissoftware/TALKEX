@@ -32,7 +32,7 @@ const MAX_CAPTION_LINES = 3;
  * instead of also trying to connect outward — one initiator per pair, never
  * both sides at once.
  */
-export function useGroupCall(events, send, toast) {
+export function useGroupCall(events, send, toast, reconnectedAt) {
   const [call, setCall] = useState(null);
   // call = null | {
   //   phase: "incoming" | "active",
@@ -65,6 +65,23 @@ export function useGroupCall(events, send, toast) {
   }, []);
 
   useEffect(() => teardown, [teardown]);
+
+  // The socket dropping and reconnecting (a WiFi hiccup, a phone briefly
+  // locking) used to silently end a group call for this device — the
+  // server's grace window (see _leave_all_group_calls in main.py) now
+  // holds this participant's slot open for a few seconds, but only IF the
+  // client actually re-sends group_call_start once the socket is back;
+  // nothing did that before this effect existed. The existing
+  // RTCPeerConnections are untouched here — they don't depend on the
+  // signaling socket staying open once established, only on it being
+  // available again for whatever renegotiation the resume needs.
+  useEffect(() => {
+    if (!reconnectedAt) return;
+    const current = callRef.current;
+    if (current?.phase !== "active") return;
+    sendRef.current({ type: "group_call_start", chat_id: current.chatId, call_kind: current.callKind });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reconnectedAt]);
 
   const buildPeerConnection = useCallback((chatId, peerId) => {
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
@@ -450,6 +467,12 @@ export function useGroupCall(events, send, toast) {
         } else if (event.type === "group_call_roster") {
           setCall((c) => (c ? { ...c, hostId: event.host_id } : c));
           for (const participant of event.participants) {
+            // Already connected — this roster is a resume-after-reconnect
+            // (see the reconnectedAt effect above), not a fresh join, and
+            // the existing peer connection to this person is untouched.
+            // Without this check every already-live connection in the
+            // mesh would get a redundant, duplicate one on top of it.
+            if (peersRef.current[participant.user_id]) continue;
             await connectOutward(event.chat_id, participant);
           }
         } else if (event.type === "group_call_host_changed") {

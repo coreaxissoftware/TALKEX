@@ -1888,9 +1888,11 @@ def calling_permitted(chat_id: str, user_id: str) -> bool:
     (chat_members.calls_enabled) that defaults on, so muting calls in one
     noisy group doesn't require going dark everywhere.
 
-    Meetings never call this — they don't route through call_invite or
-    group_call_start at all (join_url is a plain link), so there is nothing
-    to bypass here on their behalf.
+    A meeting's actual call (not the calendar record) DOES route through
+    here — "Join now" on a meeting sends group_call_start the same as the
+    header's own call button, and that handler checks this before letting
+    anyone into the room. Someone who's switched calling off entirely still
+    can't be pulled into a meeting's call because of it.
     """
     user = db.query_one("SELECT calling_enabled FROM users WHERE id = ?", (user_id,))
     if user is None or not user["calling_enabled"]:
@@ -4870,6 +4872,12 @@ _breakout_hosts: dict[str, str] = {}
 # they're just names waiting on a decision.
 _group_call_waiting: dict[str, dict[str, dict]] = {}
 
+# (chat_id, user_id) -> the pending-removal task from a dropped socket, see
+# _leave_all_group_calls. Kept so a fast reconnect (group_call_start arriving
+# again before the grace window elapses) can cancel it.
+_group_call_leave_tasks: dict[tuple[str, str], asyncio.Task] = {}
+GROUP_CALL_RECONNECT_GRACE_SECONDS = 20
+
 
 def _participant_info(user_id: str) -> dict:
     row = db.query_one("SELECT name, avatar_letter, color FROM users WHERE id = ?", (user_id,))
@@ -4958,23 +4966,57 @@ async def _end_live_meeting_for_chat(chat_id: str):
         })
 
 
+async def _finalize_group_call_departure(chat_id: str, user_id: str):
+    """The delayed half of _leave_all_group_calls below — actually removes
+    the participant once the reconnect grace window has passed without
+    group_call_start cancelling this task first."""
+    try:
+        await asyncio.sleep(GROUP_CALL_RECONNECT_GRACE_SECONDS)
+    except asyncio.CancelledError:
+        return
+    finally:
+        _group_call_leave_tasks.pop((chat_id, user_id), None)
+
+    participants = _group_calls.get(chat_id)
+    if not participants or user_id not in participants:
+        return
+    del participants[user_id]
+    if participants:
+        await hub.send_to_chat(chat_id, {
+            "type": "group_call_participant_left", "chat_id": chat_id, "user_id": user_id,
+        })
+        await _reassign_host_if_needed(chat_id, user_id, participants)
+    else:
+        del _group_calls[chat_id]
+        _group_call_hosts.pop(chat_id, None)
+        _group_call_waiting.pop(chat_id, None)
+        await _end_live_meeting_for_chat(chat_id)
+
+
 async def _leave_all_group_calls(user_id: str):
-    """Called when a socket disconnects — a dropped connection must not
-    leave a phantom participant other clients keep trying to reach."""
+    """
+    Called when a socket disconnects.
+
+    Does NOT remove the participant immediately. A dropped WebSocket — a
+    WiFi hiccup, a phone briefly locking, a tab backgrounding on some
+    mobile browsers — is common mid-call, and the client's automatic
+    reconnect (Realtime.scheduleReconnect in api.js) usually lands within a
+    couple of seconds. Ejecting on the very first disconnect made an
+    ordinary network blip indistinguishable from actually hanging up — to
+    every OTHER participant too, since their client closes its peer
+    connection to this person the moment group_call_participant_left
+    arrives. A grace window lets group_call_start (sent again once the
+    reconnected socket is ready) cancel the pending removal and resume
+    silently instead of forcing a full rejoin.
+    """
     for chat_id, participants in list(_group_calls.items()):
         if user_id not in participants:
             continue
-        del participants[user_id]
-        if participants:
-            await hub.send_to_chat(chat_id, {
-                "type": "group_call_participant_left", "chat_id": chat_id, "user_id": user_id,
-            })
-            await _reassign_host_if_needed(chat_id, user_id, participants)
-        else:
-            del _group_calls[chat_id]
-            _group_call_hosts.pop(chat_id, None)
-            _group_call_waiting.pop(chat_id, None)
-            await _end_live_meeting_for_chat(chat_id)
+        key = (chat_id, user_id)
+        if key in _group_call_leave_tasks:
+            continue  # a departure is already scheduled for this chat
+        _group_call_leave_tasks[key] = asyncio.create_task(
+            _finalize_group_call_departure(chat_id, user_id))
 
 
 @app.websocket("/ws")
@@ -5118,7 +5160,24 @@ async def websocket_endpoint(socket: WebSocket, ticket: str = Query(default=""))
                 if call_kind not in ("voice", "video") or not chatstore.is_member(chat_id, user_id):
                     continue
                 chat = db.query_one("SELECT type FROM chats WHERE id = ?", (chat_id,))
-                if chat is None or chat["type"] != "group":
+                # DMs use the separate 1:1 call_invite/call_answer/call_ice
+                # relay instead (the frontend already branches on chat.type
+                # === "dm" before ever sending this) — every OTHER chat type
+                # (group, channel, community, community_channel) is fair
+                # game for a group call/meeting, not just plain 'group'.
+                # This used to reject anything but 'group' with a silent
+                # `continue` and no reply at all: a meeting scheduled in a
+                # channel or community could be created (create_meeting has
+                # no chat-type restriction of its own) but its "Join now"
+                # button would send this and get back nothing — no error,
+                # no roster — leaving the client stuck in the optimistic
+                # "active, zero participants" state join() sets before
+                # ever hearing back from the server.
+                if chat is None or chat["type"] == "dm":
+                    await socket.send_json({
+                        "type": "call_error", "chat_id": chat_id,
+                        "reason": "This chat can't host a group call",
+                    })
                     continue
                 if not calling_permitted(chat_id, user_id):
                     await socket.send_json({
@@ -5128,6 +5187,20 @@ async def websocket_endpoint(socket: WebSocket, ticket: str = Query(default=""))
                     continue
 
                 room = _group_calls.setdefault(chat_id, {})
+
+                # A reconnect within the grace window (see
+                # _leave_all_group_calls) — this user's entry is still in
+                # `room` because the delayed removal hasn't fired yet.
+                # Cancel it and treat this as resuming, not a fresh join:
+                # nobody else was ever told they left, so nothing should be
+                # re-announced to the room, and an already-admitted
+                # participant shouldn't be bounced back into the waiting
+                # room or re-prompted for the password.
+                pending_leave = _group_call_leave_tasks.pop((chat_id, user_id), None)
+                if pending_leave:
+                    pending_leave.cancel()
+                rejoining = user_id in room
+
                 is_first = len(room) == 0
                 host_id = _group_call_hosts.get(chat_id)
 
@@ -5141,14 +5214,15 @@ async def websocket_endpoint(socket: WebSocket, ticket: str = Query(default=""))
                     "WHERE chat_id = ? AND status = 'live' ORDER BY created_at DESC LIMIT 1",
                     (chat_id,),
                 )
-                if live_meeting and live_meeting["password_hash"] and user_id != host_id:
+                if live_meeting and live_meeting["password_hash"] and user_id != host_id and not rejoining:
                     supplied = str(payload.get("password", ""))
                     if not auth.verify_password(supplied, live_meeting["password_hash"]):
                         await socket.send_json({
                             "type": "call_error", "chat_id": chat_id, "reason": "Incorrect meeting password",
                         })
                         continue
-                if live_meeting and live_meeting["waiting_room"] and not is_first and user_id != host_id:
+                if (live_meeting and live_meeting["waiting_room"] and not is_first
+                        and user_id != host_id and not rejoining):
                     _group_call_waiting.setdefault(chat_id, {})[user_id] = _participant_info(user_id)
                     if host_id:
                         await hub.send_to_user(host_id, {
@@ -5157,7 +5231,11 @@ async def websocket_endpoint(socket: WebSocket, ticket: str = Query(default=""))
                     await socket.send_json({"type": "group_call_waiting", "chat_id": chat_id})
                     continue
 
-                roster = list(room.values())  # who the joiner needs to connect to
+                # Who the joiner needs to (re)connect to — excludes their
+                # own stale entry on a rejoin, since a reconnected socket's
+                # client rebuilds every peer connection from scratch and
+                # doesn't need to hear about itself.
+                roster = [info for uid, info in room.items() if uid != user_id]
                 room[user_id] = _participant_info(user_id)
                 if is_first:
                     _group_call_hosts[chat_id] = user_id
@@ -5166,7 +5244,9 @@ async def websocket_endpoint(socket: WebSocket, ticket: str = Query(default=""))
                     "type": "group_call_roster", "chat_id": chat_id, "participants": roster,
                     "host_id": _group_call_hosts.get(chat_id),
                 })
-                if is_first:
+                if rejoining:
+                    pass  # resumed silently — the room was never told this person left
+                elif is_first:
                     # Ring only members who currently allow calls here —
                     # everyone else simply never hears about this room, the
                     # same as if they weren't a member at all.
@@ -5196,6 +5276,9 @@ async def websocket_endpoint(socket: WebSocket, ticket: str = Query(default=""))
                 chat_id = payload.get("chat_id", "")
                 room = _group_calls.get(chat_id)
                 if room and user_id in room:
+                    pending_leave = _group_call_leave_tasks.pop((chat_id, user_id), None)
+                    if pending_leave:
+                        pending_leave.cancel()
                     del room[user_id]
                     if room:
                         await hub.send_to_chat(chat_id, {
