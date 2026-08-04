@@ -29,6 +29,13 @@ class LoginRequest(BaseModel):
     device_label: str = Field(default="Unknown device", max_length=80)
 
 
+class SetUsernameRequest(BaseModel):
+    # Same shape register() already enforces (models.py's RegisterRequest) —
+    # a changed username has to satisfy the identical rules a brand new
+    # account's does, not a looser one.
+    username: str = Field(min_length=3, max_length=32, pattern=r"^[a-zA-Z0-9_]+$")
+
+
 class SetPasswordRequest(BaseModel):
     """
     No current_password field, unlike a typical "change password" form —

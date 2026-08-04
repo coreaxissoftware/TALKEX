@@ -930,6 +930,123 @@ def test_expired_photo_status_removes_the_file(client):
                         (attachment["attachment_id"],)) is None
 
 
+# ── Story reactions ───────────────────────────────────────────────────────────
+
+def test_reacting_to_a_story_and_seeing_it_as_the_author(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    client.post(f"/chats/dm/{bob_id}", headers=alice)
+    story = client.post("/stories", headers=alice, json={"text": "hi"}).json()
+
+    reacted = client.post(f"/stories/{story['id']}/react", headers=bob, json={"emoji": "😍"})
+    assert reacted.status_code == 200
+    assert reacted.json()["emoji"] == "😍"
+
+    seen_by_author = client.get(f"/stories/{story['id']}/reactions", headers=alice).json()
+    assert len(seen_by_author) == 1
+    assert seen_by_author[0]["user_id"] == bob_id
+    assert seen_by_author[0]["emoji"] == "😍"
+
+    mine = client.get("/stories/mine", headers=alice).json()
+    assert mine[0]["reaction_count"] == 1
+
+
+def test_reacting_again_replaces_the_previous_reaction(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    client.post(f"/chats/dm/{bob_id}", headers=alice)
+    story = client.post("/stories", headers=alice, json={"text": "hi"}).json()
+
+    client.post(f"/stories/{story['id']}/react", headers=bob, json={"emoji": "😍"})
+    client.post(f"/stories/{story['id']}/react", headers=bob, json={"emoji": "🔥"})
+
+    reactions = client.get(f"/stories/{story['id']}/reactions", headers=alice).json()
+    assert len(reactions) == 1
+    assert reactions[0]["emoji"] == "🔥"
+
+
+def test_removing_a_story_reaction(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    client.post(f"/chats/dm/{bob_id}", headers=alice)
+    story = client.post("/stories", headers=alice, json={"text": "hi"}).json()
+
+    client.post(f"/stories/{story['id']}/react", headers=bob, json={"emoji": "😍"})
+    removed = client.delete(f"/stories/{story['id']}/react", headers=bob)
+    assert removed.status_code == 200
+    assert client.get(f"/stories/{story['id']}/reactions", headers=alice).json() == []
+
+
+def test_cannot_react_to_your_own_story(client):
+    alice, _, _ = make_user(client, "Alice")
+    story = client.post("/stories", headers=alice, json={"text": "hi"}).json()
+    denied = client.post(f"/stories/{story['id']}/react", headers=alice, json={"emoji": "😍"})
+    assert denied.status_code == 400
+
+
+def test_reacting_to_a_story_notifies_the_author_live(client):
+    alice, alice_id, alice_name = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    client.post(f"/chats/dm/{bob_id}", headers=alice)
+    story = client.post("/stories", headers=alice, json={"text": "hi"}).json()
+
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
+        client.post(f"/stories/{story['id']}/react", headers=bob, json={"emoji": "🔥"})
+        event = alice_socket.receive_json()
+        assert event["type"] == "story_reaction"
+        assert event["story_id"] == story["id"]
+        assert event["user_id"] == bob_id
+        assert event["emoji"] == "🔥"
+
+
+def test_reactions_respect_the_same_audience_rule_as_viewing(client):
+    """A viewer excluded from the author's audience must not be able to
+    react even if they know the story_id, same rule view_story enforces."""
+    alice, _, _ = make_user(client, "Alice")
+    mallory, mallory_id, _ = make_user(client, "Mallory")
+    # No shared chat between Alice and Mallory at all.
+    story = client.post("/stories", headers=alice, json={"text": "hi"}).json()
+
+    denied = client.post(f"/stories/{story['id']}/react", headers=mallory, json={"emoji": "😍"})
+    assert denied.status_code == 404
+
+
+def test_only_the_author_can_list_who_reacted(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    client.post(f"/chats/dm/{bob_id}", headers=alice)
+    story = client.post("/stories", headers=alice, json={"text": "hi"}).json()
+    client.post(f"/stories/{story['id']}/react", headers=bob, json={"emoji": "😍"})
+
+    denied = client.get(f"/stories/{story['id']}/reactions", headers=bob)
+    assert denied.status_code == 404
+
+
+def test_author_can_list_who_viewed_their_story(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    client.post(f"/chats/dm/{bob_id}", headers=alice)
+    story = client.post("/stories", headers=alice, json={"text": "hi"}).json()
+
+    client.post(f"/stories/{story['id']}/view", headers=bob)
+
+    viewers = client.get(f"/stories/{story['id']}/viewers", headers=alice).json()
+    assert len(viewers) == 1
+    assert viewers[0]["user_id"] == bob_id
+    assert viewers[0]["name"] == "Bob"
+
+
+def test_only_the_author_can_list_who_viewed(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    client.post(f"/chats/dm/{bob_id}", headers=alice)
+    story = client.post("/stories", headers=alice, json={"text": "hi"}).json()
+    client.post(f"/stories/{story['id']}/view", headers=bob)
+
+    denied = client.get(f"/stories/{story['id']}/viewers", headers=bob)
+    assert denied.status_code == 404
+
+
 # ── Disappearing messages ─────────────────────────────────────────────────────
 
 def test_disappearing_message_is_blanked_when_its_timer_runs_out(client):
@@ -2533,6 +2650,92 @@ def test_outsider_cannot_see_a_meeting(client):
     assert client.get(f"/meetings/{meeting['id']}", headers=mallory).status_code == 404
 
 
+# ── Focus-based presence ─────────────────────────────────────────────────────
+# A socket staying open (e.g. a backgrounded/minimized tab) used to be
+# indistinguishable from actually having the app open — is_online() now
+# tracks the client's own reported foreground state instead (see Hub.is_online
+# and the "focus" case in the websocket handler).
+
+def test_backgrounding_the_tab_reports_offline_to_a_dm_peer(client):
+    alice, alice_id, alice_name = make_user(client, "Alice")
+    bob, bob_id, bob_name = make_user(client, "Bob")
+    client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket:
+        with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
+            # Alice connecting (focused by default) announces her as online.
+            online_event = bob_socket.receive_json()
+            assert online_event["type"] == "presence"
+            assert online_event["online"] is True
+
+            alice_socket.send_json({"type": "focus", "focused": False})
+            offline_event = bob_socket.receive_json()
+            assert offline_event["type"] == "presence"
+            assert offline_event["online"] is False
+
+            # And a direct check reflects it too, socket still open or not.
+            assert client.get(f"/users/{alice_id}", headers=bob).json()["online"] is False
+
+
+def test_refocusing_the_tab_reports_online_again(client):
+    alice, alice_id, alice_name = make_user(client, "Alice")
+    bob, bob_id, bob_name = make_user(client, "Bob")
+    client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]  # presence only reaches shared chats
+
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket:
+        with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
+            bob_socket.receive_json()  # initial online presence
+
+            alice_socket.send_json({"type": "focus", "focused": False})
+            bob_socket.receive_json()  # offline presence
+
+            alice_socket.send_json({"type": "focus", "focused": True})
+            back_online = bob_socket.receive_json()
+            assert back_online["type"] == "presence"
+            assert back_online["online"] is True
+
+
+def test_a_backgrounded_tab_still_receives_live_messages(client):
+    """Going unfocused must not stop delivery — only the presence dot."""
+    alice, alice_id, alice_name = make_user(client, "Alice")
+    bob, bob_id, bob_name = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket:
+        with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
+            bob_socket.receive_json()  # presence
+
+            bob_socket.send_json({"type": "focus", "focused": False})
+            alice_socket.receive_json()  # presence: bob went offline
+
+            client.post("/messages", headers=alice, json={"chat_id": chat_id, "text": "still there?"})
+            delivered = bob_socket.receive_json()
+            assert delivered["type"] == "message"
+            assert delivered["message"]["text"] == "still there?"
+
+
+def test_a_second_device_staying_focused_keeps_the_account_online(client):
+    """Multi-device: backgrounding ONE tab must not announce offline while
+    another device still has the app open in the foreground."""
+    alice, alice_id, alice_name = make_user(client, "Alice")
+    bob, bob_id, bob_name = make_user(client, "Bob")
+    client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket:
+        with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_phone:
+            bob_socket.receive_json()  # presence: alice's phone online
+            with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_laptop:
+                # A second already-online device does not re-announce.
+                alice_phone.send_json({"type": "focus", "focused": True})
+
+                alice_phone.send_json({"type": "focus", "focused": False})
+                # The laptop is still focused, so Alice must still read as
+                # online — assert via a direct check rather than expecting
+                # (or not expecting) a specific socket event, since "no
+                # event was sent" is not directly observable here.
+                assert client.get(f"/users/{alice_id}", headers=bob).json()["online"] is True
+
+
 # ── Call signaling ───────────────────────────────────────────────────────────
 
 def test_a_call_invite_reaches_the_dm_peer(client):
@@ -2950,6 +3153,82 @@ def test_a_message_sent_after_clearing_still_shows_up(client):
 
     remaining = client.get(f"/chats/{chat_id}/messages", headers=alice).json()
     assert [m["text"] for m in remaining] == ["new"]
+
+
+# ── Vanish mode ───────────────────────────────────────────────────────────────
+
+def test_vanish_mode_hides_already_read_messages_after_leaving_the_chat(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+    msg = client.post("/messages", headers=alice, json={"chat_id": chat_id, "text": "seen this"}).json()
+
+    assert client.put(f"/chats/{chat_id}/vanish-mode?enabled=true", headers=bob).status_code == 200
+    client.post(f"/chats/{chat_id}/read", headers=bob, json={"seq": msg["seq"]})
+
+    left = client.post(f"/chats/{chat_id}/leave-view", headers=bob)
+    assert left.status_code == 200
+    assert left.json()["vanished"] == 1
+
+    assert client.get(f"/chats/{chat_id}/messages", headers=bob).json() == []
+    # Alice's own copy is completely untouched — this is Bob's view only.
+    assert len(client.get(f"/chats/{chat_id}/messages", headers=alice).json()) == 1
+
+
+def test_vanish_mode_never_hides_a_message_that_has_not_been_read_yet(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    client.put(f"/chats/{chat_id}/vanish-mode?enabled=true", headers=bob)
+    # Bob never marks this chat as read — arrives after vanish mode is on
+    # but before Bob has ever opened the chat to see it.
+    client.post("/messages", headers=alice, json={"chat_id": chat_id, "text": "unread"})
+
+    client.post(f"/chats/{chat_id}/leave-view", headers=bob)
+    remaining = client.get(f"/chats/{chat_id}/messages", headers=bob).json()
+    assert [m["text"] for m in remaining] == ["unread"]
+
+
+def test_leaving_a_chat_without_vanish_mode_does_nothing(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+    msg = client.post("/messages", headers=alice, json={"chat_id": chat_id, "text": "stays"}).json()
+    client.post(f"/chats/{chat_id}/read", headers=bob, json={"seq": msg["seq"]})
+
+    left = client.post(f"/chats/{chat_id}/leave-view", headers=bob)
+    assert left.json()["vanished"] == 0
+    assert len(client.get(f"/chats/{chat_id}/messages", headers=bob).json()) == 1
+
+
+def test_vanish_mode_is_a_purely_personal_setting(client):
+    """Turning it on for yourself must never appear on the other member's
+    view of the same chat, nor affect what happens on their screen."""
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+    msg = client.post("/messages", headers=alice, json={"chat_id": chat_id, "text": "hi"}).json()
+
+    client.put(f"/chats/{chat_id}/vanish-mode?enabled=true", headers=bob)
+    client.post(f"/chats/{chat_id}/read", headers=alice, json={"seq": msg["seq"]})
+    client.post(f"/chats/{chat_id}/leave-view", headers=alice)
+
+    # Alice never turned vanish mode on for herself — her own message must
+    # still be sitting in her own view.
+    assert len(client.get(f"/chats/{chat_id}/messages", headers=alice).json()) == 1
+
+
+def test_an_outsider_cannot_set_vanish_mode_for_a_chat_they_are_not_in(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    mallory, _, _ = make_user(client, "Mallory")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    denied = client.put(f"/chats/{chat_id}/vanish-mode?enabled=true", headers=mallory)
+    assert denied.status_code == 404
+    denied_leave = client.post(f"/chats/{chat_id}/leave-view", headers=mallory)
+    assert denied_leave.status_code == 404
 
 
 # ── Starred messages ──────────────────────────────────────────────────────────
@@ -3559,6 +3838,64 @@ def test_set_password_is_refused_when_signed_out(client):
     assert response.status_code == 401
 
 
+# ── Editing your own username ────────────────────────────────────────────────
+
+def test_changing_your_username(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    new_name = f"alice{uuid.uuid4().hex[:8]}"
+
+    available = client.get(f"/me/username-available?username={new_name}", headers=alice)
+    assert available.json()["available"] is True
+
+    changed = client.put("/me/username", headers=alice, json={"username": new_name})
+    assert changed.status_code == 200
+    assert changed.json()["username"] == new_name
+
+    # And it's live — a fresh login by the new username works.
+    login = client.post("/auth/login", json={"username": new_name, "password": "correct horse battery"})
+    assert login.status_code == 200
+
+
+def test_username_availability_check_reports_your_own_as_available(client):
+    alice, _, username = make_user(client, "Alice")
+    same = client.get(f"/me/username-available?username={username}", headers=alice)
+    assert same.json()["available"] is True
+
+
+def test_cannot_change_to_a_username_already_taken(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, _, bob_username = make_user(client, "Bob")
+
+    unavailable = client.get(f"/me/username-available?username={bob_username}", headers=alice)
+    assert unavailable.json()["available"] is False
+
+    denied = client.put("/me/username", headers=alice, json={"username": bob_username})
+    assert denied.status_code == 400
+
+
+def test_username_change_is_case_insensitive_against_existing_usernames(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, _, bob_username = make_user(client, "Bob")
+
+    denied = client.put("/me/username", headers=alice, json={"username": bob_username.upper()})
+    assert denied.status_code == 400
+
+
+def test_setting_your_username_to_its_current_value_is_a_no_op(client):
+    alice, _, username = make_user(client, "Alice")
+    response = client.put("/me/username", headers=alice, json={"username": username})
+    assert response.status_code == 200
+    assert response.json()["username"] == username
+
+
+def test_username_format_is_enforced_the_same_as_registration(client):
+    alice, _, _ = make_user(client, "Alice")
+    too_short = client.put("/me/username", headers=alice, json={"username": "ab"})
+    assert too_short.status_code == 422
+    bad_chars = client.put("/me/username", headers=alice, json={"username": "not a username!"})
+    assert bad_chars.status_code == 422
+
+
 # ── Deactivate / reactivate / delete account ──────────────────────────────────
 
 def test_deactivating_hides_the_account_from_search_and_new_dms(client):
@@ -3590,11 +3927,14 @@ def test_logging_back_in_after_deactivating_flags_it_and_reactivating_clears_it(
     reactivated = client.post("/me/reactivate", headers=fresh_headers)
     assert reactivated.status_code == 200
 
-    # Now findable again. A large limit sidesteps the fact that this shared
-    # test database has plenty of other accounts named "Alice" by now.
+    # Now findable again. Searching by the random per-test username rather
+    # than the shared display name "Alice" sidesteps this shared test
+    # database accumulating enough other same-named accounts to push this
+    # one past any fixed limit/page — a bigger limit was only ever
+    # postponing that, not fixing it.
     bob, _, _ = make_user(client, "Bob")
     alice_id = logged_in.json()["user"]["id"]
-    found = client.get("/users?q=Alice&limit=200", headers=bob).json()
+    found = client.get(f"/users?q={username}", headers=bob).json()
     assert any(u["id"] == alice_id for u in found)
 
 

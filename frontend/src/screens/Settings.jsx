@@ -58,6 +58,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
   const [appLockSheet, setAppLockSheet] = useState(false);
   const [changingPhone, setChangingPhone] = useState(false);
   const [settingPassword, setSettingPassword] = useState(false);
+  const [editingUsername, setEditingUsername] = useState(false);
   const [connectingEmail, setConnectingEmail] = useState(false);
   const [deactivating, setDeactivating] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
@@ -318,7 +319,10 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
             </div>
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 19, fontWeight: 700 }}>{me.name}</div>
-              <div style={{ fontSize: 13, color: G.sub }}>@{me.username}</div>
+              <div onClick={() => setEditingUsername(true)}
+                   style={{ fontSize: 13, color: G.sub, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 4 }}>
+                @{me.username} {I.edit(G.muted, 12)}
+              </div>
               {me.bio && <div style={{ fontSize: 12.5, color: G.muted, marginTop: 3 }}>{me.bio}</div>}
               {me.avatar_attachment_id && (
                 <div onClick={() => !avatarBusy && removeAvatarPhoto()} style={{
@@ -801,6 +805,12 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
                           toast={toast}/>
       )}
 
+      {editingUsername && (
+        <EditUsernameSheet currentUsername={me.username} onClose={() => setEditingUsername(false)}
+                           onChanged={(updated) => { setEditingUsername(false); onUpdated(updated); toast("Username updated"); }}
+                           toast={toast}/>
+      )}
+
       {connectingEmail && (
         <EmailSheet currentEmail={me.email_verified_at ? me.email : ""}
                     onClose={() => setConnectingEmail(false)}
@@ -1052,6 +1062,99 @@ function SetPasswordSheet({ onClose, onSet, toast }) {
         )}
         <Button onClick={submit} disabled={busy || !canSubmit} style={{ width: "100%" }}>
           {busy ? "Setting…" : "Set password"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+const USERNAME_PATTERN = /^[a-zA-Z0-9_]{3,32}$/;
+
+/**
+ * Choosing/changing a username, with live availability feedback — a
+ * phone-signup account never picked one at all (it got an auto-generated
+ * one like user9113107586, see main.py's unique_username_from_phone), so
+ * this is the first place that's ever shown or let anyone set it.
+ */
+function EditUsernameSheet({ currentUsername, onClose, onChanged, toast }) {
+  const [username, setUsername] = useState(currentUsername);
+  const [checking, setChecking] = useState(false);
+  const [available, setAvailable] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  const validFormat = USERNAME_PATTERN.test(username);
+  const unchanged = username.toLowerCase() === currentUsername.toLowerCase();
+
+  // Debounced: checking on every keystroke would fire a request per
+  // character typed. 400ms is long enough to skip the request entirely
+  // for someone still mid-word, short enough not to feel laggy once they pause.
+  useEffect(() => {
+    if (!validFormat || unchanged) { setAvailable(true); return; }
+    setChecking(true);
+    const timer = setTimeout(() => {
+      Me.usernameAvailable(username)
+        .then((result) => setAvailable(result.available))
+        .catch(() => setAvailable(true)) // fail open — the submit itself still enforces this
+        .finally(() => setChecking(false));
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [username, validFormat, unchanged]);
+
+  const canSubmit = validFormat && (unchanged || (available && !checking));
+
+  async function submit() {
+    if (!canSubmit) return;
+    if (unchanged) { onClose(); return; }
+    setBusy(true);
+    try {
+      const updated = await Me.setUsername(username);
+      onChanged(updated);
+    } catch (problem) {
+      toast(problem.message || "Could not update username");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "#000000aa", zIndex: 60,
+      display: "flex", alignItems: "flex-end", justifyContent: "center",
+    }}>
+      <div onClick={(event) => event.stopPropagation()} style={{
+        width: "100%", maxWidth: 430, background: G.surface, padding: 20,
+        borderTopLeftRadius: 22, borderTopRightRadius: 22,
+      }}>
+        <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 6 }}>Username</div>
+        <div style={{ fontSize: 12.5, color: G.muted, marginBottom: 14 }}>
+          Letters, numbers and underscores only. Used for @mentions and signing in.
+        </div>
+        <Field label="Username" value={username} autoComplete="off"
+               onChange={(event) => setUsername(event.target.value.replace(/\s/g, ""))}
+               onKeyDown={(event) => event.key === "Enter" && canSubmit && submit()}
+               placeholder="your_username"/>
+        {!validFormat && username.length > 0 && (
+          <div style={{ fontSize: 11.5, color: G.red, marginTop: -8, marginBottom: 12 }}>
+            3-32 characters — letters, numbers and underscores only.
+          </div>
+        )}
+        {validFormat && !unchanged && checking && (
+          <div style={{ fontSize: 11.5, color: G.muted, marginTop: -8, marginBottom: 12 }}>
+            Checking availability…
+          </div>
+        )}
+        {validFormat && !unchanged && !checking && !available && (
+          <div style={{ fontSize: 11.5, color: G.red, marginTop: -8, marginBottom: 12 }}>
+            That username is already taken.
+          </div>
+        )}
+        {validFormat && !unchanged && !checking && available && (
+          <div style={{ fontSize: 11.5, color: G.green, marginTop: -8, marginBottom: 12 }}>
+            Available.
+          </div>
+        )}
+        <Button onClick={submit} disabled={busy || !canSubmit} style={{ width: "100%" }}>
+          {busy ? "Saving…" : "Save"}
         </Button>
       </div>
     </div>

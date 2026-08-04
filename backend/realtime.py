@@ -35,29 +35,82 @@ class Hub:
         # One user can be signed in on several devices, so each maps to a set.
         self._connections: dict[str, set[WebSocket]] = {}
 
-        # Guards the dictionary above. Adding and removing happens from many
-        # concurrent request handlers.
+        # Subset of the above that's actually in the FOREGROUND right now —
+        # see set_focus(). A backgrounded tab keeps its socket (so it still
+        # gets live events/messages the instant it's brought back), but was
+        # previously indistinguishable from an actively-open one for
+        # presence purposes: opening the app once and leaving the tab in
+        # the background — or just minimized on a phone — reported the
+        # account as permanently "online" for as long as the socket
+        # happened to stay connected, with no notion of actually being away.
+        self._focused: dict[str, set[WebSocket]] = {}
+
+        # Guards the dictionaries above. Adding and removing happens from
+        # many concurrent request handlers.
         self._lock = asyncio.Lock()
 
     async def add(self, user_id: str, socket: WebSocket):
         async with self._lock:
             self._connections.setdefault(user_id, set()).add(socket)
+            # A freshly opened socket starts focused, matching the previous
+            # "connecting counts as online" behavior — the client sends an
+            # explicit "focus" message the moment it actually goes to the
+            # background (see set_focus / the websocket handler's "focus"
+            # case), not before.
+            self._focused.setdefault(user_id, set()).add(socket)
 
     async def remove(self, user_id: str, socket: WebSocket):
         async with self._lock:
             sockets = self._connections.get(user_id)
-            if not sockets:
-                return
-            sockets.discard(socket)
-            if not sockets:
-                # Drop the key so `is_online` does not report a user with an
-                # empty set as connected.
-                del self._connections[user_id]
+            if sockets:
+                sockets.discard(socket)
+                if not sockets:
+                    # Drop the key so `online_users` does not report a user
+                    # with an empty set as connected.
+                    del self._connections[user_id]
+            focused = self._focused.get(user_id)
+            if focused:
+                focused.discard(socket)
+                if not focused:
+                    del self._focused[user_id]
+
+    async def set_focus(self, user_id: str, socket: WebSocket, focused: bool) -> bool:
+        """
+        Record whether a specific device's tab is actually in the
+        foreground right now. Returns whether this changed the user's
+        overall is_online() answer (i.e. gained/lost their last focused
+        device), so the caller knows whether a presence broadcast is
+        actually warranted rather than firing one on every tab switch.
+        """
+        async with self._lock:
+            was_online = bool(self._focused.get(user_id))
+            if focused:
+                self._focused.setdefault(user_id, set()).add(socket)
+            else:
+                sockets = self._focused.get(user_id)
+                if sockets:
+                    sockets.discard(socket)
+                    if not sockets:
+                        del self._focused[user_id]
+            is_online_now = bool(self._focused.get(user_id))
+            return was_online != is_online_now
 
     def is_online(self, user_id: str) -> bool:
-        return user_id in self._connections
+        """
+        Whether this account currently has the app in the FOREGROUND on at
+        least one device — not merely "has a socket open," which a
+        backgrounded or minimized tab keeps for as long as it's left that
+        way. Message delivery (send_to_chat/send_to_user) intentionally
+        still targets every open socket regardless of focus, so a
+        backgrounded tab keeps receiving live events; only the presence
+        indicator (the green dot / "online" label) reads this.
+        """
+        return bool(self._focused.get(user_id))
 
     def online_users(self) -> set[str]:
+        """Every user with at least one open socket, focused or not — used
+        to scope send_to_chat's membership lookup, where a backgrounded tab
+        must still receive events, not the presence indicator."""
         return set(self._connections.keys())
 
     async def send_to_user(self, user_id: str, event: dict[str, Any]):

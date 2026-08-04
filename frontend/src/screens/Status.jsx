@@ -197,7 +197,10 @@ export default function Status({ me, toast }) {
                  toast={toast}/>
       )}
 
-      {viewing && <Viewer story={viewing} onClose={() => { setViewing(null); reload(); }}/>}
+      {viewing && (
+        <Viewer story={viewing} me={me} toast={toast}
+                onClose={() => { setViewing(null); reload(); }}/>
+      )}
 
       {privacyOpen && (
         <StatusPrivacySheet onClose={() => setPrivacyOpen(false)} toast={toast}/>
@@ -573,8 +576,39 @@ function Compose({ onClose, onDone, toast }) {
   );
 }
 
-function Viewer({ story, onClose }) {
+const QUICK_REACTIONS = ["❤️", "😂", "😮", "😢", "👏", "🔥"];
+
+function Viewer({ story, me, toast, onClose }) {
   const isMedia = story.kind === "photo" || story.kind === "video" || story.kind === "audio";
+  const isAuthor = story.user_id === me.id;
+  const [myReaction, setMyReaction] = useState(null);
+  // Author-only: who's seen it and who reacted, merged into one list —
+  // loaded lazily since a viewer who isn't the author would just get a 404
+  // for both calls.
+  const [activity, setActivity] = useState(null);
+  const [activityOpen, setActivityOpen] = useState(false);
+
+  useEffect(() => {
+    if (!isAuthor) return;
+    Promise.all([Stories.viewers(story.id), Stories.reactions(story.id)])
+      .then(([viewers, reactions]) => setActivity({ viewers, reactions }))
+      .catch(() => {});
+  }, [story.id, isAuthor]);
+
+  async function react(emoji) {
+    // Tapping the already-active one un-reacts — same "tap again to
+    // remove" convention a message reaction already uses in ChatView.
+    const next = myReaction === emoji ? null : emoji;
+    const previous = myReaction;
+    setMyReaction(next);
+    try {
+      if (next) await Stories.react(story.id, next);
+      else await Stories.unreact(story.id);
+    } catch (problem) {
+      setMyReaction(previous);
+      toast?.(problem.message || "Could not react");
+    }
+  }
 
   return (
     <div onClick={onClose} style={{
@@ -620,6 +654,77 @@ function Viewer({ story, onClose }) {
       )}
       <div style={{ fontSize: 12.5, opacity: 0.75, marginTop: 20, color: "#fff" }}>
         {whenLabel(story.created_at)} · tap anywhere to close
+      </div>
+
+      {isAuthor ? (
+        <div onClick={(event) => { event.stopPropagation(); setActivityOpen(true); }} style={{
+          marginTop: 16, display: "flex", alignItems: "center", gap: 6,
+          color: "#fff", fontSize: 13, cursor: "pointer", background: "#ffffff1a",
+          padding: "8px 16px", borderRadius: 20,
+        }}>
+          {I.eye("#fff", 15)}
+          {activity ? `${activity.viewers.length} view${activity.viewers.length === 1 ? "" : "s"}` : "Views"}
+          {activity && activity.reactions.length > 0 &&
+            ` · ${activity.reactions.length} reacted`}
+        </div>
+      ) : (
+        <div onClick={(event) => event.stopPropagation()} style={{
+          marginTop: 18, display: "flex", gap: 12, background: "#ffffff1a",
+          padding: "9px 16px", borderRadius: 30,
+        }}>
+          {QUICK_REACTIONS.map((emoji) => (
+            <button key={emoji} onClick={() => react(emoji)} style={{
+              fontSize: 22, background: "none", border: "none", cursor: "pointer", padding: 0,
+              lineHeight: 1, opacity: myReaction && myReaction !== emoji ? 0.4 : 1,
+              transform: myReaction === emoji ? "scale(1.3)" : "scale(1)",
+              transition: "transform 0.15s, opacity 0.15s",
+            }}>{emoji}</button>
+          ))}
+        </div>
+      )}
+
+      {activityOpen && (
+        <StoryActivitySheet activity={activity}
+                             onClose={() => setActivityOpen(false)}/>
+      )}
+    </div>
+  );
+}
+
+/** Author-only: everyone who's seen a status, newest first, with their
+ * reaction emoji alongside their name if they left one. */
+function StoryActivitySheet({ activity, onClose }) {
+  const reactionByUser = new Map((activity?.reactions || []).map((r) => [r.user_id, r.emoji]));
+  const viewers = activity?.viewers || [];
+
+  return (
+    <div onClick={(event) => { event.stopPropagation(); onClose(); }} style={{
+      position: "fixed", inset: 0, background: "#000000aa", zIndex: 80,
+      display: "flex", alignItems: "flex-end", justifyContent: "center",
+    }}>
+      <div onClick={(event) => event.stopPropagation()} style={{
+        width: "100%", maxWidth: 430, maxHeight: "60vh", overflowY: "auto",
+        background: G.surface, padding: 20, borderTopLeftRadius: 22, borderTopRightRadius: 22,
+      }}>
+        <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 14 }}>
+          {viewers.length} view{viewers.length === 1 ? "" : "s"}
+        </div>
+        {viewers.length === 0 && (
+          <div style={{ fontSize: 13, color: G.muted, textAlign: "center", padding: "20px 0" }}>
+            Nobody has seen this yet.
+          </div>
+        )}
+        {viewers.map((viewer) => (
+          <div key={viewer.user_id} style={{
+            display: "flex", alignItems: "center", gap: 12, padding: "8px 4px",
+          }}>
+            <Av av={viewer.avatar_letter} color={viewer.color} photoId={viewer.avatar_attachment_id} size={38}/>
+            <div style={{ flex: 1, fontSize: 14 }}>{viewer.name}</div>
+            {reactionByUser.has(viewer.user_id) && (
+              <div style={{ fontSize: 20 }}>{reactionByUser.get(viewer.user_id)}</div>
+            )}
+          </div>
+        ))}
       </div>
     </div>
   );

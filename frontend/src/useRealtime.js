@@ -28,15 +28,33 @@ export function useRealtime(onEvent, sessionKey, onReconnect) {
       return undefined;
     }
 
+    // Merely having a socket open no longer counts as "online" server-side
+    // (see Hub.is_online in realtime.py) — the server needs to be told
+    // whether this tab is actually in the foreground, or a phone left
+    // open-but-backgrounded looks permanently online forever.
+    const reportFocus = () =>
+      connection.current?.send({ type: "focus", focused: document.visibilityState === "visible" });
+
     const realtime = new Realtime({
       onEvent: (event) => handler.current?.(event),
-      onStatus: setStatus,
+      onStatus: (value) => {
+        setStatus(value);
+        // A freshly (re)connected socket starts focused server-side by
+        // default — correct for the common case, but a tab that's already
+        // backgrounded the moment the connection completes (or reconnects
+        // after a network drop while minimized) needs to say so right
+        // away, not wait for the next actual visibility change to fire.
+        if (value === "online") reportFocus();
+      },
       onReconnect: () => reconnectHandler.current?.(),
     });
     realtime.connect();
     connection.current = realtime;
 
+    document.addEventListener("visibilitychange", reportFocus);
+
     return () => {
+      document.removeEventListener("visibilitychange", reportFocus);
       realtime.close();
       connection.current = null;
     };

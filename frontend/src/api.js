@@ -196,6 +196,14 @@ export const Me = {
   confirmEmail: (email, code) => post("/me/email/confirm", { email, code }),
   removeEmail: () => remove("/me/email"),
 
+  // A phone-signup account gets an auto-generated username it was never
+  // shown (e.g. user9113107586) — this is the first way to ever pick your
+  // own, for @mentions and signing in with a password instead of a phone
+  // code. usernameAvailable reports your OWN current username as
+  // available, so re-submitting it unchanged never reads as taken.
+  usernameAvailable: (username) => get(`/me/username-available?username=${encodeURIComponent(username)}`),
+  setUsername: (username) => put("/me/username", { username }),
+
   // Deactivate hides the account and signs it out everywhere; logging back
   // in still works, and doing so is how you reactivate (see Auth.login's
   // account_disabled flag). Delete is permanent.
@@ -336,6 +344,13 @@ export const Chats = {
   // "Clear chat" — hides your own copy of every message already in the chat.
   // Anything sent after this call still shows up normally.
   clear: (chatId) => post(`/chats/${chatId}/clear`),
+
+  // Vanish mode: a purely personal preference (never shown to or affecting
+  // the other member) — once on, leaveView() hides every message this
+  // account has already read, the moment it's called. The screen calls it
+  // on unmount, so re-opening the chat shows only what wasn't seen yet.
+  setVanishMode: (chatId, enabled) => put(`/chats/${chatId}/vanish-mode?enabled=${enabled}`),
+  leaveView: (chatId) => post(`/chats/${chatId}/leave-view`),
 
   // Shared media (photos/videos/documents) for a chat's info screen.
   media: (chatId) => get(`/chats/${chatId}/media`),
@@ -737,6 +752,13 @@ export const Stories = {
   mine: () => get("/stories/mine"),
   view: (storyId) => post(`/stories/${storyId}/view`),
   delete: (storyId) => remove(`/stories/${storyId}`),
+
+  // One reaction per viewer — sending a new emoji replaces theirs, it
+  // doesn't stack. `reactions`/`viewers` are author-only.
+  react: (storyId, emoji) => post(`/stories/${storyId}/react`, { emoji }),
+  unreact: (storyId) => remove(`/stories/${storyId}/react`),
+  reactions: (storyId) => get(`/stories/${storyId}/reactions`),
+  viewers: (storyId) => get(`/stories/${storyId}/viewers`),
 };
 
 // ── Call history ─────────────────────────────────────────────────────────────

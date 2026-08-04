@@ -578,6 +578,21 @@ CREATE TABLE IF NOT EXISTS story_views (
 );
 
 
+-- One reaction per viewer per story, not one row per (story, user, emoji)
+-- the way message `reactions` allows several emoji to stack per person —
+-- a story reaction is a single quick "how did this land," so sending a new
+-- emoji replaces the old one rather than adding a second.
+CREATE TABLE IF NOT EXISTS story_reactions (
+    story_id   TEXT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    emoji      TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (story_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_story_reactions_story ON story_reactions (story_id);
+
+
 CREATE TABLE IF NOT EXISTS scheduled_messages (
     id         TEXT PRIMARY KEY,
     chat_id    TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
@@ -875,6 +890,12 @@ COLUMNS_ADDED_LATER = [
     # NULL means no password set. Checked the same way a two-step PIN is —
     # hashed at rest, never the raw text.
     ("meetings", "password_hash", "TEXT"),
+    # Per-member, Instagram-"Vanish mode"-style opt-in: when on, leaving
+    # this chat (see /chats/{id}/leave-view in main.py) hides every message
+    # this member has already read — a one-sided view preference, not a
+    # shared/mutual chat setting, so turning it on never affects what the
+    # other member(s) see of their own history.
+    ("chat_members", "vanish_mode", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

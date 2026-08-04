@@ -14,6 +14,7 @@ import { STICKERS, STICKERS_BY_ID } from "../stickers.jsx";
 import { shouldAutoDownload } from "../mediaPrefs.js";
 import CameraCapture from "../CameraCapture.jsx";
 import { COUNTRY_CODES, flagFor, samplePlaceholder, splitPhone } from "../countryCodes.js";
+import LocationMap from "../LocationMap.jsx";
 
 const SLOW_MODE_CHOICES = [
   { label: "Off", seconds: 0 },
@@ -107,6 +108,14 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
       const text = inputRef.current || "";
       Chats.settings(chat.id, { draft: text }).catch(() => {});
     };
+  }, [chat.id]);
+
+  // Vanish mode's actual effect: a no-op unless this member turned it on
+  // for this chat (see Settings sheet's Toggle above) — fires on the same
+  // "switched to a different chat, or left the screen entirely" moment the
+  // draft save above does.
+  useEffect(() => {
+    return () => { Chats.leaveView(chat.id).catch(() => {}); };
   }, [chat.id]);
 
   // ── Loading and live updates ───────────────────────────────────────────────
@@ -802,31 +811,26 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
     }, liveSeconds * 1000);
   }
 
-  function sendLocation(liveSeconds) {
-    if (!navigator.geolocation) {
-      toast("Location isn't available in this browser");
-      return;
+  // Takes an already-confirmed lat/lng (the picker sheet shows the map and
+  // lets the pin be dragged/tapped before this is ever called) rather than
+  // grabbing the device's raw current position and sending it sight
+  // unseen the way this used to.
+  async function sendLocation(lat, lng, liveSeconds) {
+    try {
+      const payload = { lat, lng };
+      if (liveSeconds) payload.live_until = Date.now() / 1000 + liveSeconds;
+      const stored = await Messages.send({
+        chat_id: chat.id, kind: "location", text: "",
+        payload, client_msg_id: newClientMessageId(),
+      });
+      setMessages((current) => upsertMessage(current, stored));
+      onChanged();
+      setSheet(null);
+      if (liveSeconds) startLiveTracking(stored.id, liveSeconds);
+    } catch (problem) {
+      toast(problem.message || "Could not send location");
+      throw problem;
     }
-    setSheet(null);
-    navigator.geolocation.getCurrentPosition(
-      async (position) => {
-        try {
-          const payload = { lat: position.coords.latitude, lng: position.coords.longitude };
-          if (liveSeconds) payload.live_until = Date.now() / 1000 + liveSeconds;
-          const stored = await Messages.send({
-            chat_id: chat.id, kind: "location", text: "",
-            payload, client_msg_id: newClientMessageId(),
-          });
-          setMessages((current) => upsertMessage(current, stored));
-          onChanged();
-          if (liveSeconds) startLiveTracking(stored.id, liveSeconds);
-        } catch (problem) {
-          toast(problem.message || "Could not send location");
-        }
-      },
-      () => toast("Location permission denied"),
-      { enableHighAccuracy: true, timeout: 10000 },
-    );
   }
 
   async function sendContact(name, phone) {
@@ -1182,7 +1186,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
       )}
 
       {sheet === "location" && (
-        <LiveLocationSheet onClose={() => setSheet(null)} onPicked={sendLocation}/>
+        <LiveLocationSheet onClose={() => setSheet(null)} onSend={sendLocation}/>
       )}
 
       {sheet === "contact" && (
@@ -1828,37 +1832,46 @@ function LocationMessage({ message, mine, toast }) {
   return (
     <a href={mapUrl} target="_blank" rel="noopener noreferrer"
        onClick={(event) => event.stopPropagation()}
-       style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 180, textDecoration: "none", color: "inherit" }}>
-      <div style={{
-        width: 40, height: 40, borderRadius: 10, flexShrink: 0, position: "relative",
-        background: mine ? "#ffffff26" : G.accentSoft,
-        display: "flex", alignItems: "center", justifyContent: "center",
-      }}>
-        {I.mapPin(mine ? "#fff" : G.accentText, 20)}
-        {isLive && (
-          <div style={{
-            position: "absolute", top: -3, right: -3, width: 10, height: 10,
-            borderRadius: "50%", background: G.red, border: `2px solid ${mine ? G.accent : G.card}`,
-          }}/>
+       style={{ display: "block", minWidth: 220, maxWidth: 260, textDecoration: "none", color: "inherit" }}>
+      {/* A live-updating message keeps rebuilding this block (upsertMessage
+          on every watchPosition tick), so the preview intentionally isn't
+          draggable/clickable itself — only the surrounding <a> is, opening
+          the full OpenStreetMap page for anything more than a glance. */}
+      <div style={{ pointerEvents: "none" }}>
+        <LocationMap lat={lat} lng={lng} height={120}/>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
+        <div style={{
+          width: 34, height: 34, borderRadius: 9, flexShrink: 0, position: "relative",
+          background: mine ? "#ffffff26" : G.accentSoft,
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          {I.mapPin(mine ? "#fff" : G.accentText, 17)}
+          {isLive && (
+            <div style={{
+              position: "absolute", top: -3, right: -3, width: 10, height: 10,
+              borderRadius: "50%", background: G.red, border: `2px solid ${mine ? G.accent : G.card}`,
+            }}/>
+          )}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 600 }}>
+            {isLive ? "Live location" : "Location"}
+          </div>
+          <div style={{ fontSize: 12, opacity: 0.75 }}>
+            {isLive
+              ? `Updating · until ${clockTime(liveUntil)}`
+              : `${lat.toFixed(5)}, ${lng.toFixed(5)}`}
+          </div>
+        </div>
+        {isLive && mine && (
+          <div onClick={stopSharing} style={{
+            fontSize: 11.5, fontWeight: 600, padding: "5px 9px", borderRadius: 8,
+            background: "#ffffff33", color: "#fff", cursor: stopping ? "default" : "pointer",
+            opacity: stopping ? 0.6 : 1, flexShrink: 0,
+          }}>Stop</div>
         )}
       </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 14, fontWeight: 600 }}>
-          {isLive ? "Live location" : "Location"}
-        </div>
-        <div style={{ fontSize: 12, opacity: 0.75 }}>
-          {isLive
-            ? `Updating · until ${clockTime(liveUntil)}`
-            : `${lat.toFixed(5)}, ${lng.toFixed(5)}`}
-        </div>
-      </div>
-      {isLive && mine && (
-        <div onClick={stopSharing} style={{
-          fontSize: 11.5, fontWeight: 600, padding: "5px 9px", borderRadius: 8,
-          background: "#ffffff33", color: "#fff", cursor: stopping ? "default" : "pointer",
-          opacity: stopping ? 0.6 : 1, flexShrink: 0,
-        }}>Stop</div>
-      )}
     </a>
   );
 }
@@ -3240,16 +3253,79 @@ const LIVE_LOCATION_CHOICES = [
   { label: "Live for 8 hours", seconds: 8 * 3600 },
 ];
 
-function LiveLocationSheet({ onClose, onPicked }) {
+function LiveLocationSheet({ onClose, onSend }) {
+  // undefined = still choosing a duration; once picked, this step fetches
+  // the device position and shows it on an actual map to confirm/adjust
+  // before anything is sent — the old flow sent the raw GPS fix the moment
+  // you picked a duration, with no chance to see or correct it first.
+  const [seconds, setSeconds] = useState(undefined);
+  const [position, setPosition] = useState(null);
+  const [locating, setLocating] = useState(false);
+  const [error, setError] = useState("");
+  const [sending, setSending] = useState(false);
+
+  function pick(chosenSeconds) {
+    setSeconds(chosenSeconds);
+    setError("");
+    if (!navigator.geolocation) {
+      setError("Location isn't available in this browser");
+      return;
+    }
+    setLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setPosition({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        setLocating(false);
+      },
+      () => { setError("Location permission denied"); setLocating(false); },
+      { enableHighAccuracy: true, timeout: 10000 },
+    );
+  }
+
+  async function confirm() {
+    if (!position || sending) return;
+    setSending(true);
+    try {
+      await onSend(position.lat, position.lng, seconds);
+    } catch {
+      setSending(false); // onSend already toasted; let them retry without re-picking
+    }
+  }
+
+  if (seconds === undefined) {
+    return (
+      <Sheet title="Share location" onClose={onClose}>
+        {LIVE_LOCATION_CHOICES.map((choice) => (
+          <div key={choice.label} onClick={() => pick(choice.seconds)}
+            style={{
+              padding: "13px 14px", borderRadius: 12, marginBottom: 8, cursor: "pointer",
+              background: G.dim, border: `1px solid ${G.border}`, fontSize: 14,
+            }}>{choice.label}</div>
+        ))}
+      </Sheet>
+    );
+  }
+
   return (
-    <Sheet title="Share location" onClose={onClose}>
-      {LIVE_LOCATION_CHOICES.map((choice) => (
-        <div key={choice.label} onClick={() => onPicked(choice.seconds)}
-          style={{
-            padding: "13px 14px", borderRadius: 12, marginBottom: 8, cursor: "pointer",
-            background: G.dim, border: `1px solid ${G.border}`, fontSize: 14,
-          }}>{choice.label}</div>
-      ))}
+    <Sheet title="Confirm location" onClose={onClose}>
+      {locating && (
+        <div style={{ display: "flex", justifyContent: "center", padding: "40px 0" }}><Spinner/></div>
+      )}
+      {error && (
+        <div style={{ fontSize: 13, color: G.red, padding: "10px 0", textAlign: "center" }}>{error}</div>
+      )}
+      {position && (
+        <>
+          <LocationMap lat={position.lat} lng={position.lng} height={220} interactive
+                       onPick={(lat, lng) => setPosition({ lat, lng })}/>
+          <div style={{ fontSize: 12, color: G.muted, margin: "10px 0 14px" }}>
+            Drag the pin or tap the map to adjust · {position.lat.toFixed(5)}, {position.lng.toFixed(5)}
+          </div>
+          <Button onClick={confirm} disabled={sending} style={{ width: "100%" }}>
+            {sending ? "Sending…" : "Send location"}
+          </Button>
+        </>
+      )}
     </Sheet>
   );
 }
@@ -3319,6 +3395,7 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
   const [lockSheet, setLockSheet] = useState(null);   // 'set' | 'remove'
   const [archived, setArchived] = useState(Boolean(chat.archived));
   const [callsEnabled, setCallsEnabled] = useState(chat.calls_enabled !== false);
+  const [vanishMode, setVanishMode] = useState(Boolean(chat.vanish_mode));
   const [muteSheet, setMuteSheet] = useState(false);
   const [mediaSheet, setMediaSheet] = useState(false);
   const [inviteSheet, setInviteSheet] = useState(false);
@@ -3464,6 +3541,11 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
     onChanged();
   }
 
+  async function toggleVanishMode(next) {
+    setVanishMode(next);
+    await Chats.setVanishMode(chat.id, next);
+  }
+
   async function changeFolder(next) {
     setFolder(next);
     await Chats.settings(chat.id, { folder: next });
@@ -3578,6 +3660,10 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
             sub={locked ? "PIN required to open this chat" : "Set a PIN to lock this chat"}
             onClick={() => setLockSheet(locked ? "remove" : "set")}
             right={<span style={{ fontSize: 13, color: G.sub }}>{locked ? "On" : "Off"}</span>}/>
+
+      <SRow icon={I.eye(vanishMode ? G.accent : G.sub, 18)} label="Vanish mode"
+            sub="Already-read messages disappear from your view when you leave this chat — only for you"
+            right={<Toggle on={vanishMode} onChange={toggleVanishMode}/>}/>
 
       <SRow icon={I.broom(G.accent, 18)} label="Clear chat" sub="Clears your own copy only" onClick={clearChat}/>
       <SRow icon={I.trash(G.red, 18)} label="Delete chat" onClick={deleteChat} danger/>

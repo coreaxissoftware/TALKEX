@@ -69,7 +69,7 @@ from models import (
     RegisterRequest, RemoveTwoStepRequest, RequestEmailOtpRequest, RequestOtpRequest,
     ReportRequest, RescheduleRequest, RsvpRequest,
     ScheduleRequest, SendMessageRequest, SetPasswordRequest, SetPinRequest, SetRoleRequest,
-    SetTwoStepRequest, StartLinkRequest, StoryAudienceRequest, StoryRequest,
+    SetTwoStepRequest, SetUsernameRequest, StartLinkRequest, StoryAudienceRequest, StoryRequest,
     TestEmailRequest, TestSmsRequest,
     UpdateContactRequest, UpdateIntegrationSettingsRequest, UpdateMeetingRequest,
     UpdateProfileRequest, VerifyOtpRequest, VerifyTwoStepRequest, VoteRequest,
@@ -1460,6 +1460,39 @@ def update_me(request: UpdateProfileRequest, user: dict = Depends(current_user))
     return public_user(db.query_one("SELECT * FROM users WHERE id = ?", (user["id"],)))
 
 
+@app.get("/me/username-available")
+def username_available(username: str = Query(min_length=3, max_length=32, pattern=r"^[a-zA-Z0-9_]+$"),
+                        user: dict = Depends(current_user)):
+    """Live-typing feedback for the Settings username field — a name is
+    "available" if it's free, or if it's already this account's own
+    (so re-submitting your current username never reads as taken)."""
+    taken = db.query_one(
+        "SELECT 1 FROM users WHERE lower(username) = ? AND id != ?",
+        (username.lower(), user["id"]),
+    )
+    return {"available": taken is None}
+
+
+@app.put("/me/username")
+def set_username(request: SetUsernameRequest, user: dict = Depends(current_user)):
+    """
+    A username exists behind the scenes even for a phone-signup account
+    that was never shown one (see unique_username_from_phone) — this is
+    the first way to ever choose your own rather than live with the
+    auto-generated one, for @mentions, the bulk API's `to: username`, and
+    now signing in with a password (see /me/password) instead of a phone
+    code.
+    """
+    new_username = request.username.lower()
+    if new_username == user["username"]:
+        return public_user(user)
+    try:
+        db.execute("UPDATE users SET username = ? WHERE id = ?", (new_username, user["id"]))
+    except sqlite3.IntegrityError:
+        raise HTTPException(400, "Username already taken")
+    return public_user(db.query_one("SELECT * FROM users WHERE id = ?", (user["id"],)))
+
+
 @app.put("/me/password")
 def set_password(request: SetPasswordRequest,
                   credentials: HTTPAuthorizationCredentials = Depends(security),
@@ -1916,7 +1949,7 @@ def list_chats(user: dict = Depends(current_user),
         SELECT
             c.*,
             m.role, m.last_read_seq, m.muted_until, m.is_pinned, m.folder, m.draft, m.archived,
-            m.calls_enabled, m.is_favorite,
+            m.calls_enabled, m.is_favorite, m.vanish_mode,
             MAX(c.last_seq - m.last_read_seq, 0) AS unread
         FROM chat_members AS m
         JOIN chats AS c ON c.id = m.chat_id
@@ -2657,6 +2690,40 @@ def clear_chat(chat_id: str, user: dict = Depends(current_user)):
     require_member(chat_id, user["id"])
     cleared = chatstore.clear_chat_for_user(chat_id, user["id"])
     return {"cleared": cleared}
+
+
+@app.put("/chats/{chat_id}/vanish-mode")
+def set_vanish_mode(chat_id: str, enabled: bool = Query(...), user: dict = Depends(current_user)):
+    """
+    A one-sided, Instagram-"Vanish mode"-style preference: turning it on
+    only changes what happens to messages on the caller's OWN screen (see
+    leave_chat_view below) — it is never a shared/mutual chat setting, and
+    the other member(s) are not told and are not affected at all.
+    """
+    require_member(chat_id, user["id"])
+    db.execute("UPDATE chat_members SET vanish_mode = ? WHERE chat_id = ? AND user_id = ?",
+               (int(enabled), chat_id, user["id"]))
+    return {"vanish_mode": enabled}
+
+
+@app.post("/chats/{chat_id}/leave-view")
+def leave_chat_view(chat_id: str, user: dict = Depends(current_user)):
+    """
+    Called by the client when it navigates away from an open chat screen —
+    NOT the same as /chats/{chat_id}/leave, which leaves the conversation
+    itself. Harmless no-op unless this member has vanish mode on for this
+    chat, so the client can call it unconditionally on every chat-close
+    without checking the setting itself first.
+    """
+    require_member(chat_id, user["id"])
+    member = db.query_one(
+        "SELECT vanish_mode FROM chat_members WHERE chat_id = ? AND user_id = ?",
+        (chat_id, user["id"]),
+    )
+    if not member or not member["vanish_mode"]:
+        return {"vanished": 0}
+    vanished = chatstore.vanish_seen_messages_for_user(chat_id, user["id"])
+    return {"vanished": vanished}
 
 
 @app.put("/chats/{chat_id}/slow-mode")
@@ -4124,12 +4191,22 @@ def list_my_stories(user: dict = Depends(current_user)):
         views = db.query_one(
             "SELECT COUNT(*) AS total FROM story_views WHERE story_id = ?", (story["id"],))
         story["view_count"] = views["total"]
+        reactions = db.query_one(
+            "SELECT COUNT(*) AS total FROM story_reactions WHERE story_id = ?", (story["id"],))
+        story["reaction_count"] = reactions["total"]
         result.append(story)
     return result
 
 
-@app.post("/stories/{story_id}/view")
-def view_story(story_id: str, user: dict = Depends(current_user)):
+def _visible_live_story_or_404(story_id: str, user_id: str) -> dict:
+    """
+    Shared by view/react/unreact: the story must exist, be live, and pass
+    the author's audience rule — same check list_stories applies before a
+    story is ever shown at all, repeated here because a viewer can act on a
+    story_id directly (view, react) without having gone through that list
+    first, and a guessed/leaked id must not bypass the audience the author
+    actually set.
+    """
     story = db.query_one(
         "SELECT s.*, u.story_audience FROM stories AS s "
         "JOIN users AS u ON u.id = s.user_id WHERE s.id = ? AND s.status = 'live'",
@@ -4138,23 +4215,94 @@ def view_story(story_id: str, user: dict = Depends(current_user)):
     if story is None:
         raise HTTPException(404, "Story not found")
 
-    # Same audience rule list_stories enforces before a story is ever shown
-    # — without it, anyone who has (or guesses) a live story_id can register
-    # a view directly, regardless of the author's contacts/except/only
-    # setting, and get silently counted in the author's viewer list.
-    is_author = story["user_id"] == user["id"]
+    is_author = story["user_id"] == user_id
     if not is_author and not (
-        chatstore.shares_chat_with(user["id"], story["user_id"])
-        and _story_audience_allows(story["user_id"], story["story_audience"], user["id"])
+        chatstore.shares_chat_with(user_id, story["user_id"])
+        and _story_audience_allows(story["user_id"], story["story_audience"], user_id)
     ):
         raise HTTPException(404, "Story not found")
+    return story
 
+
+@app.post("/stories/{story_id}/view")
+def view_story(story_id: str, user: dict = Depends(current_user)):
+    story = _visible_live_story_or_404(story_id, user["id"])
     db.execute(
         "INSERT OR IGNORE INTO story_views (story_id, user_id, viewed_at) VALUES (?, ?, ?)",
         (story_id, user["id"], time.time()),
     )
     total = db.query_one("SELECT COUNT(*) AS total FROM story_views WHERE story_id = ?", (story_id,))
     return {"views": total["total"]}
+
+
+@app.get("/stories/{story_id}/viewers")
+def list_story_viewers(story_id: str, user: dict = Depends(current_user)):
+    """Who has seen it and when — author-only, same as /reactions below;
+    list_my_stories' view_count is just COUNT(*) of this same table."""
+    story = db.query_one("SELECT user_id FROM stories WHERE id = ?", (story_id,))
+    if story is None or story["user_id"] != user["id"]:
+        raise HTTPException(404, "Story not found")
+    rows = db.query_all(
+        """
+        SELECT v.user_id, v.viewed_at, u.name, u.avatar_letter, u.color, u.avatar_attachment_id
+        FROM story_views AS v JOIN users AS u ON u.id = v.user_id
+        WHERE v.story_id = ? ORDER BY v.viewed_at DESC
+        """,
+        (story_id,),
+    )
+    return [dict(row) for row in rows]
+
+
+@app.post("/stories/{story_id}/react")
+async def react_to_story(story_id: str, request: ReactRequest, user: dict = Depends(current_user)):
+    """
+    One reaction per viewer, upserted — sending a second emoji replaces the
+    first rather than stacking, unlike a message's reactions (see
+    story_reactions' schema comment in db.py for why). The author can't
+    react to their own story, same rule view_story's sender check would
+    apply if there were one to reuse — nothing here needs to distinguish
+    "the author looked" from "someone reacted."
+    """
+    story = _visible_live_story_or_404(story_id, user["id"])
+    if story["user_id"] == user["id"]:
+        raise HTTPException(400, "You cannot react to your own story")
+
+    db.execute(
+        """
+        INSERT INTO story_reactions (story_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT (story_id, user_id) DO UPDATE SET emoji = excluded.emoji, created_at = excluded.created_at
+        """,
+        (story_id, user["id"], request.emoji, time.time()),
+    )
+    await hub.send_to_user(story["user_id"], {
+        "type": "story_reaction", "story_id": story_id,
+        "user_id": user["id"], "name": user["name"], "emoji": request.emoji,
+    })
+    return {"emoji": request.emoji}
+
+
+@app.delete("/stories/{story_id}/react")
+def remove_story_reaction(story_id: str, user: dict = Depends(current_user)):
+    db.execute("DELETE FROM story_reactions WHERE story_id = ? AND user_id = ?", (story_id, user["id"]))
+    return {"removed": True}
+
+
+@app.get("/stories/{story_id}/reactions")
+def list_story_reactions(story_id: str, user: dict = Depends(current_user)):
+    """Who reacted with what — author-only, same privacy level view_count
+    already has (list_my_stories, not the public list_stories, carries it)."""
+    story = db.query_one("SELECT user_id FROM stories WHERE id = ?", (story_id,))
+    if story is None or story["user_id"] != user["id"]:
+        raise HTTPException(404, "Story not found")
+    rows = db.query_all(
+        """
+        SELECT r.user_id, r.emoji, r.created_at, u.name, u.avatar_letter, u.color, u.avatar_attachment_id
+        FROM story_reactions AS r JOIN users AS u ON u.id = r.user_id
+        WHERE r.story_id = ? ORDER BY r.created_at DESC
+        """,
+        (story_id,),
+    )
+    return [dict(row) for row in rows]
 
 
 @app.delete("/stories/{story_id}")
@@ -4818,6 +4966,24 @@ async def websocket_endpoint(socket: WebSocket, ticket: str = Query(default=""))
                 # The client drives the heartbeat. A reply proves the link is
                 # alive in both directions, not just that the socket is open.
                 await socket.send_json({"type": "pong", "at": time.time()})
+
+            elif kind == "focus":
+                # The client reports actual foreground/background state (see
+                # the visibilitychange listener in useRealtime.js) — merely
+                # having a socket open no longer counts as "online" on its
+                # own; see Hub.is_online's docstring. Only broadcast when
+                # this device's change
+                # actually flips the account's overall answer, so switching
+                # tabs on a multi-device session doesn't spam presence
+                # events for devices that don't change anything.
+                focused = bool(payload.get("focused"))
+                changed = await hub.set_focus(user_id, socket, focused)
+                if not focused:
+                    # Plain sync db call on purpose — see the matching note
+                    # a few lines up on the connect-time last_seen update.
+                    db.execute("UPDATE users SET last_seen = ? WHERE id = ?", (time.time(), user_id))
+                if changed:
+                    await hub.broadcast_presence(user_id, online=focused)
 
             elif kind == "typing":
                 chat_id = payload.get("chat_id", "")
