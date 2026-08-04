@@ -1,0 +1,24 @@
+# Never cache the service worker or the HTML shell. Both must always be
+# revalidated on every request — without this, a shared-hosting file
+# manager upload (Hostinger, here) can keep serving a browser the OLD
+# service-worker.js indefinitely after a real deploy with an actual bug
+# fix in it, since the browser's own update check for a service worker is
+# itself subject to whatever caching this file's HTTP response allows.
+# index.html gets the same treatment for the same reason: it's the one
+# file that names which hashed JS/CSS bundle is current.
+<IfModule mod_headers.c>
+  <FilesMatch "^(service-worker\.js|index\.html)$">
+    Header set Cache-Control "no-cache, no-store, must-revalidate"
+    Header set Pragma "no-cache"
+    Header set Expires "0"
+  </FilesMatch>
+
+  # The hashed bundle in assets/ is the opposite case: a new build always
+  # produces new filenames, so a cached copy of an old one is never stale
+  # — safe to cache aggressively for a whole year. Explicitly excludes
+  # service-worker.js (matched above instead) even though it also ends in
+  # .js, so the two rules can't fight over which one wins.
+  <FilesMatch "^(?!service-worker\.js$).+\.(js|css)$">
+    Header set Cache-Control "public, max-age=31536000, immutable"
+  </FilesMatch>
+</IfModule>
