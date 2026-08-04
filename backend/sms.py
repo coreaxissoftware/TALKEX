@@ -42,10 +42,21 @@ logger = logging.getLogger("talkex.sms")
 
 
 def _config():
+    """
+    db.get_setting(key, default) only falls back to `default` when the row
+    is entirely ABSENT — a row that exists with value '' (an integration
+    saved once, then cleared from the superadmin panel, or a blank field
+    submitted by mistake) is a real, present value as far as get_setting is
+    concerned, and gets returned as-is instead of falling through to the
+    env var. That silently re-triggers the "no provider configured" dev
+    fallback below (logs the OTP to the console, reports success) even
+    though a real env var is sitting right there unused — `or` here treats
+    a blank saved setting the same as one that was never saved at all.
+    """
     return (
-        db.get_setting("msg91_auth_key", os.environ.get("MSG91_AUTH_KEY", "")),
-        db.get_setting("msg91_template_id", os.environ.get("MSG91_TEMPLATE_ID", "")),
-        db.get_setting("msg91_var_name", os.environ.get("MSG91_VAR_NAME", "var")),
+        db.get_setting("msg91_auth_key") or os.environ.get("MSG91_AUTH_KEY", ""),
+        db.get_setting("msg91_template_id") or os.environ.get("MSG91_TEMPLATE_ID", ""),
+        db.get_setting("msg91_var_name") or os.environ.get("MSG91_VAR_NAME", "var"),
     )
 
 

@@ -26,11 +26,16 @@ logger = logging.getLogger("talkex.email")
 
 
 def _config():
-    api_key = db.get_setting("mailgun_api_key", os.environ.get("MAILGUN_API_KEY", ""))
-    domain = db.get_setting("mailgun_domain", os.environ.get("MAILGUN_DOMAIN", ""))
-    base_url = db.get_setting("mailgun_base_url", os.environ.get("MAILGUN_BASE_URL", "https://api.mailgun.net"))
+    # `or`, not get_setting's own `default` param — see sms.py's _config
+    # for why: get_setting only falls back to a default when the row is
+    # entirely ABSENT, so a setting saved once and later cleared to '' from
+    # the superadmin panel would otherwise silently shadow a real env var
+    # instead of falling through to it.
+    api_key = db.get_setting("mailgun_api_key") or os.environ.get("MAILGUN_API_KEY", "")
+    domain = db.get_setting("mailgun_domain") or os.environ.get("MAILGUN_DOMAIN", "")
+    base_url = db.get_setting("mailgun_base_url") or os.environ.get("MAILGUN_BASE_URL", "https://api.mailgun.net")
     default_sender = f"TalkEx <noreply@{domain}>" if domain else ""
-    sender = db.get_setting("mailgun_from", os.environ.get("MAILGUN_FROM", default_sender))
+    sender = db.get_setting("mailgun_from") or os.environ.get("MAILGUN_FROM", default_sender)
     return api_key, domain, base_url, sender
 
 

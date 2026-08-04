@@ -4914,3 +4914,22 @@ def test_email_otp_request_surfaces_502_when_the_provider_fails(client, monkeypa
     monkeypatch.setattr(main, "client_ip", lambda request: fake_client_ip())
     response = client.post("/me/email/request-otp", headers=alice, json={"email": "fails@example.com"})
     assert response.status_code == 502
+
+
+def test_a_blank_saved_integration_setting_falls_back_to_the_env_var(monkeypatch):
+    """
+    Another real regression this class of bug already produced once: a
+    setting saved to the DB (via the superadmin Integrations panel) and
+    later cleared to '' is a PRESENT row as far as db.get_setting is
+    concerned, not an absent one — get_setting's own `default` param only
+    applies when the row doesn't exist at all, so passing the env var as
+    that default silently does nothing once a blank row exists. sms.py and
+    email_delivery.py's _config() must fall through to the env var for a
+    blank saved value the same as they would for no saved value at all.
+    """
+    monkeypatch.setenv("MSG91_AUTH_KEY", "env-authkey")
+    monkeypatch.setattr(db, "get_setting", lambda key, default=None: "")
+
+    import sms
+    auth_key, _template_id, _var_name = sms._config()
+    assert auth_key == "env-authkey"
