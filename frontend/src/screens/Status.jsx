@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Contacts, Me, Stories, Uploads } from "../api.js";
+import { Chats, Contacts, Me, Stories, Uploads } from "../api.js";
 import {
   Av, Button, Field, G, I, Spinner, countdown, localInputToUnix, whenLabel,
 } from "../ui.jsx";
+import { MoreMenu } from "./CallOverlay.jsx";
 
 const BACKGROUNDS = [
   "linear-gradient(135deg,#6366f1,#4f46e5)",
@@ -582,6 +583,8 @@ function Viewer({ story, me, toast, onClose }) {
   const isMedia = story.kind === "photo" || story.kind === "video" || story.kind === "audio";
   const isAuthor = story.user_id === me.id;
   const [myReaction, setMyReaction] = useState(null);
+  const [showMore, setShowMore] = useState(false);
+  const [forwarding, setForwarding] = useState(false);
   // Author-only: who's seen it and who reacted, merged into one list —
   // loaded lazily since a viewer who isn't the author would just get a 404
   // for both calls.
@@ -610,12 +613,74 @@ function Viewer({ story, me, toast, onClose }) {
     }
   }
 
+  const copyableText = story.kind === "link"
+    ? (story.link_url || story.text || "")
+    : story.kind === "text" ? story.text : "";
+
+  async function copyStory() {
+    try {
+      await navigator.clipboard.writeText(copyableText);
+      toast?.("Copied");
+    } catch {
+      toast?.("Could not copy");
+    }
+  }
+
+  async function shareStory() {
+    try {
+      if (isMedia && story.attachment_id) {
+        const blobUrl = await Uploads.fetchBlobUrl(story.attachment_id);
+        const blob = await fetch(blobUrl).then((r) => r.blob());
+        const file = new File([blob], `status.${blob.type.split("/")[1] || "bin"}`, { type: blob.type });
+        if (navigator.canShare?.({ files: [file] })) {
+          await navigator.share({ files: [file], text: story.text || undefined });
+          return;
+        }
+      }
+      if (navigator.share) {
+        await navigator.share({ text: copyableText || story.text || "Check out this status on TalkEx" });
+      } else {
+        await navigator.clipboard.writeText(copyableText || story.text);
+        toast?.("Copied — sharing isn't supported in this browser");
+      }
+    } catch (problem) {
+      if (problem?.name !== "AbortError") toast?.("Could not share");
+    }
+  }
+
+  async function deleteThisStory() {
+    if (!window.confirm("Delete this status? This can't be undone.")) return;
+    try {
+      await Stories.delete(story.id);
+      toast?.("Deleted");
+      onClose();
+    } catch (problem) {
+      toast?.(problem.message || "Could not delete");
+    }
+  }
+
+  const moreItems = [
+    { label: "Forward", icon: I.fwd("#fff", 18), onClick: () => setForwarding(true) },
+    { label: "Share", icon: I.send("#fff", 18), onClick: shareStory },
+    ...(copyableText ? [{ label: "Copy", icon: I.link("#fff", 18), onClick: copyStory }] : []),
+    ...(isAuthor ? [{ label: "Delete", icon: I.trash("#ff8080", 18), onClick: deleteThisStory }] : []),
+  ];
+
   return (
     <div onClick={onClose} style={{
       position: "fixed", inset: 0, background: isMedia ? "#000" : (story.background || G.bg),
       zIndex: 70, display: "flex", flexDirection: "column",
       alignItems: "center", justifyContent: "center", padding: 30,
     }}>
+      <div onClick={(event) => { event.stopPropagation(); setShowMore(true); }} title="More"
+           style={{
+             position: "absolute", top: 16, right: 16, zIndex: 1,
+             width: 34, height: 34, borderRadius: "50%", cursor: "pointer",
+             background: "#ffffff1a", display: "flex", alignItems: "center", justifyContent: "center",
+           }}>
+        {I.moreVertical("#fff", 18)}
+      </div>
+
       {(story.kind === "photo" || story.kind === "video") && (
         <div onClick={(event) => event.stopPropagation()}>
           <StoryMedia story={story}/>
@@ -687,6 +752,77 @@ function Viewer({ story, me, toast, onClose }) {
         <StoryActivitySheet activity={activity}
                              onClose={() => setActivityOpen(false)}/>
       )}
+
+      {showMore && <MoreMenu items={moreItems} onClose={() => setShowMore(false)}/>}
+
+      {forwarding && (
+        <StoryForwardSheet story={story} onClose={() => setForwarding(false)}
+                           onDone={() => { setForwarding(false); toast?.("Sent"); }} toast={toast}/>
+      )}
+    </div>
+  );
+}
+
+/** Send a status update into one or more chats as an ordinary message —
+ * same chat-picker shape ChatView's own ForwardSheet uses for a message. */
+function StoryForwardSheet({ story, onClose, onDone, toast }) {
+  const [chats, setChats] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState([]);
+  const [sending, setSending] = useState(false);
+
+  useEffect(() => {
+    Chats.list().then(setChats).catch(() => {}).finally(() => setLoading(false));
+  }, []);
+
+  function toggle(chatId) {
+    setSelected((current) =>
+      current.includes(chatId) ? current.filter((id) => id !== chatId) : [...current, chatId]);
+  }
+
+  async function send() {
+    if (!selected.length) return;
+    setSending(true);
+    try {
+      await Stories.forward(story.id, selected);
+      onDone();
+    } catch (problem) {
+      toast?.(problem.message || "Could not forward");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "#000000aa", zIndex: 80,
+      display: "flex", alignItems: "flex-end", justifyContent: "center",
+    }}>
+      <div onClick={(event) => event.stopPropagation()} style={{
+        width: "100%", maxWidth: 430, maxHeight: "70vh", background: G.surface,
+        padding: 20, borderTopLeftRadius: 22, borderTopRightRadius: 22,
+        display: "flex", flexDirection: "column",
+      }}>
+        <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 14 }}>Forward to…</div>
+        {loading ? <Spinner small/> : (
+          <div style={{ overflowY: "auto", marginBottom: 14 }}>
+            {chats.map((target) => (
+              <label key={target.id} style={{
+                display: "flex", alignItems: "center", gap: 10, padding: "9px 4px",
+                cursor: "pointer", borderBottom: `1px solid ${G.border}`,
+              }}>
+                <input type="checkbox" checked={selected.includes(target.id)}
+                       onChange={() => toggle(target.id)}/>
+                <Av av={target.avatar_letter} color={target.color} size={32} photoId={target.avatar_attachment_id}/>
+                <div style={{ fontSize: 14 }}>{target.name || "Direct message"}</div>
+              </label>
+            ))}
+          </div>
+        )}
+        <Button onClick={send} disabled={!selected.length || sending} style={{ width: "100%" }}>
+          {sending ? "Forwarding…" : `Forward${selected.length ? ` (${selected.length})` : ""}`}
+        </Button>
+      </div>
     </div>
   );
 }

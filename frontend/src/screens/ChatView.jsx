@@ -1,12 +1,12 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Actions, Chats, Contacts, Me, Meetings, Messages, Pins, Report, Scheduled, Search, Uploads, Users,
-  sendReliably, sendFileReliably, newClientMessageId,
+  sendReliably, sendFileReliably, newClientMessageId, meetingLink,
 } from "../api.js";
 import * as offlineDb from "../offlineDb.js";
 import {
   Av, Button, ChatBackdrop, ContextMenu, EMOJIS, EMOJI_GROUPS, Field, G, I, SRow, Spinner, Toggle,
-  clockTime, countdown, durationLabel, localInputToUnix, whenLabel,
+  clockTime, countdown, durationLabel, lastSeenLabel, localInputToUnix, whenLabel,
 } from "../ui.jsx";
 import { useVoiceRecorder } from "../useVoiceRecorder.js";
 import { canvasToPdfBlob } from "../imageToPdf.js";
@@ -15,6 +15,7 @@ import { shouldAutoDownload } from "../mediaPrefs.js";
 import CameraCapture from "../CameraCapture.jsx";
 import { COUNTRY_CODES, flagFor, samplePlaceholder, splitPhone } from "../countryCodes.js";
 import LocationMap from "../LocationMap.jsx";
+import PhotoEditor from "../PhotoEditor.jsx";
 
 const SLOW_MODE_CHOICES = [
   { label: "Off", seconds: 0 },
@@ -1313,7 +1314,8 @@ function Header({ chat, typing, onBack, onTimer, onMeeting, onInfo, onVoiceCall,
           }}>
             {label
               ? label
-              : chat.type === "dm" ? (chat.peer_online ? "online" : "offline")
+              : chat.type === "dm"
+              ? (chat.peer_online ? "online" : (lastSeenLabel(chat.peer_last_seen) || "offline"))
               : chat.description ? chat.description
               : chat.type}
           </div>
@@ -1577,7 +1579,7 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead,
   if (message.kind === "meeting") {
     return <MeetingCard message={message} mine={mine}
                         update={meetingUpdates?.[message.payload?.meeting_id]}
-                        onJoin={onJoinMeeting}/>;
+                        onJoin={onJoinMeeting} toast={toast}/>;
   }
 
   // Stickers render borderless, without the chat-bubble background — same
@@ -2163,9 +2165,23 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function MeetingCard({ message, mine, update, onJoin }) {
+function MeetingCard({ message, mine, update, onJoin, toast }) {
   const [meeting, setMeeting] = useState(null);
   const meetingId = message.payload?.meeting_id;
+
+  async function shareLink() {
+    const url = meetingLink(meetingId);
+    try {
+      if (navigator.share) {
+        await navigator.share({ url, text: `Join "${meeting?.title || "this meeting"}" on TalkEx` });
+      } else {
+        await navigator.clipboard.writeText(url);
+        toast?.("Meeting link copied");
+      }
+    } catch (problem) {
+      if (problem?.name !== "AbortError") toast?.("Could not share the link");
+    }
+  }
 
   useEffect(() => {
     if (meetingId) Meetings.get(meetingId).then(setMeeting).catch(() => {});
@@ -2211,8 +2227,17 @@ function MeetingCard({ message, mine, update, onJoin }) {
 
         {meeting && (
           <>
-            <div style={{ fontSize: 12, color: G.accentText, margin: "8px 0" }}>
-              {meeting.going_count} going · status {meeting.status}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "8px 0" }}>
+              <div style={{ fontSize: 12, color: G.accentText }}>
+                {meeting.going_count} going · status {meeting.status}
+              </div>
+              {meeting.status !== "cancelled" && meeting.status !== "ended" && (
+                <div onClick={shareLink} title="Copy/share meeting link"
+                     style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", color: G.accentText }}>
+                  {I.link(G.accentText, 14)}
+                  <span style={{ fontSize: 11.5, fontWeight: 600 }}>Link</span>
+                </div>
+              )}
             </div>
 
             {meeting.status === "scheduled" && (
@@ -3011,11 +3036,20 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
   const [sending, setSending] = useState(false);
   const [previewUrl, setPreviewUrl] = useState(null);
   const [viewOnce, setViewOnce] = useState(false);
+  const [editing, setEditing] = useState(false);
+  // Editing replaces this sheet's own working copy of the file(s) — the
+  // caller's original array is left alone, so cancelling an edit can't
+  // ever lose or mutate what was actually picked.
+  const [workingFiles, setWorkingFiles] = useState(files);
 
-  const firstFile = files[0];
+  const firstFile = workingFiles[0];
   const isImage = firstFile?.type.startsWith("image/");
   const isVideo = firstFile?.type.startsWith("video/");
-  const canViewOnce = files.length === 1 && (isImage || isVideo);
+  const canViewOnce = workingFiles.length === 1 && (isImage || isVideo);
+  // Editing a whole multi-photo batch at once isn't offered — one photo at
+  // a time keeps the crop/filter tool's scope to what it can actually do
+  // well, rather than a half-built "apply to all" mode.
+  const canEdit = workingFiles.length === 1 && isImage;
 
   useEffect(() => {
     if (!isImage && !isVideo) return;
@@ -3028,22 +3062,38 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
   async function send() {
     setSending(true);
     try {
-      await onSend(files, kindOverride, caption.trim(), viewOnce);
+      await onSend(workingFiles, kindOverride, caption.trim(), viewOnce);
       onClose();
     } finally {
       setSending(false);
     }
   }
 
+  if (editing) {
+    return (
+      <PhotoEditor file={firstFile} onCancel={() => setEditing(false)}
+                   onDone={(edited) => { setWorkingFiles([edited]); setEditing(false); }}/>
+    );
+  }
+
   return (
-    <Sheet title={files.length > 1 ? `${files.length} files` : (firstFile?.name || "Send file")}
+    <Sheet title={workingFiles.length > 1 ? `${workingFiles.length} files` : (firstFile?.name || "Send file")}
            onClose={onClose}>
       <div style={{ display: "flex", justifyContent: "center", marginBottom: 14, position: "relative" }}>
         {isImage && previewUrl ? (
-          <img src={previewUrl} alt={firstFile?.name ? `Preview of ${firstFile.name}` : "Selected photo preview"} style={{
-            maxWidth: "100%", maxHeight: 220, borderRadius: 10,
-            filter: viewOnce ? "blur(14px)" : "none",
-          }}/>
+          <>
+            <img src={previewUrl} alt={firstFile?.name ? `Preview of ${firstFile.name}` : "Selected photo preview"} style={{
+              maxWidth: "100%", maxHeight: 220, borderRadius: 10,
+              filter: viewOnce ? "blur(14px)" : "none",
+            }}/>
+            {canEdit && (
+              <div onClick={() => setEditing(true)} title="Edit photo" style={{
+                position: "absolute", top: 6, right: 6, width: 32, height: 32, borderRadius: "50%",
+                background: "#00000099", display: "flex", alignItems: "center", justifyContent: "center",
+                cursor: "pointer",
+              }}>{I.edit("#fff", 16)}</div>
+            )}
+          </>
         ) : isVideo && previewUrl ? (
           <video src={previewUrl} controls style={{
             maxWidth: "100%", maxHeight: 220, borderRadius: 10,
@@ -3053,7 +3103,7 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
           <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0" }}>
             {I.doc(G.accent, 28)}
             <div style={{ fontSize: 13.5 }}>
-              {files.length > 1 ? `${files.length} files selected` : firstFile?.name}
+              {workingFiles.length > 1 ? `${workingFiles.length} files selected` : firstFile?.name}
             </div>
           </div>
         )}
@@ -3088,7 +3138,7 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
              placeholder="Add a caption…"/>
 
       <Button onClick={send} disabled={sending} style={{ width: "100%" }}>
-        {sending ? "Sending…" : files.length > 1 ? `Send ${files.length}` : "Send"}
+        {sending ? "Sending…" : workingFiles.length > 1 ? `Send ${workingFiles.length}` : "Send"}
       </Button>
     </Sheet>
   );

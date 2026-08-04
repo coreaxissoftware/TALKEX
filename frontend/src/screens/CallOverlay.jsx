@@ -111,7 +111,7 @@ export function MoreMenu({ items, onClose }) {
  * property of the chat screen, it can interrupt anything.
  */
 export default function CallOverlay({
-  call, onAccept, onReject, onEnd, onToggleMute, onToggleCamera, onShareScreen,
+  call, onAccept, onReject, onEnd, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen,
 }) {
   const [sinkId, setSinkId] = useState(undefined);
   const { expanded, toggle, isDesktop } = useCallLayout();
@@ -143,6 +143,7 @@ export default function CallOverlay({
       {call.phase === "outgoing" && <OutgoingCall call={call} onEnd={onEnd}/>}
       {call.phase === "active" && (
         <ActiveCall call={call} onEnd={onEnd} onToggleMute={onToggleMute} onToggleCamera={onToggleCamera}
+                    onSwitchCamera={onSwitchCamera}
                     onShareScreen={onShareScreen} sinkId={sinkId} onSinkId={setSinkId}/>
       )}
     </div>
@@ -194,7 +195,11 @@ function OutgoingCall({ call, onEnd }) {
   return (
     <>
       <div style={{ flex: 1 }}>
-        <PeerIdentity call={call} subtitle="Calling…"/>
+        {/* "Ringing" rather than "Calling" — the invite is already on its
+            way to them over the socket by the time this phase renders at
+            all, so this is describing what's happening on THEIR end
+            (their phone is ringing), not a still-connecting state on ours. */}
+        <PeerIdentity call={call} subtitle="Ringing…"/>
       </div>
       <div style={{ display: "flex", justifyContent: "center", padding: "0 40px 60px" }}>
         <CallButton onClick={onEnd} background="#ef4444" icon={I.callEnd("#fff", 24)} label="Cancel"/>
@@ -203,7 +208,7 @@ function OutgoingCall({ call, onEnd }) {
   );
 }
 
-function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onShareScreen, sinkId, onSinkId }) {
+function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen, sinkId, onSinkId }) {
   const [showSpeakerPicker, setShowSpeakerPicker] = useState(false);
   const [showMore, setShowMore] = useState(false);
   // The remote peer's OWN video state, not mine — turning my camera off
@@ -233,11 +238,21 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onShareScreen, 
         )}
 
         {call.callKind === "video" && !call.cameraOff && call.localStream && (
-          <VideoTag stream={call.localStream} muted style={{
-            position: "absolute", bottom: 16, right: 16,
-            width: 100, height: 140, borderRadius: 12, objectFit: "cover",
-            border: "2px solid #ffffff33",
-          }}/>
+          <div style={{ position: "absolute", bottom: 16, right: 16 }}>
+            <VideoTag stream={call.localStream} muted style={{
+              width: 100, height: 140, borderRadius: 12, objectFit: "cover",
+              border: "2px solid #ffffff33",
+            }}/>
+            {onSwitchCamera && (
+              <div onClick={onSwitchCamera} title="Switch camera" style={{
+                position: "absolute", top: 6, right: 6, width: 28, height: 28, borderRadius: "50%",
+                background: "#00000099", display: "flex", alignItems: "center", justifyContent: "center",
+                cursor: "pointer",
+              }}>
+                {I.rotateRight("#fff", 15)}
+              </div>
+            )}
+          </div>
         )}
 
         {call.sharingScreen && (

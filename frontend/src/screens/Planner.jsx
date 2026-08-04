@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Chats, Meetings, Scheduled } from "../api.js";
+import { Chats, Meetings, Scheduled, meetingLink } from "../api.js";
 import {
   Button, Field, G, I, Spinner, countdown, localInputToUnix, unixToLocalInput, whenLabel,
 } from "../ui.jsx";
@@ -34,6 +34,20 @@ export default function Planner({ toast, onOpenChat, chats, onJoinCall, me }) {
     const chat = chats.find((candidate) => candidate.id === chatId);
     return chat?.name || (chat?.type === "dm" ? "Direct message" : "chat");
   };
+
+  async function shareLink(meeting) {
+    const url = meetingLink(meeting.id);
+    try {
+      if (navigator.share) {
+        await navigator.share({ url, text: `Join "${meeting.title}" on TalkEx` });
+      } else {
+        await navigator.clipboard.writeText(url);
+        toast("Meeting link copied");
+      }
+    } catch (problem) {
+      if (problem?.name !== "AbortError") toast("Could not share the link");
+    }
+  }
 
   // "Join now" always goes through /start first — a no-op if it's already
   // live, but the thing that actually moves a still-scheduled meeting there
@@ -146,6 +160,13 @@ export default function Planner({ toast, onOpenChat, chats, onJoinCall, me }) {
                 <div style={{ flex: 1, fontSize: 12, color: G.muted }}>
                   in {chatName(meeting.chat_id)} · {meeting.going_count} going
                 </div>
+                {meeting.status !== "cancelled" && meeting.status !== "ended" && (
+                  <div onClick={() => shareLink(meeting)} title="Copy/share meeting link"
+                       style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer" }}>
+                    {I.link(G.accentText, 14)}
+                    <span style={{ fontSize: 11.5, color: G.accentText }}>Link</span>
+                  </div>
+                )}
                 <div onClick={() => Meetings.downloadIcs(meeting.id)}
                      title="Add to calendar (.ics)"
                      style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer" }}>

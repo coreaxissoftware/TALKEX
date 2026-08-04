@@ -64,7 +64,7 @@ from models import (
     CreateCannedReplyRequest, CreateChannelRequest, CreateCommunityRequest, CreateGroupRequest,
     CreateMeetingRequest, CreateSubChannelRequest, CreateTemplateRequest, CreateWebhookRequest,
     CreateBreakoutRoomsRequest, DisappearingRequest, InstantMeetingRequest,
-    EditMessageRequest, ForwardRequest, LiveLocationUpdateRequest, LoginRequest,
+    EditMessageRequest, ForwardRequest, ForwardStoryRequest, LiveLocationUpdateRequest, LoginRequest,
     PushSubscribeRequest, PushUnsubscribeRequest, ReactRequest, ReadRequest,
     RegisterRequest, RemoveTwoStepRequest, RequestEmailOtpRequest, RequestOtpRequest,
     ReportRequest, RescheduleRequest, RsvpRequest,
@@ -1993,7 +1993,7 @@ def list_chats(user: dict = Depends(current_user),
         for row in db.query_all(
             f"""
             SELECT cm.chat_id, u.id AS peer_id, u.name, u.color, u.avatar_letter,
-                   u.avatar_attachment_id
+                   u.avatar_attachment_id, u.last_seen, u.show_last_seen
             FROM chat_members AS cm
             JOIN chats AS c ON c.id = cm.chat_id AND c.type = 'dm'
             JOIN users AS u ON u.id = cm.user_id
@@ -2024,6 +2024,11 @@ def list_chats(user: dict = Depends(current_user),
             chat["avatar_attachment_id"] = peer["avatar_attachment_id"]
             chat["peer_id"] = peer["peer_id"]
             chat["peer_online"] = hub.is_online(peer["peer_id"])
+            # Same privacy gate public_user() already applies elsewhere —
+            # withholding the timestamp for someone who turned last-seen
+            # off has to actually happen here too, not just when their
+            # profile is fetched directly.
+            chat["peer_last_seen"] = peer["last_seen"] if peer["show_last_seen"] else None
 
         last = last_messages.get(chat["id"])
         chat["last_message"] = (
@@ -4303,6 +4308,62 @@ def list_story_reactions(story_id: str, user: dict = Depends(current_user)):
         (story_id,),
     )
     return [dict(row) for row in rows]
+
+
+# A story has no message "kind" of its own — text/photo/video/audio/link —
+# so forwarding maps each onto the closest chat message kind. "audio"
+# becomes a voice message and "link" becomes plain text with the URL
+# folded in, since neither exists as its own message kind (see MessageKind
+# in models.py).
+_STORY_KIND_TO_MESSAGE_KIND = {
+    "text": "text", "photo": "photo", "video": "video", "audio": "voice", "link": "text",
+}
+
+
+@app.post("/stories/{story_id}/forward")
+async def forward_story(story_id: str, request: ForwardStoryRequest, user: dict = Depends(current_user)):
+    """Send a status update into one or more chats as an ordinary message —
+    same visibility rule as viewing/reacting (_visible_live_story_or_404),
+    and the same attachment-duplication forward_message uses for a photo/
+    video message, since an attachment row is a single-message binding."""
+    story = _visible_live_story_or_404(story_id, user["id"])
+
+    text = story["text"] or ""
+    if story["kind"] == "link" and story["link_url"] and story["link_url"] not in text:
+        text = f"{text}\n{story['link_url']}".strip()
+    message_kind = _STORY_KIND_TO_MESSAGE_KIND.get(story["kind"], "text")
+    original_attachment_id = story["attachment_id"]
+
+    sent = []
+    for target_chat_id in request.to_chat_ids:
+        if not chatstore.is_member(target_chat_id, user["id"]):
+            continue
+
+        message, created = chatstore.insert_message(
+            chat_id=target_chat_id,
+            sender_id=user["id"],
+            text=text,
+            kind=message_kind,
+            payload=None,
+            forwarded_from="Status",
+        )
+        if not created:
+            sent.append(message)
+            continue
+
+        if original_attachment_id:
+            new_attachment_id = uploads.duplicate_for_message(original_attachment_id, message["id"])
+            if new_attachment_id:
+                payload = {"attachment_id": new_attachment_id}
+                db.execute("UPDATE messages SET payload = ? WHERE id = ?",
+                          (json.dumps(payload), message["id"]))
+                message = chatstore.serialise_message(
+                    db.query_one("SELECT * FROM messages WHERE id = ?", (message["id"],)), user["id"])
+
+        await hub.send_to_chat(target_chat_id, {"type": "message", "message": message})
+        sent.append(message)
+
+    return sent
 
 
 @app.delete("/stories/{story_id}")

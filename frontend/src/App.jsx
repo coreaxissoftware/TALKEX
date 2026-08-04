@@ -204,6 +204,24 @@ export default function App() {
       .catch((problem) => toast(problem.message || "That call link is invalid or expired"));
   }, [me]);
 
+  // A meeting's "Copy link" button (Planner/ChatView) shares
+  // ?meeting=<id> — same idea as ?invite= above, just for jumping straight
+  // to an already-scheduled meeting's chat instead of joining a new one.
+  // Unlike an invite link this never grants NEW chat access — GET
+  // /meetings/{id} still 404s for anyone who isn't already a member, same
+  // as opening the chat any other way. Lands on the chat with the meeting
+  // card right there rather than auto-joining the call sight unseen.
+  useEffect(() => {
+    if (!me) return;
+    const meetingId = new URLSearchParams(window.location.search).get("meeting");
+    if (!meetingId) return;
+    window.history.replaceState(null, "", window.location.pathname);
+    Meetings.get(meetingId)
+      .then((meeting) => Chats.get(meeting.chat_id))
+      .then(setOpenChat)
+      .catch((problem) => toast(problem.message || "That meeting link is invalid or you don't have access"));
+  }, [me]);
+
   // Just a count for the tab badge — Planner itself fetches the real lists.
   // "What have I got waiting" mirrors Planner's own framing of the screen:
   // upcoming meetings plus messages still queued to send.
@@ -289,6 +307,19 @@ export default function App() {
     // Anything that changes a chat's last message or unread count.
     if (["message", "message_deleted", "message_expired", "read"].includes(event.type)) {
       reloadChatsSoon();
+    }
+
+    // A DM peer going online/offline — patched into whichever chat objects
+    // already know that peer_id, live, rather than waiting for the next
+    // reloadChats. Without this, GET /chats' peer_online/peer_last_seen
+    // was only ever as fresh as the last full reload — right after opening
+    // the app, but stale for as long as a chat stayed open after that.
+    if (event.type === "presence") {
+      const patch = (chat) => (chat.peer_id === event.user_id
+        ? { ...chat, peer_online: event.online, peer_last_seen: event.last_seen }
+        : chat);
+      setChats((current) => current.map(patch));
+      setOpenChat((current) => (current ? patch(current) : current));
     }
 
     // Mirrored into the offline store as it arrives, not just when a chat is
@@ -534,11 +565,13 @@ export default function App() {
         <Toast text={toastText}/>
         <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
                      onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
+                     onSwitchCamera={call.switchCamera}
                      onShareScreen={call.shareScreen}/>
         <GroupCallOverlay call={groupCall.call} myUserId={me?.id}
                           onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
                           onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
                           onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
+                          onSwitchCamera={groupCall.switchCamera}
                           onShareScreen={groupCall.shareScreen} onSetScreenOptimization={groupCall.setScreenOptimization} onForceMuteAll={groupCall.forceMuteAll}
                           onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}
                           onToggleWhiteboard={groupCall.toggleWhiteboard} events={events} send={realtime.send}
@@ -610,11 +643,13 @@ export default function App() {
       <Toast text={toastText}/>
       <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
                    onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
+                     onSwitchCamera={call.switchCamera}
                    onShareScreen={call.shareScreen}/>
       <GroupCallOverlay call={groupCall.call} myUserId={me?.id}
                         onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
                         onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
                         onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
+                          onSwitchCamera={groupCall.switchCamera}
                         onShareScreen={groupCall.shareScreen} onSetScreenOptimization={groupCall.setScreenOptimization} onForceMuteAll={groupCall.forceMuteAll}
                         onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}
                         onToggleWhiteboard={groupCall.toggleWhiteboard} events={events} send={realtime.send}
@@ -971,11 +1006,13 @@ function DesktopShell({
       <Toast text={toastText}/>
       <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
                    onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
+                     onSwitchCamera={call.switchCamera}
                    onShareScreen={call.shareScreen}/>
       <GroupCallOverlay call={groupCall.call} myUserId={me?.id}
                         onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
                         onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
                         onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
+                          onSwitchCamera={groupCall.switchCamera}
                         onShareScreen={groupCall.shareScreen} onSetScreenOptimization={groupCall.setScreenOptimization} onForceMuteAll={groupCall.forceMuteAll}
                         onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}
                         onToggleWhiteboard={groupCall.toggleWhiteboard} events={events} send={realtime.send}

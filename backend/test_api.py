@@ -1047,6 +1047,85 @@ def test_only_the_author_can_list_who_viewed(client):
     assert denied.status_code == 404
 
 
+# ── Forwarding a story into a chat ───────────────────────────────────────────
+
+def test_forwarding_a_text_status_into_a_chat(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    dm_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+    story = client.post("/stories", headers=alice, json={"text": "big news"}).json()
+
+    forwarded = client.post(f"/stories/{story['id']}/forward", headers=alice,
+                            json={"to_chat_ids": [dm_id]})
+    assert forwarded.status_code == 200
+    sent = forwarded.json()
+    assert len(sent) == 1
+    assert sent[0]["text"] == "big news"
+    assert sent[0]["kind"] == "text"
+    assert sent[0]["forwarded_from"] == "Status"
+
+    landed = client.get(f"/chats/{dm_id}/messages", headers=bob).json()
+    assert any(m["text"] == "big news" for m in landed)
+
+
+def test_forwarding_a_link_status_folds_the_url_into_the_text(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    dm_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+    story = client.post("/stories", headers=alice, json={
+        "kind": "link", "text": "check this out", "link_url": "https://example.com",
+    }).json()
+
+    forwarded = client.post(f"/stories/{story['id']}/forward", headers=alice,
+                            json={"to_chat_ids": [dm_id]}).json()
+    assert "check this out" in forwarded[0]["text"]
+    assert "https://example.com" in forwarded[0]["text"]
+
+
+def test_forwarding_a_photo_status_duplicates_the_attachment(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    dm_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+    attachment = upload(client, alice).json()
+    story = client.post("/stories", headers=alice, json={
+        "kind": "photo", "attachment_id": attachment["attachment_id"],
+    }).json()
+
+    forwarded = client.post(f"/stories/{story['id']}/forward", headers=alice,
+                            json={"to_chat_ids": [dm_id]}).json()
+    assert forwarded[0]["kind"] == "photo"
+    new_attachment_id = forwarded[0]["payload"]["attachment_id"]
+    assert new_attachment_id != attachment["attachment_id"]
+
+    # Bob (who wasn't the uploader) can still fetch the forwarded copy.
+    assert client.get(f"/uploads/{new_attachment_id}", headers=bob).status_code == 200
+
+
+def test_cannot_forward_a_story_you_cannot_see(client):
+    alice, _, _ = make_user(client, "Alice")
+    mallory, mallory_id, _ = make_user(client, "Mallory")
+    own_chat = client.post("/chats/group", headers=mallory, json={"name": "G"}).json()["id"]
+    story = client.post("/stories", headers=alice, json={"text": "private-ish"}).json()
+
+    denied = client.post(f"/stories/{story['id']}/forward", headers=mallory,
+                         json={"to_chat_ids": [own_chat]})
+    assert denied.status_code == 404
+
+
+def test_forwarding_skips_chats_you_are_not_a_member_of(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    mallory, _, _ = make_user(client, "Mallory")
+    client.post(f"/chats/dm/{bob_id}", headers=alice)
+    story = client.post("/stories", headers=alice, json={"text": "hi"}).json()
+
+    others_chat = client.post("/chats/group", headers=mallory, json={"name": "G"}).json()["id"]
+    forwarded = client.post(f"/stories/{story['id']}/forward", headers=alice,
+                            json={"to_chat_ids": [others_chat]})
+    assert forwarded.status_code == 200
+    assert forwarded.json() == []
+
+
 # ── Disappearing messages ─────────────────────────────────────────────────────
 
 def test_disappearing_message_is_blanked_when_its_timer_runs_out(client):
@@ -4026,6 +4105,26 @@ def test_a_dm_shows_the_peers_avatar(client):
 
     opened = client.get(f"/chats/{chat_id}", headers=alice).json()
     assert opened["avatar_attachment_id"] == bob_avatar_id
+
+
+def test_dm_peer_last_seen_is_visible_by_default(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    dm = next(c for c in client.get("/chats", headers=alice).json() if c["id"] == chat_id)
+    assert dm["peer_last_seen"] is not None
+
+
+def test_dm_peer_last_seen_is_withheld_when_they_turn_it_off(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    client.patch("/me", headers=bob, json={"show_last_seen": False})
+
+    dm = next(c for c in client.get("/chats", headers=alice).json() if c["id"] == chat_id)
+    assert dm["peer_last_seen"] is None
 
 
 # ── Email connect ─────────────────────────────────────────────────────────────

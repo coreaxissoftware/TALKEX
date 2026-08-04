@@ -759,6 +759,7 @@ export const Stories = {
   unreact: (storyId) => remove(`/stories/${storyId}/react`),
   reactions: (storyId) => get(`/stories/${storyId}/reactions`),
   viewers: (storyId) => get(`/stories/${storyId}/viewers`),
+  forward: (storyId, chatIds) => post(`/stories/${storyId}/forward`, { to_chat_ids: chatIds }),
 };
 
 // ── Call history ─────────────────────────────────────────────────────────────
@@ -1042,6 +1043,15 @@ export const Admin = {
   approveTemplate: (templateId) => post(`/admin/templates/${templateId}/approve`),
   rejectTemplate: (templateId) => post(`/admin/templates/${templateId}/reject`),
 };
+
+// A shareable meeting link — App.jsx's ?meeting= handler is the other half
+// of this: opening it lands straight on the meeting's chat. It's still a
+// TalkEx account + chat membership gate underneath (GET /meetings/{id}
+// 404s otherwise), same as opening the chat any other way — this is a
+// convenience shortcut, not a new access grant.
+export function meetingLink(meetingId) {
+  return `${window.location.origin}/?meeting=${meetingId}`;
+}
 
 export function newClientMessageId() {
   return crypto.randomUUID();

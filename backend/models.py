@@ -326,6 +326,10 @@ class ForwardRequest(BaseModel):
     to_chat_ids: list[str] = Field(min_length=1, max_length=32)
 
 
+class ForwardStoryRequest(BaseModel):
+    to_chat_ids: list[str] = Field(min_length=1, max_length=32)
+
+
 class ReadRequest(BaseModel):
     """Mark everything up to and including this sequence number as read."""
     seq: int = Field(ge=0)

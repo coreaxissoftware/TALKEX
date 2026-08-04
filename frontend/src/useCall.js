@@ -116,7 +116,7 @@ export function useCall(events, send, toast) {
       phase: "outgoing", chatId: chat.id, peerId,
       peerName: chat.name, peerAvatar: chat.avatar_letter, peerColor: chat.color,
       callKind, isCaller: true,
-      localStream, remoteStream: null, muted: false, cameraOff: false,
+      localStream, remoteStream: null, muted: false, cameraOff: false, facingMode: "user",
       startedAt: null, duration: 0,
     });
 
@@ -256,7 +256,40 @@ export function useCall(events, send, toast) {
     sendRef.current({
       type: "call_upgrade_offer", to: current.peerId, chat_id: current.chatId, sdp: offer,
     });
-    setCall((c) => (c ? { ...c, callKind: "video", cameraOff: false } : c));
+    setCall((c) => (c ? { ...c, callKind: "video", cameraOff: false, facingMode: "user" } : c));
+  }, []);
+
+  // Flips between front/back camera — a fresh getUserMedia with the
+  // opposite facingMode, swapped in via the same no-renegotiation
+  // replaceTrack trick shareScreen uses below (same track kind, same
+  // m-line). Also swaps the LOCAL preview's track, not just what the peer
+  // receives, so your own mirror shows the new camera too.
+  const switchCamera = useCallback(async () => {
+    const pc = pcRef.current;
+    const current = callRef.current;
+    if (!pc || !current?.localStream || current.sharingScreen) return;
+    const existingTrack = current.localStream.getVideoTracks()[0];
+    if (!existingTrack) return; // voice-only call — nothing to flip
+
+    const nextFacing = current.facingMode === "environment" ? "user" : "environment";
+    let newStream;
+    try {
+      newStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: nextFacing } });
+    } catch {
+      toastRef.current?.("Could not switch camera");
+      return;
+    }
+    const newTrack = newStream.getVideoTracks()[0];
+    newTrack.enabled = existingTrack.enabled; // preserve cameraOff state across the switch
+
+    const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+    await sender?.replaceTrack(newTrack);
+
+    current.localStream.removeTrack(existingTrack);
+    existingTrack.stop();
+    current.localStream.addTrack(newTrack);
+
+    setCall((c) => (c ? { ...c, facingMode: nextFacing } : c));
   }, []);
 
   // Swaps the outgoing video track for a screen-capture track via
@@ -330,7 +363,7 @@ export function useCall(events, send, toast) {
           phase: "incoming", chatId: event.chat_id, peerId: event.from,
           peerName: event.from_name, peerAvatar: event.from_avatar, peerColor: event.from_color,
           callKind: event.call_kind, isCaller: false,
-          localStream: null, remoteStream: null, muted: false, cameraOff: false,
+          localStream: null, remoteStream: null, muted: false, cameraOff: false, facingMode: "user",
           startedAt: null, duration: 0,
         });
         continue;
@@ -405,7 +438,7 @@ export function useCall(events, send, toast) {
   useEffect(() => teardown, [teardown]);
 
   return {
-    call, startCall, acceptIncoming, rejectIncoming, endCall, toggleMute, toggleCamera,
+    call, startCall, acceptIncoming, rejectIncoming, endCall, toggleMute, toggleCamera, switchCamera,
     shareScreen, stopSharingScreen,
   };
 }

@@ -952,6 +952,29 @@ export function whenLabel(seconds) {
   return date.toLocaleDateString([], { day: "numeric", month: "short" }) + " " + clockTime(seconds);
 }
 
+/** "last seen just now" / "5m ago" / "yesterday, 4:20 PM" / a full date —
+ * the WhatsApp-style scale for how precise "when were they last around"
+ * needs to be, which gets coarser the further back it was. */
+export function lastSeenLabel(seconds) {
+  if (!seconds) return "";
+  const now = Date.now() / 1000;
+  const ago = now - seconds;
+  if (ago < 60) return "last seen just now";
+  if (ago < 3600) return `last seen ${Math.round(ago / 60)}m ago`;
+
+  const date = toDate(seconds);
+  const today = new Date();
+  const sameDay = date.toDateString() === today.toDateString();
+  if (sameDay) return `last seen today at ${clockTime(seconds)}`;
+
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (date.toDateString() === yesterday.toDateString()) {
+    return `last seen yesterday at ${clockTime(seconds)}`;
+  }
+  return `last seen ${date.toLocaleDateString([], { day: "numeric", month: "short" })} at ${clockTime(seconds)}`;
+}
+
 export function countdown(seconds) {
   const away = seconds - Date.now() / 1000;
   if (away < 0) return "now";

@@ -180,7 +180,7 @@ function ParticipantsList({ call, isHost, onKick, onClose }) {
  * reason about for no real benefit.
  */
 export default function GroupCallOverlay({
-  call, myUserId, onAccept, onDecline, onLeave, onToggleMute, onToggleCamera, onShareScreen,
+  call, myUserId, onAccept, onDecline, onLeave, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen,
   onSetScreenOptimization,
   onForceMuteAll, onKickParticipant, onAddPeople, onToggleWhiteboard, events, send,
   onSendReaction, onToggleRaiseHand, onToggleCaptions, onCaptionText,
@@ -234,7 +234,7 @@ export default function GroupCallOverlay({
         : call.phase === "waiting"
         ? <WaitingForHost call={call} onLeave={onLeave}/>
         : <ActiveGroupCall call={call} myUserId={myUserId} onLeave={onLeave} onToggleMute={onToggleMute}
-                           onToggleCamera={onToggleCamera} onShareScreen={onShareScreen}
+                           onToggleCamera={onToggleCamera} onSwitchCamera={onSwitchCamera} onShareScreen={onShareScreen}
                            onSetScreenOptimization={onSetScreenOptimization}
                            onForceMuteAll={onForceMuteAll} onKickParticipant={onKickParticipant}
                            onAddPeople={onAddPeople} onToggleWhiteboard={onToggleWhiteboard}
@@ -334,7 +334,7 @@ function LiveCaptions({ enabled, onText }) {
 }
 
 function ActiveGroupCall({
-  call, myUserId, onLeave, onToggleMute, onToggleCamera, onShareScreen,
+  call, myUserId, onLeave, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen,
   onSetScreenOptimization,
   onForceMuteAll, onKickParticipant, onAddPeople, onToggleWhiteboard,
   onSendReaction, onToggleRaiseHand, onToggleCaptions, onCaptionText,
@@ -363,7 +363,7 @@ function ActiveGroupCall({
           height: "100%", display: "grid", gridTemplateColumns: `repeat(${columns}, 1fr)`,
           gap: 2, padding: 2, overflow: "hidden",
         }}>
-          <SelfTile call={call} isHost={isHost}/>
+          <SelfTile call={call} isHost={isHost} onSwitchCamera={onSwitchCamera}/>
           {others.map(([userId, participant]) => (
             <ParticipantTile key={userId} participant={participant} sinkId={sinkId}
                              canKick={isHost} onKick={() => onKickParticipant(userId)}/>
@@ -592,7 +592,7 @@ function ActiveGroupCall({
   );
 }
 
-function SelfTile({ call, isHost }) {
+function SelfTile({ call, isHost, onSwitchCamera }) {
   const showVideo = call.callKind === "video" && !call.cameraOff && call.localStream;
   return (
     <div style={{
@@ -606,6 +606,15 @@ function SelfTile({ call, isHost }) {
       )}
       {call.handRaised && (
         <div style={{ position: "absolute", top: 6, left: 8, fontSize: 18 }}>✋</div>
+      )}
+      {showVideo && onSwitchCamera && (
+        <div onClick={onSwitchCamera} title="Switch camera" style={{
+          position: "absolute", top: 6, right: 6, width: 26, height: 26, borderRadius: "50%",
+          background: "#00000066", display: "flex", alignItems: "center", justifyContent: "center",
+          cursor: "pointer",
+        }}>
+          {I.rotateRight("#fff", 13)}
+        </div>
       )}
       <div style={{
         position: "absolute", bottom: 6, left: 8, fontSize: 11.5, color: "#ffffffcc",

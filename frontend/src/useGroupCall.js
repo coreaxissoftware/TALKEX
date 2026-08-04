@@ -131,7 +131,7 @@ export function useGroupCall(events, send, toast) {
     // same idea as call_error undoing an optimistic join that turns out to
     // be rejected for some other reason.
     setCall((current) => ({
-      phase: "active", chatId, callKind, muted: false, cameraOff: false,
+      phase: "active", chatId, callKind, muted: false, cameraOff: false, facingMode: "user",
       localStream, participants: current?.participants || {},
     }));
 
@@ -196,7 +196,40 @@ export function useGroupCall(events, send, toast) {
       await pc.setLocalDescription(offer);
       sendRef.current({ type: "group_call_offer", chat_id: current.chatId, to: peerId, sdp: offer });
     }));
-    setCall((c) => (c ? { ...c, callKind: "video", cameraOff: false } : c));
+    setCall((c) => (c ? { ...c, callKind: "video", cameraOff: false, facingMode: "user" } : c));
+  }, []);
+
+  // Same idea as useCall.js's switchCamera, applied to every peer connection
+  // in the mesh at once (like shareScreen below does for a screen track) —
+  // one fresh getUserMedia with the opposite facingMode, replaceTrack'd onto
+  // each connection's existing video sender, no renegotiation needed.
+  const switchCamera = useCallback(async () => {
+    const current = callRef.current;
+    if (!current?.localStream || current.sharingScreen) return;
+    const existingTrack = current.localStream.getVideoTracks()[0];
+    if (!existingTrack) return;
+
+    const nextFacing = current.facingMode === "environment" ? "user" : "environment";
+    let newStream;
+    try {
+      newStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: nextFacing } });
+    } catch {
+      toastRef.current?.("Could not switch camera");
+      return;
+    }
+    const newTrack = newStream.getVideoTracks()[0];
+    newTrack.enabled = existingTrack.enabled;
+
+    const senders = Object.values(peersRef.current)
+      .map((pc) => pc.getSenders().find((s) => s.track?.kind === "video"))
+      .filter(Boolean);
+    await Promise.all(senders.map((sender) => sender.replaceTrack(newTrack)));
+
+    current.localStream.removeTrack(existingTrack);
+    existingTrack.stop();
+    current.localStream.addTrack(newTrack);
+
+    setCall((c) => (c ? { ...c, facingMode: nextFacing } : c));
   }, []);
 
   // Same replaceTrack idea as useCall.js's version, but across every peer in
@@ -524,7 +557,7 @@ export function useGroupCall(events, send, toast) {
   }, [events, buildPeerConnection, connectOutward, addParticipant]);
 
   return {
-    call, join, declineIncoming, leave, toggleMute, toggleCamera, shareScreen, setScreenOptimization,
+    call, join, declineIncoming, leave, toggleMute, toggleCamera, switchCamera, shareScreen, setScreenOptimization,
     forceMuteAll, kickParticipant, addPeople, toggleWhiteboard, sendReaction, toggleRaiseHand,
     toggleCaptions, sendCaption, joinBreakoutRoom, returnToMainCall,
     admitParticipant, denyParticipant,
