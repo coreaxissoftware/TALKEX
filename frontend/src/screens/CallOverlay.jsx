@@ -195,11 +195,14 @@ function OutgoingCall({ call, onEnd }) {
   return (
     <>
       <div style={{ flex: 1 }}>
-        {/* "Ringing" rather than "Calling" — the invite is already on its
-            way to them over the socket by the time this phase renders at
-            all, so this is describing what's happening on THEIR end
-            (their phone is ringing), not a still-connecting state on ours. */}
-        <PeerIdentity call={call} subtitle="Ringing…"/>
+        {/* "Calling…" until the server confirms the invite actually
+            reached a live, focused device (call.ringConfirmed, set from
+            the call_ringing event in useCall.js) — only then is "Ringing…"
+            an honest description of what's happening on their end. Before
+            that we genuinely don't know: a logged-out account, a dead
+            connection, or a stale client all look identical from here
+            until either this arrives or the call times out. */}
+        <PeerIdentity call={call} subtitle={call.ringConfirmed ? "Ringing…" : "Calling…"}/>
       </div>
       <div style={{ display: "flex", justifyContent: "center", padding: "0 40px 60px" }}>
         <CallButton onClick={onEnd} background="#ef4444" icon={I.callEnd("#fff", 24)} label="Cancel"/>

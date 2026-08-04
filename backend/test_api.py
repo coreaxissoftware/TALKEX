@@ -2850,6 +2850,33 @@ def test_a_call_invite_reaches_the_dm_peer(client):
             assert event["sdp"] == {"type": "offer", "sdp": "v=0..."}
             assert event["from_name"] == "Alice"
 
+            # Bob's socket is live and focused — the caller gets told the
+            # invite actually reached a real device, not just "we sent it."
+            ringing = alice_socket.receive_json()
+            assert ringing["type"] == "call_ringing"
+            assert ringing["chat_id"] == chat_id
+
+
+def test_call_invite_does_not_confirm_ringing_when_the_callee_has_no_open_socket(client, monkeypatch):
+    """The exact bug report this exists for: a logged-out/unreachable
+    callee must never make the caller's screen say "Ringing…" — nothing is
+    ringing anywhere. call_ringing is the ONLY thing that flips the
+    frontend's label from "Calling…" to "Ringing…" (see CallOverlay.jsx),
+    so simply never sending it is the fix."""
+    alice, alice_id, alice_name = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+    monkeypatch.setattr(main.push, "send", lambda *a, **k: "ok")  # bob has no push subscription anyway
+
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
+        alice_socket.send_json({
+            "type": "call_invite", "to": bob_id, "chat_id": chat_id,
+            "call_kind": "voice", "sdp": {"type": "offer", "sdp": "v=0..."},
+        })
+        # Nothing to receive but this ping's own pong — no call_ringing.
+        alice_socket.send_json({"type": "ping"})
+        assert alice_socket.receive_json()["type"] == "pong"
+
 
 # ── Push fallback for missed calls ──────────────────────────────────────────
 # call_invite/group_call_invite had exactly one delivery path — the live

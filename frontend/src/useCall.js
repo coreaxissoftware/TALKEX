@@ -16,7 +16,7 @@ const RING_TIMEOUT_MS = 30000;
 
 const CALL_EVENT_TYPES = new Set([
   "call_invite", "call_answer", "call_ice", "call_reject", "call_end", "call_busy", "call_error",
-  "call_upgrade_offer", "call_upgrade_answer",
+  "call_upgrade_offer", "call_upgrade_answer", "call_ringing",
 ]);
 
 /**
@@ -118,6 +118,12 @@ export function useCall(events, send, toast) {
       callKind, isCaller: true,
       localStream, remoteStream: null, muted: false, cameraOff: false, facingMode: "user",
       startedAt: null, duration: 0,
+      // False until the server confirms the invite actually reached a
+      // live, focused device (call_ringing, below) — OutgoingCall shows
+      // "Calling…" until then and "Ringing…" only once this is true, so a
+      // logged-out or unreachable peer never gets falsely reported as
+      // having a phone that's actually ringing somewhere.
+      ringConfirmed: false,
     });
 
     const offer = await pc.createOffer();
@@ -371,7 +377,9 @@ export function useCall(events, send, toast) {
 
       if (!current || event.from !== current.peerId) continue;
 
-      if (event.type === "call_answer" && current.phase === "outgoing") {
+      if (event.type === "call_ringing" && current.phase === "outgoing") {
+        setCall((c) => (c ? { ...c, ringConfirmed: true } : c));
+      } else if (event.type === "call_answer" && current.phase === "outgoing") {
         clearTimeout(ringTimerRef.current);
         pcRef.current?.setRemoteDescription(event.sdp).then(async () => {
           for (const candidate of pendingCandidatesRef.current) {

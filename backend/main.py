@@ -379,7 +379,7 @@ report_rate_limiter = RateLimiter(max_events=10, window_seconds=600)
 # numbers — each stays under its own per-number cap while the caller
 # racks up real, billed provider sends (SMS-pumping fraud). This one is
 # keyed by caller IP instead, as a second, independent dimension.
-ip_otp_rate_limiter = RateLimiter(max_events=15, window_seconds=300)
+ip_otp_rate_limiter = RateLimiter(max_events=40, window_seconds=300)
 
 # Registration has no natural per-account key (there's no account yet), so
 # this is IP-only — a speed bump against scripted mass account creation.
@@ -5191,7 +5191,26 @@ async def websocket_endpoint(socket: WebSocket, ticket: str = Query(default=""))
 
                 await hub.send_to_user(to_user_id, relay)
                 if kind == "call_invite":
-                    await notify_incoming_call(to_user_id, chat_id, relay["from_name"], call_kind)
+                    if hub.is_online(to_user_id):
+                        # A live, focused device just received this invite
+                        # directly — only NOW is it honest to tell the caller
+                        # the other phone is actually ringing. Before this,
+                        # the client shows "Calling…", not "Ringing…" (see
+                        # OutgoingCall in CallOverlay.jsx) — showing "Ringing"
+                        # unconditionally, the moment the invite was merely
+                        # SENT, was flat-out wrong for exactly the cases this
+                        # whole investigation kept turning up: a logged-out
+                        # account, a dead connection, a stale client — none of
+                        # which were ever actually ringing anywhere.
+                        # "from" here is the callee being rung, not a
+                        # sender — matches the shape useCall.js's generic
+                        # `event.from !== current.peerId` staleness guard
+                        # already expects from every other call event.
+                        await socket.send_json({
+                            "type": "call_ringing", "chat_id": chat_id, "from": to_user_id,
+                        })
+                    else:
+                        await notify_incoming_call(to_user_id, chat_id, relay["from_name"], call_kind)
 
             elif kind == "group_call_start":
                 # "Start" and "join" are the same message — whoever sends this
