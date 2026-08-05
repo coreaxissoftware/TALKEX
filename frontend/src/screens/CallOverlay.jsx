@@ -99,9 +99,20 @@ export function VideoTag({ stream, muted, style, sinkId, zoomable = true }) {
     applyZoom(zoom - event.deltaY * 0.0015);
   }
 
+  // A two-finger TOUCH scroll (common on touchscreen laptops, separate
+  // from a trackpad's wheel events handled above) starts with exactly the
+  // same shape as a pinch: two touches landing at once. The only way to
+  // tell them apart is what happens next — a pinch changes the distance
+  // BETWEEN the two fingers; a two-finger scroll keeps that distance
+  // roughly constant while both fingers translate together. `confirmed`
+  // stays false (and nothing is captured/prevented) until the distance has
+  // moved enough from where it started to no longer plausibly be a scroll —
+  // only past that threshold do we commit to "this is a pinch."
+  const PINCH_CONFIRM_PX = 12;
+
   function handleTouchStart(event) {
     if (event.touches.length === 2) {
-      pinchRef.current = { startDist: pinchDistance(event.touches), startZoom: zoom };
+      pinchRef.current = { startDist: pinchDistance(event.touches), startZoom: zoom, confirmed: false };
       dragRef.current = null;
     } else if (event.touches.length === 1 && zoom > 1) {
       dragRef.current = {
@@ -118,8 +129,17 @@ export function VideoTag({ stream, muted, style, sinkId, zoomable = true }) {
   // reused there without zoomable=false).
   function handleTouchMove(event) {
     if (event.touches.length === 2 && pinchRef.current) {
+      const dist = pinchDistance(event.touches);
+      if (!pinchRef.current.confirmed) {
+        if (Math.abs(dist - pinchRef.current.startDist) < PINCH_CONFIRM_PX) return; // still ambiguous — leave it alone
+        pinchRef.current.confirmed = true;
+        // Re-anchor from here so zoom doesn't jump by the threshold amount
+        // the instant it's confirmed.
+        pinchRef.current.startDist = dist;
+        pinchRef.current.startZoom = zoom;
+      }
       event.preventDefault();
-      const scale = pinchDistance(event.touches) / pinchRef.current.startDist;
+      const scale = dist / pinchRef.current.startDist;
       applyZoom(pinchRef.current.startZoom * scale);
     } else if (event.touches.length === 1 && dragRef.current) {
       event.preventDefault();
