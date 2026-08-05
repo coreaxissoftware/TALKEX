@@ -83,7 +83,18 @@ export function VideoTag({ stream, muted, style, sinkId, zoomable = true }) {
   // Only meaningfully different from a page-scroll gesture in that these
   // tiles are fixed-size grid/flex cells, not scrollable containers, so
   // there is nothing else here a wheel event would otherwise be for.
+  // A plain two-finger trackpad swipe fires the exact same "wheel" event a
+  // deliberate pinch does — the only thing that tells them apart is that a
+  // browser marks a real pinch/ctrl-scroll gesture with ctrlKey (Chrome/
+  // Firefox/Safari all do this specifically so a page can distinguish
+  // "scroll" from "zoom"). Without this gate, casually scrolling past a
+  // video tile with a trackpad — not touching it deliberately at all —
+  // zoomed the video in immediately, which is exactly what looked like the
+  // camera "auto-zooming" on its own. A plain mouse wheel with no modifier
+  // now does nothing here and is left completely alone (no preventDefault)
+  // so it never interferes with scrolling anything else on the page.
   function handleWheel(event) {
+    if (!event.ctrlKey && !event.metaKey) return;
     event.preventDefault();
     applyZoom(zoom - event.deltaY * 0.0015);
   }
