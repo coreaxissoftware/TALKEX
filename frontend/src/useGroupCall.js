@@ -11,7 +11,7 @@ const GROUP_CALL_EVENT_TYPES = new Set([
   "group_call_reaction", "group_call_raise_hand", "group_call_lower_hand",
   "group_call_caption", "breakout_rooms_created", "breakout_rooms_closed",
   "group_call_waiting", "group_call_admitted", "group_call_join_denied", "group_call_join_request",
-  "group_call_muted_by_host", "group_call_participant_muted",
+  "group_call_muted_by_host", "group_call_participant_muted", "group_call_participant_unmuted",
   "group_call_screen_share_started", "group_call_screen_share_stopped",
   "group_call_permissions_changed", "group_call_action_denied", "group_call_spotlight_changed",
 ]);
@@ -185,6 +185,13 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
     const nowMuted = !current.muted;
     current.localStream.getAudioTracks().forEach((track) => { track.enabled = !nowMuted; });
     setCall((c) => (c ? { ...c, muted: nowMuted } : c));
+    // Tells the room to drop this participant's "muted by host" badge —
+    // sent on every unmute, not just one that followed a host mute,
+    // because the server has no record of why THIS client thinks it's
+    // muted; harmless no-op for everyone else if the badge wasn't set.
+    if (!nowMuted) {
+      sendRef.current({ type: "group_call_self_unmuted", chat_id: current.chatId });
+    }
   }, []);
 
   const toggleCamera = useCallback(async () => {
@@ -288,8 +295,19 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
     if (senders.length > 0) {
       // A video track is already flowing (camera was on) — swap it for the
       // screen capture on each connection's existing sender, no
-      // renegotiation needed.
+      // renegotiation needed. localStream itself also has to be swapped
+      // (removeTrack the camera, addTrack the screen — same as
+      // switchCamera does above), not just the peer connections' senders:
+      // SelfTile renders straight from call.localStream, and a brand new
+      // peer joining mid-share builds its outgoing tracks from
+      // localStreamRef.current — without this, the presenter's own main-
+      // stage tile kept showing their camera instead of the screen they
+      // were sharing, and anyone joining mid-share got the camera feed.
+      // The camera track is kept alive (not stopped) so it can be restored
+      // on the way back out below.
       await Promise.all(senders.map((sender) => sender.replaceTrack(screenTrack)));
+      if (cameraTrack) current.localStream.removeTrack(cameraTrack);
+      current.localStream.addTrack(screenTrack);
     } else {
       // No video track yet — this was a voice-only call, or the camera was
       // never turned on. Mirrors toggleCamera's identical situation above:
@@ -323,6 +341,8 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
       if (senders.length > 0) {
         if (cameraTrack) {
           await Promise.all(senders.map((sender) => sender.replaceTrack(cameraTrack).catch(() => {})));
+          c?.localStream?.removeTrack(screenTrack);
+          c?.localStream?.addTrack(cameraTrack);
         }
       } else {
         c?.localStream?.removeTrack(screenTrack);
@@ -565,6 +585,8 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
           toastRef.current?.("The host muted you");
         } else if (event.type === "group_call_participant_muted") {
           addParticipant(event.user_id, { mutedByHost: true });
+        } else if (event.type === "group_call_participant_unmuted") {
+          addParticipant(event.user_id, { mutedByHost: false });
         } else if (event.type === "group_call_screen_share_started") {
           setCall((c) => (c ? { ...c, screenSharerId: event.user_id } : c));
         } else if (event.type === "group_call_screen_share_stopped") {

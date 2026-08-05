@@ -3951,6 +3951,13 @@ async def forward_message(request: ForwardRequest, user: dict = Depends(current_
     original = db.query_one("SELECT * FROM messages WHERE id = ?", (request.message_id,))
     if original is None:
         raise HTTPException(404, "Message not found")
+    if original["deleted_at"]:
+        # A deleted message's text/payload are already blanked at the row
+        # level (see the disappearing-message sweep and unsend/delete-for-
+        # everyone handlers) — forwarding it without this check would
+        # silently produce an empty message with a forwarded_from label and
+        # nothing else, rather than a clear error explaining why.
+        raise HTTPException(410, "This message is no longer available")
 
     # You must be able to see it before you can pass it on.
     require_member(original["chat_id"], user["id"])
@@ -3985,6 +3992,11 @@ async def forward_message(request: ForwardRequest, user: dict = Depends(current_
             kind=original["kind"],
             payload=payload,
             forwarded_from=forwarded_from,
+            # Without this, forwarding a view-once photo/text created an
+            # ordinary, permanently-viewable copy in the target chat —
+            # the one-time-view guarantee only ever applied to the
+            # original message, never to what forwarding produced from it.
+            view_once=bool(original["view_once"]),
         )
         if not created:
             sent.append(message)
@@ -5121,6 +5133,12 @@ async def _admit_to_group_call(chat_id: str, user_id: str):
     room = _group_calls.setdefault(chat_id, {})
     roster = list(room.values())
     room[user_id] = _participant_info(user_id)
+    # The client's WaitingForHost screen only ever leaves phase "waiting" on
+    # this event (see group_call_admitted in useGroupCall.js) — without it,
+    # someone the host just let in stays stuck looking at "Waiting for the
+    # host to let you in…" forever, even though the roster below already
+    # has them connecting.
+    await hub.send_to_user(user_id, {"type": "group_call_admitted", "chat_id": chat_id})
     await hub.send_to_user(user_id, {
         "type": "group_call_roster", "chat_id": chat_id, "participants": roster,
         **_group_call_room_state(chat_id),
@@ -5647,6 +5665,22 @@ async def websocket_endpoint(
                 await hub.send_to_chat(chat_id, {
                     "type": "group_call_participant_muted", "chat_id": chat_id, "user_id": target_id,
                 }, exclude_user=target_id)
+
+            elif kind == "group_call_self_unmuted":
+                # The client-side counterpart to group_call_participant_muted
+                # above — clears the "muted by host" badge everyone else
+                # sees on this participant's tile once they turn their own
+                # mic back on. Sent on every unmute regardless of whether it
+                # was actually a host mute (the server has no record of
+                # that), so this is a harmless no-op badge-clear the rest of
+                # the time.
+                chat_id = payload.get("chat_id", "")
+                room = _group_calls.get(chat_id)
+                if not room or user_id not in room:
+                    continue
+                await hub.send_to_chat(chat_id, {
+                    "type": "group_call_participant_unmuted", "chat_id": chat_id, "user_id": user_id,
+                }, exclude_user=user_id)
 
             elif kind == "group_call_spotlight":
                 # target: null clears the spotlight. Host-only, and pinned

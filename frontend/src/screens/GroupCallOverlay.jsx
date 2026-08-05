@@ -759,10 +759,17 @@ function ActiveGroupCall({
         <MoreMenu onClose={() => setShowMore(false)} items={[
           {
             label: call.sharingScreen ? "Stop sharing screen" : "Share screen",
-            sub: call.permissions?.screen_share === "host" && !isHost
+            // Deliberately not `disabled` — a host-only restriction is
+            // enforced server-side (group_call_screen_share_start) and
+            // rejection already surfaces as a toast via
+            // group_call_action_denied. A disabled row here just silently
+            // eats the tap with no explanation, which reads as "broken"
+            // rather than "not allowed" — and would have wrongly blocked a
+            // sharer from tapping "Stop sharing" if the host changed the
+            // policy mid-share, since sharingScreen isn't part of this check.
+            sub: call.permissions?.screen_share === "host" && !isHost && !call.sharingScreen
               ? "Only the host allows this right now" : undefined,
             icon: I.screenShare("#fff", 18),
-            disabled: call.permissions?.screen_share === "host" && !isHost,
             onClick: onShareScreen,
           },
           ...(call.sharingScreen ? [{
@@ -783,10 +790,14 @@ function ActiveGroupCall({
           },
           {
             label: call.whiteboardOpen ? "Close whiteboard" : "Whiteboard",
+            // Same reasoning as Share screen above — not disabled, the
+            // server-side check (whiteboard_open in main.py) is what
+            // actually enforces this, and a denial already surfaces as a
+            // toast plus reverting the optimistic open (see
+            // group_call_action_denied in useGroupCall.js).
             sub: call.permissions?.whiteboard === "host" && !isHost && !call.whiteboardOpen
               ? "Only the host allows this right now" : undefined,
             icon: I.edit("#fff", 18),
-            disabled: call.permissions?.whiteboard === "host" && !isHost && !call.whiteboardOpen,
             onClick: onToggleWhiteboard,
           },
           {
