@@ -4,6 +4,7 @@ import {
   Av, Button, Field, G, I, Spinner, countdown, localInputToUnix, whenLabel,
 } from "../ui.jsx";
 import { MoreMenu } from "./CallOverlay.jsx";
+import PhotoEditor from "../PhotoEditor.jsx";
 
 const BACKGROUNDS = [
   "linear-gradient(135deg,#6366f1,#4f46e5)",
@@ -73,17 +74,40 @@ function kindGlyph(story, color) {
 export default function Status({ me, toast }) {
   const [feed, setFeed] = useState([]);
   const [mine, setMine] = useState([]);
+  const [muted, setMuted] = useState([]);
   const [loading, setLoading] = useState(true);
   const [composing, setComposing] = useState(false);
   const [viewing, setViewing] = useState(null);
   const [privacyOpen, setPrivacyOpen] = useState(false);
+  const [muteMenuFor, setMuteMenuFor] = useState(null); // the author row currently showing its menu
 
   function reload() {
     setLoading(true);
-    Promise.all([Stories.list(), Stories.mine()])
-      .then(([theirs, ours]) => { setFeed(theirs); setMine(ours); })
+    Promise.all([Stories.list(), Stories.mine(), Stories.mutedStatuses()])
+      .then(([theirs, ours, mutedList]) => { setFeed(theirs); setMine(ours); setMuted(mutedList); })
       .catch(() => {})
       .finally(() => setLoading(false));
+  }
+
+  async function muteAuthor(userId) {
+    setMuteMenuFor(null);
+    try {
+      await Stories.muteStatus(userId);
+      toast("Status muted");
+      reload();
+    } catch (problem) {
+      toast(problem.message || "Could not mute");
+    }
+  }
+
+  async function unmuteAuthor(userId) {
+    try {
+      await Stories.unmuteStatus(userId);
+      toast("Status unmuted");
+      reload();
+    } catch (problem) {
+      toast(problem.message || "Could not unmute");
+    }
   }
 
   useEffect(reload, []);
@@ -189,8 +213,41 @@ export default function Status({ me, toast }) {
               {" "}{whenLabel(author.stories[0].created_at)}
             </div>
           </div>
+          <div onClick={(event) => { event.stopPropagation(); setMuteMenuFor(author); }}
+               style={{ padding: 8, cursor: "pointer" }}>
+            {I.moreVertical(G.muted, 18)}
+          </div>
         </div>
       ))}
+
+      {muted.length > 0 && (
+        <>
+          <SectionLabel>Muted</SectionLabel>
+          {muted.map((person) => (
+            <div key={person.id} style={{
+              display: "flex", alignItems: "center", gap: 12, padding: "12px 16px",
+              borderBottom: `1px solid ${G.border}`,
+            }}>
+              <Av av={person.avatar_letter} color={person.color} size={44} photoId={person.avatar_attachment_id}/>
+              <div style={{ flex: 1, fontSize: 14.5, color: G.muted }}>{person.name}</div>
+              <div onClick={() => unmuteAuthor(person.id)} style={{
+                fontSize: 12.5, color: G.accent, cursor: "pointer", fontWeight: 600,
+              }}>Unmute</div>
+            </div>
+          ))}
+        </>
+      )}
+
+      {muteMenuFor && (
+        <MoreMenu onClose={() => setMuteMenuFor(null)} items={[
+          {
+            label: `Mute ${muteMenuFor.name}'s status`,
+            sub: "You won't see their status updates until you unmute",
+            icon: I.eyeOff ? I.eyeOff(G.text, 18) : "🔕",
+            onClick: () => muteAuthor(muteMenuFor.user_id),
+          },
+        ]}/>
+      )}
 
       {composing && (
         <Compose onClose={() => setComposing(false)}
@@ -351,10 +408,33 @@ function Compose({ onClose, onDone, toast }) {
   // file itself.
   const [upload, setUpload] = useState(null); // { attachmentId, previewUrl, fileName }
   const [uploading, setUploading] = useState(false);
+  // The picked (or already-edited) File for a photo status — kept around
+  // so "Edit" can be tapped again after the first upload, same idea as
+  // ChatView's AttachSheet keeping a working copy separate from what's
+  // already gone to the server.
+  const [rawPhotoFile, setRawPhotoFile] = useState(null);
+  const [editingPhoto, setEditingPhoto] = useState(false);
 
   function pickKind(next) {
     setKind(next);
     setUpload(null);
+    setRawPhotoFile(null);
+  }
+
+  async function uploadFile(file, previewUrl) {
+    setUploading(true);
+    try {
+      const attachment = await Uploads.create(file);
+      setUpload((current) => {
+        if (current?.previewUrl && current.previewUrl !== previewUrl) URL.revokeObjectURL(current.previewUrl);
+        return { attachmentId: attachment.attachment_id, previewUrl, fileName: file.name };
+      });
+    } catch (problem) {
+      toast(problem.message || "Could not upload file");
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    } finally {
+      setUploading(false);
+    }
   }
 
   async function onFilePicked(event) {
@@ -362,17 +442,21 @@ function Compose({ onClose, onDone, toast }) {
     event.target.value = "";
     if (!file) return;
 
+    if (kind === "photo") setRawPhotoFile(file);
     const previewUrl = kind === "photo" || kind === "video" ? URL.createObjectURL(file) : null;
-    setUploading(true);
-    try {
-      const attachment = await Uploads.create(file);
-      setUpload({ attachmentId: attachment.attachment_id, previewUrl, fileName: file.name });
-    } catch (problem) {
-      toast(problem.message || "Could not upload file");
-      if (previewUrl) URL.revokeObjectURL(previewUrl);
-    } finally {
-      setUploading(false);
-    }
+    await uploadFile(file, previewUrl);
+  }
+
+  function onPhotoEdited(editedFile) {
+    setEditingPhoto(false);
+    setRawPhotoFile(editedFile);
+    uploadFile(editedFile, URL.createObjectURL(editedFile));
+  }
+
+  if (editingPhoto) {
+    return (
+      <PhotoEditor file={rawPhotoFile} onCancel={() => setEditingPhoto(false)} onDone={onPhotoEdited}/>
+    );
   }
 
   async function save() {
@@ -480,11 +564,18 @@ function Compose({ onClose, onDone, toast }) {
           <div style={{ marginBottom: 14 }}>
             {upload ? (
               <div style={{
-                borderRadius: 16, overflow: "hidden", background: G.dim,
+                position: "relative", borderRadius: 16, overflow: "hidden", background: G.dim,
                 border: `1px solid ${G.border}`,
               }}>
                 {kind === "photo" && (
                   <img src={upload.previewUrl} alt="Selected photo preview" style={{ width: "100%", maxHeight: 220, objectFit: "cover", display: "block" }}/>
+                )}
+                {kind === "photo" && rawPhotoFile && (
+                  <button onClick={() => setEditingPhoto(true)} style={{
+                    position: "absolute", top: 10, right: 10, display: "flex", alignItems: "center", gap: 6,
+                    padding: "6px 12px", borderRadius: 20, border: "none", cursor: "pointer",
+                    background: "#00000099", color: "#fff", fontSize: 12.5, fontWeight: 600,
+                  }}>{I.edit("#fff", 14)} Edit</button>
                 )}
                 {kind === "video" && (
                   <video src={upload.previewUrl} controls style={{ width: "100%", maxHeight: 220, display: "block" }}/>

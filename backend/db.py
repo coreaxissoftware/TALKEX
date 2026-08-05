@@ -674,6 +674,19 @@ CREATE TABLE IF NOT EXISTS blocks (
 CREATE INDEX IF NOT EXISTS idx_blocks_blocked ON blocks (blocked_id);
 
 
+-- Same shape as blocks, but far lighter: muting someone's status only
+-- hides their status updates from your own list — it says nothing about
+-- being able to message them, call them, or see their profile, unlike a
+-- block. One-directional and never announced to the muted person, same as
+-- muting a chat.
+CREATE TABLE IF NOT EXISTS muted_statuses (
+    muter_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    muted_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (muter_id, muted_id)
+);
+
+
 -- A saved address-book entry, same idea as a phone's contacts app: a name you
 -- picked plus a phone number, independent of whether that number is on
 -- TalkEx yet. Resolved against `users.phone` on read to show "on
@@ -901,6 +914,13 @@ COLUMNS_ADDED_LATER = [
     # this on per-story (not a standing account setting) to let whoever
     # views it re-share it too — see forward_story/_share checks in main.py.
     ("stories", "allow_share", "INTEGER NOT NULL DEFAULT 0"),
+    # Off by default — a linked device stays signed in for the normal
+    # SESSION_TTL_SECONDS (30 days), same as every session always has. When
+    # a user turns this on for a specific device (Settings > Linked
+    # devices), that one session's expires_at is pulled in to 4 hours out
+    # instead, and turning it back off restores the normal long expiry —
+    # see toggle_session_short_lived in main.py.
+    ("sessions", "short_lived", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

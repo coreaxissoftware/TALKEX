@@ -3257,11 +3257,38 @@ function ScanEditSheet({ file, onClose, onSend, toast }) {
   );
 }
 
+// The Contact Picker API is a one-shot, user-gesture-triggered picker with
+// no background "sync" (a website never gets standing address-book access)
+// — Android Chrome/Edge only as of this writing. Same feature-detect
+// Discover.jsx's importFromDevice already uses.
+const canPickDeviceContacts = typeof navigator !== "undefined"
+  && "contacts" in navigator && "ContactsManager" in window;
+
+/**
+ * Picking a contact to share into a chat, WhatsApp-style: a searchable list
+ * of the app's own saved contacts (Contacts.list(), the same address book
+ * Discover.jsx manages) rather than the old bare name+phone text form —
+ * that form is still here, just demoted to "add a new one" for a person
+ * who isn't saved yet, plus an explicit "Import from phone" action for
+ * browsers that can hand over real device contacts.
+ */
 function ContactSheet({ onClose, onSave, toast }) {
+  const [contacts, setContacts] = useState(null);
+  const [query, setQuery] = useState("");
+  const [addingNew, setAddingNew] = useState(false);
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
 
-  function save() {
+  useEffect(() => {
+    Contacts.list().then(setContacts).catch(() => setContacts([]));
+  }, []);
+
+  const filtered = (contacts || []).filter((contact) =>
+    !query.trim()
+    || contact.name.toLowerCase().includes(query.trim().toLowerCase())
+    || contact.phone.includes(query.trim()));
+
+  function saveNew() {
     if (!name.trim() || !phone.trim()) {
       toast("A contact needs a name and phone number");
       return;
@@ -3269,13 +3296,79 @@ function ContactSheet({ onClose, onSave, toast }) {
     onSave(name.trim(), phone.trim());
   }
 
+  async function importFromDevice() {
+    try {
+      const picked = await navigator.contacts.select(["name", "tel"], { multiple: true });
+      let imported = 0;
+      for (const person of picked) {
+        const personName = person.name?.[0]?.trim();
+        const personPhone = person.tel?.[0]?.trim();
+        if (!personName || !personPhone) continue;
+        try {
+          await Contacts.add(personName, personPhone);
+          imported++;
+        } catch {
+          // Already saved, or didn't validate — skip rather than abort the batch.
+        }
+      }
+      if (imported > 0) {
+        toast(`Imported ${imported} contact${imported === 1 ? "" : "s"}`);
+        Contacts.list().then(setContacts).catch(() => {});
+      } else {
+        toast("No new contacts to import");
+      }
+    } catch (problem) {
+      if (problem.name !== "AbortError") toast("Could not import contacts");
+    }
+  }
+
+  if (addingNew) {
+    return (
+      <Sheet title="New contact" onClose={() => setAddingNew(false)}>
+        <Field label="Name" value={name} onChange={(e) => setName(e.target.value)}
+               placeholder="Full name"/>
+        <Field label="Phone" value={phone} onChange={(e) => setPhone(e.target.value)}
+               placeholder="+91 98765 43210"/>
+        <Button onClick={saveNew} style={{ width: "100%" }}>Send contact</Button>
+      </Sheet>
+    );
+  }
+
   return (
     <Sheet title="Share a contact" onClose={onClose}>
-      <Field label="Name" value={name} onChange={(e) => setName(e.target.value)}
-             placeholder="Full name"/>
-      <Field label="Phone" value={phone} onChange={(e) => setPhone(e.target.value)}
-             placeholder="+91 98765 43210"/>
-      <Button onClick={save} style={{ width: "100%" }}>Send contact</Button>
+      <Field value={query} onChange={(e) => setQuery(e.target.value)}
+             placeholder="Search your contacts" style={{ marginBottom: 10 }}/>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        <Button variant="ghost" onClick={() => setAddingNew(true)} style={{ flex: 1 }}>
+          + New contact
+        </Button>
+        {canPickDeviceContacts && (
+          <Button variant="ghost" onClick={importFromDevice} style={{ flex: 1 }}>
+            Import from phone
+          </Button>
+        )}
+      </div>
+      {contacts === null ? (
+        <div style={{ fontSize: 13, color: G.sub, textAlign: "center", padding: 20 }}>Loading…</div>
+      ) : filtered.length === 0 ? (
+        <div style={{ fontSize: 13, color: G.sub, textAlign: "center", padding: 20 }}>
+          {contacts.length === 0 ? "No saved contacts yet — add one above." : "No matches."}
+        </div>
+      ) : (
+        <div style={{ maxHeight: 340, overflowY: "auto" }}>
+          {filtered.map((contact) => (
+            <div key={contact.id} onClick={() => onSave(contact.name, contact.phone)} style={{
+              display: "flex", alignItems: "center", gap: 12, padding: "10px 4px", cursor: "pointer",
+            }}>
+              <Av av={contact.name[0]?.toUpperCase() || "?"} color={G.accent} size={38}/>
+              <div>
+                <div style={{ fontSize: 14 }}>{contact.name}</div>
+                <div style={{ fontSize: 12, color: G.sub }}>{contact.phone}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </Sheet>
   );
 }

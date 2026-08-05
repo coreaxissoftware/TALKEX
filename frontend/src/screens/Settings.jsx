@@ -244,6 +244,17 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
     toast("Device signed out");
   }
 
+  async function toggleSessionShortLived(sessionId, shortLived) {
+    try {
+      const updated = await Me.setSessionShortLived(sessionId, shortLived);
+      setSessions((current) => current.map((s) => (s.session_id === sessionId
+        ? { ...s, short_lived: updated.short_lived, expires_at: updated.expires_at } : s)));
+      toast(shortLived ? "Will sign out after 4 hours" : "Back to staying signed in");
+    } catch (problem) {
+      toast(problem.message || "Could not update this device");
+    }
+  }
+
   async function createApiKey() {
     setCreatingKey(true);
     try {
@@ -678,13 +689,21 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
           <SRow key={session.session_id}
                 icon={session.is_current ? I.mapPin(G.accent, 18) : I.monitor(G.accent, 18)}
                 label={session.device_label + (session.is_current ? " (this device)" : "")}
-                sub={`Linked ${whenLabel(session.created_at)}`}
+                sub={`Linked ${whenLabel(session.created_at)}`
+                  + (!session.is_current && session.short_lived ? " · auto sign-out in 4h" : "")}
                 right={
                   !session.is_current && (
-                    <Button variant="ghost" style={{ padding: "6px 12px", fontSize: 12 }}
-                            onClick={() => revokeSession(session.session_id)}>
-                      Sign out
-                    </Button>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <div title="Auto sign out after 4 hours" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 11, color: G.muted }}>4h</span>
+                        <Toggle on={session.short_lived}
+                                onChange={(value) => toggleSessionShortLived(session.session_id, value)}/>
+                      </div>
+                      <Button variant="ghost" style={{ padding: "6px 12px", fontSize: 12 }}
+                              onClick={() => revokeSession(session.session_id)}>
+                        Sign out
+                      </Button>
+                    </div>
                   )
                 }/>
         ))}

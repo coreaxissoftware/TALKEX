@@ -219,6 +219,10 @@ export const Me = {
 
   sessions: () => get("/me/sessions"),
   revokeSession: (sessionId) => remove(`/me/sessions/${sessionId}`),
+  // Per-device: on pulls that device's session expiry in to 4 hours out,
+  // off restores the normal 30-day session.
+  setSessionShortLived: (sessionId, shortLived) =>
+    patch(`/me/sessions/${sessionId}`, { short_lived: shortLived }),
 
   // Two-step verification: an optional PIN required after the password on
   // login. currentPin is omitted to set the first PIN, required to change one.
@@ -766,6 +770,12 @@ export const Stories = {
   reactions: (storyId) => get(`/stories/${storyId}/reactions`),
   viewers: (storyId) => get(`/stories/${storyId}/viewers`),
   forward: (storyId, chatIds) => post(`/stories/${storyId}/forward`, { to_chat_ids: chatIds }),
+
+  // Hides someone's status updates from your own list only — reversible,
+  // silent, and unrelated to blocking (see mute_status in main.py).
+  muteStatus: (userId) => post(`/users/${userId}/mute-status`),
+  unmuteStatus: (userId) => remove(`/users/${userId}/mute-status`),
+  mutedStatuses: () => get("/muted-statuses"),
 };
 
 // ── Call history ─────────────────────────────────────────────────────────────

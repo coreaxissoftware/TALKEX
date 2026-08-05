@@ -70,6 +70,7 @@ from models import (
     RegisterRequest, RemoveTwoStepRequest, RequestEmailOtpRequest, RequestOtpRequest,
     ReportRequest, RescheduleRequest, RsvpRequest,
     ScheduleRequest, SendMessageRequest, SetPasswordRequest, SetPinRequest, SetRoleRequest,
+    SetSessionShortLivedRequest,
     SetTwoStepRequest, SetUsernameRequest, StartLinkRequest, StoryAudienceRequest, StoryRequest,
     TestEmailRequest, TestSmsRequest,
     UpdateContactRequest, UpdateIntegrationSettingsRequest, UpdateMeetingRequest,
@@ -1011,7 +1012,7 @@ def list_sessions(credentials: HTTPAuthorizationCredentials = Depends(security),
     """Every device signed in as you, so you can spot one you don't recognise."""
     my_hash = auth.hash_token(credentials.credentials)
     rows = db.query_all(
-        "SELECT rowid AS session_id, device_label, created_at, expires_at, token_hash "
+        "SELECT rowid AS session_id, device_label, created_at, expires_at, token_hash, short_lived "
         "FROM sessions WHERE user_id = ? ORDER BY created_at DESC",
         (user["id"],),
     )
@@ -1020,6 +1021,8 @@ def list_sessions(credentials: HTTPAuthorizationCredentials = Depends(security),
             "session_id": row["session_id"],
             "device_label": row["device_label"],
             "created_at": row["created_at"],
+            "expires_at": row["expires_at"],
+            "short_lived": bool(row["short_lived"]),
             "is_current": row["token_hash"] == my_hash,
         }
         for row in rows
@@ -1034,6 +1037,30 @@ def revoke_session(session_id: int, user: dict = Depends(current_user)):
     if changed.rowcount == 0:
         raise HTTPException(404, "Session not found")
     return {"revoked": True}
+
+
+SHORT_LIVED_SESSION_SECONDS = 4 * 60 * 60
+
+
+@app.patch("/me/sessions/{session_id}")
+def set_session_short_lived(session_id: int, request: SetSessionShortLivedRequest,
+                            user: dict = Depends(current_user)):
+    """
+    Turn a specific linked device's normal 30-day session into a 4-hour one,
+    or turn it back. Every OTHER session is untouched — this is a per-device
+    choice (Settings > Linked devices), not an account-wide setting, so
+    signing in on a borrowed computer can be made to expire quickly without
+    shortening every other device you're signed in on too.
+    """
+    now = time.time()
+    new_expiry = now + SHORT_LIVED_SESSION_SECONDS if request.short_lived else now + auth.SESSION_TTL_SECONDS
+    changed = db.execute(
+        "UPDATE sessions SET short_lived = ?, expires_at = ? WHERE rowid = ? AND user_id = ?",
+        (request.short_lived, new_expiry, session_id, user["id"]),
+    )
+    if changed.rowcount == 0:
+        raise HTTPException(404, "Session not found")
+    return {"short_lived": request.short_lived, "expires_at": new_expiry}
 
 
 # ── Bulk messaging API ────────────────────────────────────────────────────────
@@ -1849,6 +1876,41 @@ def unblock_user(user_id: str, user: dict = Depends(current_user)):
 def list_blocks(user: dict = Depends(current_user)):
     rows = db.query_all(
         "SELECT u.* FROM blocks b JOIN users u ON u.id = b.blocked_id WHERE b.blocker_id = ?",
+        (user["id"],),
+    )
+    return [public_user(row, viewer_id=user["id"]) for row in rows]
+
+
+@app.post("/users/{user_id}/mute-status")
+def mute_status(user_id: str, user: dict = Depends(current_user)):
+    """
+    Stop this person's status updates from showing in your list — nothing
+    else about them changes (still a contact, still messageable, still
+    shows online). One-directional and silent, same as muting a chat: they
+    are never told they've been muted.
+    """
+    if user_id == user["id"]:
+        raise HTTPException(400, "You cannot mute your own status")
+    db.execute(
+        "INSERT OR IGNORE INTO muted_statuses (muter_id, muted_id, created_at) VALUES (?, ?, ?)",
+        (user["id"], user_id, time.time()),
+    )
+    return {"muted": True}
+
+
+@app.delete("/users/{user_id}/mute-status")
+def unmute_status(user_id: str, user: dict = Depends(current_user)):
+    db.execute("DELETE FROM muted_statuses WHERE muter_id = ? AND muted_id = ?",
+               (user["id"], user_id))
+    return {"muted": False}
+
+
+@app.get("/muted-statuses")
+def list_muted_statuses(user: dict = Depends(current_user)):
+    """Full profiles, not just ids — a muted-status list with only ids in
+    it has nowhere to show WHO to offer "unmute" for."""
+    rows = db.query_all(
+        "SELECT u.* FROM muted_statuses m JOIN users u ON u.id = m.muted_id WHERE m.muter_id = ?",
         (user["id"],),
     )
     return [public_user(row, viewer_id=user["id"]) for row in rows]
@@ -4321,12 +4383,17 @@ def list_stories(user: dict = Depends(current_user)):
         (time.time(), user["id"], user["id"]),
     )
 
+    muted = {row["muted_id"] for row in db.query_all(
+        "SELECT muted_id FROM muted_statuses WHERE muter_id = ?", (user["id"],))}
+
     grouped: dict[str, dict] = {}
     for row in rows:
         row = dict(row)
         if row["user_id"] != user["id"] and not _story_audience_allows(
             row["user_id"], row["story_audience"], user["id"],
         ):
+            continue
+        if row["user_id"] in muted:
             continue
         story = _expand_story(row)
         author = grouped.setdefault(story["user_id"], {

@@ -50,6 +50,12 @@ class SetPasswordRequest(BaseModel):
     new_password: str = Field(min_length=8, max_length=128)
 
 
+class SetSessionShortLivedRequest(BaseModel):
+    """Per-device toggle (Settings > Linked devices): on pulls that one
+    session's expiry in to 4 hours out; off restores the normal 30-day TTL."""
+    short_lived: bool
+
+
 class VerifyTwoStepRequest(BaseModel):
     """The second step of login when the account has a PIN set."""
     pending_token: str = Field(min_length=1, max_length=128)
