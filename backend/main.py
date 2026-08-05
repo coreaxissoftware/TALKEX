@@ -5061,27 +5061,42 @@ async def _leave_all_group_calls(user_id: str):
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(socket: WebSocket, ticket: str = Query(default="")):
+async def websocket_endpoint(
+    socket: WebSocket,
+    ticket: str = Query(default=""),
+    token: str = Query(default=""),
+):
     """
     One authenticated socket per device.
 
-    Authenticated by a short-lived, single-use ticket (POST /auth/ws-ticket)
-    rather than the long-lived session token directly — a WebSocket
-    handshake can't carry a custom Authorization header, and putting the
-    real bearer token in the URL instead means it ends up in every reverse
-    proxy/CDN/error-tracker access log that records request URLs, live for
-    up to 30 days. A ticket that's worthless within 30 seconds and after one
-    use closes that hole even if it does end up somewhere it shouldn't.
+    Preferred auth: a short-lived, single-use ticket (POST /auth/ws-ticket).
+
+    Fallback: the raw session token as ?token= — accepted so that a browser
+    still running a cached older JavaScript bundle (before the ticket flow
+    was added) can connect instead of silently failing forever. The ticket
+    path is always tried first; the token path fires only when no ticket was
+    provided at all.
     """
-    user_id = redeem_ws_ticket(ticket)
+    user_id = redeem_ws_ticket(ticket) if ticket else None
+
+    if user_id is None and token:
+        session = db.query_one(
+            "SELECT user_id, expires_at FROM sessions WHERE token_hash = ?",
+            (auth.hash_token(token),),
+        )
+        if session and session["expires_at"] > time.time():
+            user_id = session["user_id"]
+
     if user_id is None:
-        # 1008 is "policy violation" — the client can tell this apart from a
-        # network failure and knows to log in again rather than retry forever.
         await socket.close(code=1008)
         return
 
+    auth_method = "ticket" if ticket else "token-fallback"
     await socket.accept()
     await hub.add(user_id, socket)
+    total = len(hub._connections.get(user_id, ()))
+    print(f"[WS] connected user={user_id} auth={auth_method} "
+          f"sockets_for_user={total} total_users={len(hub._connections)}")
     # Deliberately the plain sync db call, not the *_async/to_thread-offloaded
     # version: this handler's cleanup path (the `finally` below) proved that
     # moving a db call here onto a worker thread adds a real cancellation
@@ -5146,12 +5161,18 @@ async def websocket_endpoint(socket: WebSocket, ticket: str = Query(default=""))
                     }, exclude_user=user_id)
 
             elif kind in CALL_SIGNAL_TYPES:
-                # Pure relay: the server never touches SDP or ICE contents, it
-                # only decides whether `user_id` is allowed to say anything to
-                # `to_user_id` at all — same DM, actual peer, not blocked.
                 chat_id = payload.get("chat_id", "")
                 to_user_id = payload.get("to", "")
+                if kind == "call_invite":
+                    target_sockets = len(hub._connections.get(to_user_id, ()))
+                    focused_sockets = len(hub._focused.get(to_user_id, ()))
+                    print(f"[CALL] invite from {user_id} → {to_user_id} "
+                          f"chat={chat_id} "
+                          f"target_sockets={target_sockets} focused={focused_sockets}")
                 if not chat_id or not to_user_id or not call_target_ok(chat_id, user_id, to_user_id):
+                    if kind == "call_invite":
+                        print(f"[CALL] REJECTED: call_target_ok failed "
+                              f"chat={chat_id} from={user_id} to={to_user_id}")
                     await socket.send_json({
                         "type": "call_error", "chat_id": chat_id,
                         "reason": "Cannot reach that person",
@@ -5163,10 +5184,9 @@ async def websocket_endpoint(socket: WebSocket, ticket: str = Query(default=""))
                     call_kind = payload.get("call_kind")
                     if call_kind not in ("voice", "video"):
                         continue
-                    # Checked only at the invite, not on every subsequent
-                    # signal — an already-accepted call keeps working even if
-                    # someone flips their Calling toggle mid-call.
                     if not calling_permitted(chat_id, user_id) or not calling_permitted(chat_id, to_user_id):
+                        print(f"[CALL] REJECTED: calling_permitted failed "
+                              f"chat={chat_id} from={user_id} to={to_user_id}")
                         await socket.send_json({
                             "type": "call_error", "chat_id": chat_id,
                             "reason": "This person isn't accepting calls right now",
@@ -5191,25 +5211,16 @@ async def websocket_endpoint(socket: WebSocket, ticket: str = Query(default=""))
 
                 await hub.send_to_user(to_user_id, relay)
                 if kind == "call_invite":
+                    target_sockets = len(hub._connections.get(to_user_id, ()))
+                    print(f"[CALL] invite relayed to {to_user_id} "
+                          f"(sockets_after_send={target_sockets})")
                     if hub.is_online(to_user_id):
-                        # A live, focused device just received this invite
-                        # directly — only NOW is it honest to tell the caller
-                        # the other phone is actually ringing. Before this,
-                        # the client shows "Calling…", not "Ringing…" (see
-                        # OutgoingCall in CallOverlay.jsx) — showing "Ringing"
-                        # unconditionally, the moment the invite was merely
-                        # SENT, was flat-out wrong for exactly the cases this
-                        # whole investigation kept turning up: a logged-out
-                        # account, a dead connection, a stale client — none of
-                        # which were ever actually ringing anywhere.
-                        # "from" here is the callee being rung, not a
-                        # sender — matches the shape useCall.js's generic
-                        # `event.from !== current.peerId` staleness guard
-                        # already expects from every other call event.
+                        print(f"[CALL] target is focused → sending call_ringing to caller")
                         await socket.send_json({
                             "type": "call_ringing", "chat_id": chat_id, "from": to_user_id,
                         })
                     else:
+                        print(f"[CALL] target NOT focused → push notification fallback")
                         await notify_incoming_call(to_user_id, chat_id, relay["from_name"], call_kind)
 
             elif kind == "group_call_start":
