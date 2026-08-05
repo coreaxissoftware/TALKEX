@@ -4245,12 +4245,12 @@ def create_story(request: StoryRequest, user: dict = Depends(current_user)):
         """
         INSERT INTO stories (id, user_id, text, emoji, background,
                              created_at, expires_at, status, publish_at,
-                             kind, link_url, font, font_size)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             kind, link_url, font, font_size, allow_share)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (story_id, user["id"], request.text, request.emoji, request.background,
          now, expires_at, status, publish_at, request.kind, link_url,
-         request.font, request.font_size),
+         request.font, request.font_size, request.allow_share),
     )
 
     if request.kind in ("photo", "video", "audio"):
@@ -4492,6 +4492,13 @@ async def forward_story(story_id: str, request: ForwardStoryRequest, user: dict 
     and the same attachment-duplication forward_message uses for a photo/
     video message, since an attachment row is a single-message binding."""
     story = _visible_live_story_or_404(story_id, user["id"])
+    if story["user_id"] != user["id"] and not story["allow_share"]:
+        # WhatsApp-style: forwarding is the author's own privilege by
+        # default. A viewer only gets it too if the author explicitly
+        # turned "Allow share" on for THIS status when posting it — being
+        # merely allowed to VIEW a story (passing the audience check above)
+        # never implied being allowed to re-broadcast it further.
+        raise HTTPException(403, "The person who posted this hasn't allowed it to be forwarded")
 
     text = story["text"] or ""
     if story["kind"] == "link" and story["link_url"] and story["link_url"] not in text:

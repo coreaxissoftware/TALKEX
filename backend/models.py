@@ -387,6 +387,12 @@ class StoryRequest(BaseModel):
     # the 24-hour lifetime then starts when it publishes, not when you wrote it.
     publish_at: Optional[float] = None
 
+    # Off by default: only the author can forward/share this status. Turning
+    # it on lets anyone who's allowed to view it also forward/share it —
+    # same WhatsApp-style opt-in shape as a group's "allow members to send
+    # messages" toggle, decided per-post rather than once for the account.
+    allow_share: bool = False
+
 
 # ── Meetings ──────────────────────────────────────────────────────────────────
 

@@ -746,11 +746,12 @@ export const Stories = {
   // Uploads.create); link needs linkUrl. Omit publishAt to post now, or pass
   // a Unix timestamp to queue it.
   create: ({ text, emoji, background, kind = "text", attachmentId = null,
-             linkUrl = null, publishAt = null, font = "system", fontSize = "medium" }) =>
+             linkUrl = null, publishAt = null, font = "system", fontSize = "medium",
+             allowShare = false }) =>
     post("/stories", {
       text, emoji, background, kind,
       attachment_id: attachmentId, link_url: linkUrl, publish_at: publishAt,
-      font, font_size: fontSize,
+      font, font_size: fontSize, allow_share: allowShare,
     }),
 
   list: () => get("/stories"),

@@ -3,6 +3,19 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // Same STUN-only, no-TURN tradeoff as useCall.js — see that file for why.
 const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
 
+// Same reasoning as useCall.js's identical constants — unconstrained video
+// asks for the camera's/display's native max resolution and frame rate,
+// which is real, measurable CPU/GPU heat. It matters MORE here than in a
+// 1:1 call: a mesh group call encodes this same stream once per OTHER
+// participant (see the O(n²) note on useGroupCall below), so an
+// unconstrained encode is multiplied by however many people are on the call.
+const CAMERA_CONSTRAINTS = {
+  width: { ideal: 1280, max: 1280 },
+  height: { ideal: 720, max: 720 },
+  frameRate: { ideal: 24, max: 30 },
+};
+const SCREEN_SHARE_CONSTRAINTS = { frameRate: { ideal: 15, max: 24 } };
+
 const GROUP_CALL_EVENT_TYPES = new Set([
   "group_call_invite", "group_call_roster", "group_call_participant_joined",
   "group_call_participant_left", "group_call_offer", "group_call_answer", "group_call_ice",
@@ -138,7 +151,7 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
     let localStream;
     try {
       localStream = await navigator.mediaDevices.getUserMedia({
-        audio: true, video: callKind === "video",
+        audio: true, video: callKind === "video" ? CAMERA_CONSTRAINTS : false,
       });
     } catch (problem) {
       toastRef.current?.(problem.name === "NotAllowedError"
@@ -214,7 +227,7 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
     // side change was needed for this to work.
     let videoStream;
     try {
-      videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
+      videoStream = await navigator.mediaDevices.getUserMedia({ video: CAMERA_CONSTRAINTS });
     } catch (problem) {
       toastRef.current?.(problem.name === "NotAllowedError"
         ? "Camera permission was denied" : "No camera is available");
@@ -244,7 +257,9 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
     const nextFacing = current.facingMode === "environment" ? "user" : "environment";
     let newStream;
     try {
-      newStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: nextFacing } });
+      newStream = await navigator.mediaDevices.getUserMedia({
+        video: { ...CAMERA_CONSTRAINTS, facingMode: nextFacing },
+      });
     } catch {
       toastRef.current?.("Could not switch camera");
       return;
@@ -279,7 +294,7 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
 
     let screenStream;
     try {
-      screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      screenStream = await navigator.mediaDevices.getDisplayMedia({ video: SCREEN_SHARE_CONSTRAINTS });
     } catch {
       return;
     }

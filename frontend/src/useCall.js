@@ -11,6 +11,25 @@ import { Messages, newClientMessageId } from "./api.js";
 // silently pretended away.
 const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
 
+// Every getUserMedia/getDisplayMedia call below used to ask for video with
+// no resolution/frame-rate constraints at all, which means "give me
+// whatever this camera's/display's native maximum is" — often 1080p+ at
+// 30-60fps. Encoding that in real time is the actual reason a call makes a
+// laptop or phone run hot: 720p24 looks the same on a chat call's video
+// tile and costs a fraction of the CPU/GPU work to encode. `ideal` lets the
+// browser pick something close on hardware that can't hit these exactly;
+// `max` is the hard ceiling that actually matters for the heat.
+const CAMERA_CONSTRAINTS = {
+  width: { ideal: 1280, max: 1280 },
+  height: { ideal: 720, max: 720 },
+  frameRate: { ideal: 24, max: 30 },
+};
+// Screen content is rarely motion-heavy (a slide, a code editor, a shared
+// doc) — capping the capture frame rate is the single biggest lever here,
+// since a display's native refresh rate (60Hz+) costs far more to encode
+// than anyone reading a shared screen actually benefits from.
+const SCREEN_SHARE_CONSTRAINTS = { frameRate: { ideal: 15, max: 24 } };
+
 // How long an outgoing call rings before the caller gives up on it.
 const RING_TIMEOUT_MS = 30000;
 
@@ -97,7 +116,7 @@ export function useCall(events, send, toast) {
     let localStream;
     try {
       localStream = await navigator.mediaDevices.getUserMedia({
-        audio: true, video: callKind === "video",
+        audio: true, video: callKind === "video" ? CAMERA_CONSTRAINTS : false,
       });
     } catch (problem) {
       toastRef.current?.(problem.name === "NotAllowedError"
@@ -163,7 +182,7 @@ export function useCall(events, send, toast) {
     let localStream;
     try {
       localStream = await navigator.mediaDevices.getUserMedia({
-        audio: true, video: current.callKind === "video",
+        audio: true, video: current.callKind === "video" ? CAMERA_CONSTRAINTS : false,
       });
     } catch (problem) {
       toastRef.current?.(problem.name === "NotAllowedError"
@@ -261,7 +280,7 @@ export function useCall(events, send, toast) {
     // happens; there is no separate "upgrade to video" button.
     let videoStream;
     try {
-      videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
+      videoStream = await navigator.mediaDevices.getUserMedia({ video: CAMERA_CONSTRAINTS });
     } catch (problem) {
       toastRef.current?.(problem.name === "NotAllowedError"
         ? "Camera permission was denied" : "No camera is available");
@@ -293,7 +312,9 @@ export function useCall(events, send, toast) {
     const nextFacing = current.facingMode === "environment" ? "user" : "environment";
     let newStream;
     try {
-      newStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: nextFacing } });
+      newStream = await navigator.mediaDevices.getUserMedia({
+        video: { ...CAMERA_CONSTRAINTS, facingMode: nextFacing },
+      });
     } catch {
       toastRef.current?.("Could not switch camera");
       return;
@@ -328,7 +349,7 @@ export function useCall(events, send, toast) {
     }
     let screenStream;
     try {
-      screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      screenStream = await navigator.mediaDevices.getDisplayMedia({ video: SCREEN_SHARE_CONSTRAINTS });
     } catch {
       return; // the person cancelled the OS share picker — not an error
     }

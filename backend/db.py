@@ -896,6 +896,11 @@ COLUMNS_ADDED_LATER = [
     # shared/mutual chat setting, so turning it on never affects what the
     # other member(s) see of their own history.
     ("chat_members", "vanish_mode", "INTEGER NOT NULL DEFAULT 0"),
+    # WhatsApp-style forwarding control: off by default, meaning only the
+    # story's own author can forward/share it anywhere. The author turns
+    # this on per-story (not a standing account setting) to let whoever
+    # views it re-share it too — see forward_story/_share checks in main.py.
+    ("stories", "allow_share", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

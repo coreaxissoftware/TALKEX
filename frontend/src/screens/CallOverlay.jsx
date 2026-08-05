@@ -9,8 +9,35 @@ export function mmss(totalSeconds) {
 export const canPickAudioOutput = typeof document !== "undefined"
   && typeof document.createElement("video").setSinkId === "function";
 
-export function VideoTag({ stream, muted, style, sinkId }) {
+function pinchDistance(touches) {
+  const [a, b] = touches;
+  return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+}
+
+const MAX_ZOOM = 4;
+
+/**
+ * The one place every video element in a call passes through — remote/self
+ * video in a 1:1 call, every group-call grid tile, and the screen-share/
+ * spotlight main stage all render through this. Zoom/pan lives here
+ * (instead of duplicated per call site) so a scroll-wheel or pinch gesture
+ * works the same way everywhere: pinch/wheel to zoom, drag to pan once
+ * zoomed, double-tap or the reset pill to snap back to fit.
+ *
+ * `zoomable` defaults on but is turned off for tiles where the gesture
+ * would fight something else the tile already needs touch for — the small
+ * self-preview PiP, and the group call's horizontally-SCROLLING filmstrip
+ * strip of small tiles (a 1-finger swipe there needs to reach the
+ * container's native scroll, not get captured by pan-while-zoomed).
+ */
+export function VideoTag({ stream, muted, style, sinkId, zoomable = true }) {
   const ref = useRef(null);
+  const containerRef = useRef(null);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const pinchRef = useRef(null);   // { startDist, startZoom } while a 2-finger touch is active
+  const dragRef = useRef(null);    // { startX, startY, startPan } while panning a zoomed-in tile
+
   useEffect(() => {
     if (ref.current) ref.current.srcObject = stream || null;
   }, [stream]);
@@ -22,7 +49,105 @@ export function VideoTag({ stream, muted, style, sinkId }) {
       ref.current.setSinkId(sinkId).catch(() => {});
     }
   }, [sinkId]);
-  return <video ref={ref} autoPlay playsInline muted={muted} style={style}/>;
+  // A new stream (a different participant, screen share starting/ending)
+  // is a completely different picture — carrying over an old zoom/pan onto
+  // it would be disorienting, not useful.
+  useEffect(() => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  }, [stream]);
+
+  function clampPan(nextZoom, nextPan) {
+    if (nextZoom <= 1) return { x: 0, y: 0 };
+    const box = containerRef.current;
+    const maxX = box ? (box.clientWidth * (nextZoom - 1)) / 2 : 0;
+    const maxY = box ? (box.clientHeight * (nextZoom - 1)) / 2 : 0;
+    return {
+      x: Math.max(-maxX, Math.min(maxX, nextPan.x)),
+      y: Math.max(-maxY, Math.min(maxY, nextPan.y)),
+    };
+  }
+
+  function applyZoom(nextZoom) {
+    const clamped = Math.max(1, Math.min(MAX_ZOOM, nextZoom));
+    setZoom(clamped);
+    setPan((current) => clampPan(clamped, current));
+  }
+
+  function resetZoom() {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  }
+
+  // Desktop: plain wheel to zoom (also what a trackpad pinch reports as).
+  // Only meaningfully different from a page-scroll gesture in that these
+  // tiles are fixed-size grid/flex cells, not scrollable containers, so
+  // there is nothing else here a wheel event would otherwise be for.
+  function handleWheel(event) {
+    event.preventDefault();
+    applyZoom(zoom - event.deltaY * 0.0015);
+  }
+
+  function handleTouchStart(event) {
+    if (event.touches.length === 2) {
+      pinchRef.current = { startDist: pinchDistance(event.touches), startZoom: zoom };
+      dragRef.current = null;
+    } else if (event.touches.length === 1 && zoom > 1) {
+      dragRef.current = {
+        startX: event.touches[0].clientX, startY: event.touches[0].clientY, startPan: pan,
+      };
+    }
+  }
+
+  // preventDefault is only ever called once an actual pinch/pan is
+  // recognized, never on a plain single-finger touch at zoom===1 — that
+  // path is deliberately left alone so it doesn't fight a scrollable
+  // ancestor (nothing here needs it, and blocking it unconditionally is
+  // what would break e.g. the group call's filmstrip if this were ever
+  // reused there without zoomable=false).
+  function handleTouchMove(event) {
+    if (event.touches.length === 2 && pinchRef.current) {
+      event.preventDefault();
+      const scale = pinchDistance(event.touches) / pinchRef.current.startDist;
+      applyZoom(pinchRef.current.startZoom * scale);
+    } else if (event.touches.length === 1 && dragRef.current) {
+      event.preventDefault();
+      const dx = event.touches[0].clientX - dragRef.current.startX;
+      const dy = event.touches[0].clientY - dragRef.current.startY;
+      setPan(clampPan(zoom, { x: dragRef.current.startPan.x + dx, y: dragRef.current.startPan.y + dy }));
+    }
+  }
+
+  function handleTouchEnd(event) {
+    if (event.touches.length < 2) pinchRef.current = null;
+    if (event.touches.length < 1) dragRef.current = null;
+  }
+
+  if (!zoomable) {
+    return <video ref={ref} autoPlay playsInline muted={muted} style={style}/>;
+  }
+
+  const zoomed = zoom > 1.01;
+  return (
+    <div ref={containerRef} style={{ ...style, position: "relative", overflow: "hidden" }}
+         onWheel={handleWheel} onTouchStart={handleTouchStart}
+         onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd}
+         onDoubleClick={zoomed ? resetZoom : undefined}>
+      <video ref={ref} autoPlay playsInline muted={muted} style={{
+        width: "100%", height: "100%", objectFit: style?.objectFit || "cover",
+        transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+        transformOrigin: "center center",
+        transition: pinchRef.current || dragRef.current ? "none" : "transform 0.12s ease-out",
+        cursor: zoomed ? "grab" : undefined,
+      }}/>
+      {zoomed && (
+        <div onClick={resetZoom} title="Reset zoom" style={{
+          position: "absolute", bottom: 6, right: 6, fontSize: 11, color: "#fff",
+          background: "#00000099", padding: "3px 9px", borderRadius: 10, cursor: "pointer",
+        }}>{Math.round(zoom * 100)}% · Reset</div>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -242,7 +367,7 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
 
         {call.callKind === "video" && !call.cameraOff && call.localStream && (
           <div style={{ position: "absolute", bottom: 16, right: 16 }}>
-            <VideoTag stream={call.localStream} muted style={{
+            <VideoTag stream={call.localStream} muted zoomable={false} style={{
               width: 100, height: 140, borderRadius: 12, objectFit: "cover",
               border: "2px solid #ffffff33",
             }}/>

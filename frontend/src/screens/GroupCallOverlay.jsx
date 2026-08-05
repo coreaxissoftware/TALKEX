@@ -608,12 +608,12 @@ function ActiveGroupCall({
               <div style={{ display: "flex", gap: 2, overflowX: "auto", height: 84, flexShrink: 0 }}>
                 {mainStageUserId !== myUserId && (
                   <div style={{ width: 120, flexShrink: 0 }}>
-                    <SelfTile call={call} isHost={isHost} onSwitchCamera={onSwitchCamera}/>
+                    <SelfTile call={call} isHost={isHost} onSwitchCamera={onSwitchCamera} zoomable={false}/>
                   </div>
                 )}
                 {others.filter(([userId]) => userId !== mainStageUserId).map(([userId, participant]) => (
                   <div key={userId} style={{ width: 120, flexShrink: 0 }}>
-                    <ParticipantTile participant={participant} sinkId={sinkId}
+                    <ParticipantTile participant={participant} sinkId={sinkId} zoomable={false}
                                      canKick={isHost} onKick={() => onKickParticipant(userId)}
                                      canSpotlight={isHost} isSpotlighted={false}
                                      onToggleSpotlight={() => toggleSpotlight(userId)}/>
@@ -889,15 +889,16 @@ function ActiveGroupCall({
   );
 }
 
-function SelfTile({ call, isHost, onSwitchCamera }) {
-  const showVideo = call.callKind === "video" && !call.cameraOff && call.localStream;
+function SelfTile({ call, isHost, onSwitchCamera, zoomable = true }) {
+  const showVideo = (call.callKind === "video" || call.sharingScreen) && !call.cameraOff && call.localStream;
   return (
     <div style={{
       position: "relative", background: "#142235", borderRadius: 10,
       display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden",
     }}>
       {showVideo ? (
-        <VideoTag stream={call.localStream} muted style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
+        <VideoTag stream={call.localStream} muted zoomable={zoomable}
+                  style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
       ) : (
         <div style={{ width: 64, height: 64, borderRadius: "50%", background: G.accent }}/>
       )}
@@ -951,7 +952,7 @@ function ReactionOverlay({ reaction }) {
 }
 
 function ParticipantTile({
-  participant, sinkId, canKick, onKick, canSpotlight, isSpotlighted, onToggleSpotlight,
+  participant, sinkId, canKick, onKick, canSpotlight, isSpotlighted, onToggleSpotlight, zoomable = true,
 }) {
   const hasVideo = participant.stream?.getVideoTracks().length > 0;
   return (
@@ -962,7 +963,7 @@ function ParticipantTile({
       {/* Always mounted so this participant's audio plays even with no
           video track (voice call, or their camera's off) — hidden rather
           than unmounted, same reasoning as CallOverlay's remote VideoTag. */}
-      <VideoTag stream={participant.stream} sinkId={sinkId} style={hasVideo ? {
+      <VideoTag stream={participant.stream} sinkId={sinkId} zoomable={zoomable} style={hasVideo ? {
         width: "100%", height: "100%", objectFit: "cover",
       } : { display: "none" }}/>
       {!hasVideo && <Av av={participant.avatar} color={participant.color} size={64}/>}

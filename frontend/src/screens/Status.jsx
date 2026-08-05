@@ -340,6 +340,10 @@ function Compose({ onClose, onDone, toast }) {
   const [later, setLater] = useState(false);
   const [when, setWhen] = useState("");
   const [busy, setBusy] = useState(false);
+  // Off by default — only you can forward/share this status unless you
+  // turn this on, same WhatsApp-style opt-in the viewer's Forward/Share
+  // menu items are gated on (see moreItems in Viewer below).
+  const [allowShare, setAllowShare] = useState(false);
 
   // Set once the file for a photo/video/audio status has actually finished
   // uploading — the same two-step "upload, then reference the id" pattern
@@ -399,7 +403,7 @@ function Compose({ onClose, onDone, toast }) {
         text: text.trim(), emoji, background, kind,
         attachmentId: upload?.attachmentId || null,
         linkUrl: kind === "link" ? trimmedLink : null,
-        publishAt, font, fontSize,
+        publishAt, font, fontSize, allowShare,
       });
       toast(later ? "Status queued" : "Status posted");
       onDone();
@@ -550,6 +554,18 @@ function Compose({ onClose, onDone, toast }) {
         )}
 
         <label style={{
+          display: "flex", alignItems: "center", gap: 10, marginBottom: 8,
+          fontSize: 14, cursor: "pointer",
+        }}>
+          <input type="checkbox" checked={allowShare}
+                 onChange={(event) => setAllowShare(event.target.checked)}/>
+          Allow others to forward/share this
+        </label>
+        <div style={{ fontSize: 12, color: G.muted, marginBottom: 12, marginLeft: 26 }}>
+          Off by default — only you can forward or share this status elsewhere.
+        </div>
+
+        <label style={{
           display: "flex", alignItems: "center", gap: 10, marginBottom: 12,
           fontSize: 14, cursor: "pointer",
         }}>
@@ -659,9 +675,15 @@ function Viewer({ story, me, toast, onClose }) {
     }
   }
 
+  // WhatsApp-style: forwarding/sharing is the author's own privilege by
+  // default. A viewer only gets it too if the author turned "Allow share"
+  // on for this specific status — matches the server-side check in
+  // forward_story (main.py), repeated here so the option isn't even shown
+  // for a viewer it would just 403 for.
+  const canReshare = isAuthor || Boolean(story.allow_share);
   const moreItems = [
-    { label: "Forward", icon: I.fwd("#fff", 18), onClick: () => setForwarding(true) },
-    { label: "Share", icon: I.send("#fff", 18), onClick: shareStory },
+    ...(canReshare ? [{ label: "Forward", icon: I.fwd("#fff", 18), onClick: () => setForwarding(true) }] : []),
+    ...(canReshare ? [{ label: "Share", icon: I.send("#fff", 18), onClick: shareStory }] : []),
     ...(copyableText ? [{ label: "Copy", icon: I.link("#fff", 18), onClick: copyStory }] : []),
     ...(isAuthor ? [{ label: "Delete", icon: I.trash("#ff8080", 18), onClick: deleteThisStory }] : []),
   ];
@@ -672,14 +694,16 @@ function Viewer({ story, me, toast, onClose }) {
       zIndex: 70, display: "flex", flexDirection: "column",
       alignItems: "center", justifyContent: "center", padding: 30,
     }}>
-      <div onClick={(event) => { event.stopPropagation(); setShowMore(true); }} title="More"
-           style={{
-             position: "absolute", top: 16, right: 16, zIndex: 1,
-             width: 34, height: 34, borderRadius: "50%", cursor: "pointer",
-             background: "#ffffff1a", display: "flex", alignItems: "center", justifyContent: "center",
-           }}>
-        {I.moreVertical("#fff", 18)}
-      </div>
+      {moreItems.length > 0 && (
+        <div onClick={(event) => { event.stopPropagation(); setShowMore(true); }} title="More"
+             style={{
+               position: "absolute", top: 16, right: 16, zIndex: 1,
+               width: 34, height: 34, borderRadius: "50%", cursor: "pointer",
+               background: "#ffffff1a", display: "flex", alignItems: "center", justifyContent: "center",
+             }}>
+          {I.moreVertical("#fff", 18)}
+        </div>
+      )}
 
       {(story.kind === "photo" || story.kind === "video") && (
         <div onClick={(event) => event.stopPropagation()}>
