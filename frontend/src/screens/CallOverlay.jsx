@@ -160,7 +160,26 @@ export function VideoTag({ stream, muted, style, sinkId, zoomable = true }) {
 
   const zoomed = zoom > 1.01;
   return (
-    <div ref={containerRef} style={{ ...style, position: "relative", overflow: "hidden" }}
+    <div ref={containerRef} style={{
+      ...style, position: "relative", overflow: "hidden",
+      // Wrapping the <video> in a plain <div> (needed so zoom/pan and the
+      // reset pill have somewhere to live) introduced a real flexbox bug:
+      // a <video> is a "replaced element" the flex algorithm sizes safely
+      // by default, but a generic <div> is not — inside a flex ancestor
+      // with no explicit height of its own (the call screen's video area
+      // is `flex: 1`, sized by whatever's left over, not a fixed number),
+      // this div's `height: 100%` could resolve against the flex item's
+      // CONTENT size instead of its actual allotted space, letting the
+      // whole video area balloon to the video's natural/portrait size and
+      // push the mute/camera/end-call bar completely off the bottom of
+      // the screen — which is what "no end call button, video is huge"
+      // turned out to actually be, not a zoom-transform bug. `minWidth`/
+      // `minHeight: 0` is the standard fix: it tells this flex descendant
+      // it's allowed to be SMALLER than its content wants, which is
+      // exactly what should happen here since the content (the video) is
+      // meant to be cropped to fit, not to dictate the box's size.
+      minWidth: 0, minHeight: 0,
+    }}
          onWheel={handleWheel} onTouchStart={handleTouchStart}
          onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd}
          onDoubleClick={zoomed ? resetZoom : undefined}>
@@ -376,7 +395,13 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
 
   return (
     <>
-      <div style={{ flex: 1, position: "relative" }}>
+      {/* overflow: hidden + minHeight: 0 is a backstop against the same
+          flex-sizing issue VideoTag's own wrapper already guards against
+          (see the comment there) — belt and suspenders, so even if
+          something inside this area ever again asks for more room than
+          it's actually got, it gets clipped here instead of pushing the
+          Mute/Camera/End call bar below it clean off the screen. */}
+      <div style={{ flex: 1, position: "relative", overflow: "hidden", minHeight: 0 }}>
         {/* Always mounted, regardless of whether there's a video track, so
             remote audio actually plays on a voice-only call — hidden
             visually rather than left unmounted when there's nothing to

@@ -5591,10 +5591,28 @@ async def websocket_endpoint(
                 })
                 if rejoining:
                     pass  # resumed silently — the room was never told this person left
-                elif is_first:
+                elif is_first and not live_meeting:
                     # Ring only members who currently allow calls here —
                     # everyone else simply never hears about this room, the
                     # same as if they weren't a member at all.
+                    #
+                    # The `not live_meeting` half of this condition matters
+                    # a lot: `_group_calls` is in-memory only (see its own
+                    # docstring) and is wiped by every server restart/
+                    # redeploy, while `meetings.status = 'live'` is
+                    # persisted in the database and survives one. Without
+                    # this check, the first person to open an
+                    # already-announced meeting after a restart looked
+                    # exactly like `is_first` for a brand new ad-hoc call —
+                    # so joining a meeting everyone already knew was
+                    # running instead rang the whole chat like a fresh
+                    # incoming call, which the person on the other end
+                    # never asked for and had every reason to just decline/
+                    # let time out. A meeting already marked live has, by
+                    # definition, already been announced once (the
+                    # meeting_started broadcast in start_meeting) — nobody
+                    # needs to be rung again just because they happen to be
+                    # the first to reconnect the actual call room.
                     eligible = db.query_all(
                         """
                         SELECT cm.user_id FROM chat_members cm

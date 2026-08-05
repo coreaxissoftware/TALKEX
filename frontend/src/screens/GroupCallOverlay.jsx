@@ -591,8 +591,8 @@ function ActiveGroupCall({
 
   return (
     <>
-      <div style={{ position: "relative", flex: 1, overflow: "hidden", display: "flex" }}>
-        <div style={{ flex: 1, minWidth: 0, position: "relative" }}>
+      <div style={{ position: "relative", flex: 1, overflow: "hidden", display: "flex", minHeight: 0 }}>
+        <div style={{ flex: 1, minWidth: 0, minHeight: 0, position: "relative" }}>
           {mainStageUserId ? (
             <div style={{ height: "100%", display: "flex", flexDirection: "column", gap: 2, padding: 2 }}>
               <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
