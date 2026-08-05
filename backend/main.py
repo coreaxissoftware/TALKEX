@@ -5184,9 +5184,18 @@ async def websocket_endpoint(
                     call_kind = payload.get("call_kind")
                     if call_kind not in ("voice", "video"):
                         continue
-                    if not calling_permitted(chat_id, user_id) or not calling_permitted(chat_id, to_user_id):
+                    caller_ok = calling_permitted(chat_id, user_id)
+                    callee_ok = calling_permitted(chat_id, to_user_id)
+                    if not caller_ok or not callee_ok:
+                        caller_row = db.query_one("SELECT calling_enabled FROM users WHERE id = ?", (user_id,))
+                        callee_row = db.query_one("SELECT calling_enabled FROM users WHERE id = ?", (to_user_id,))
+                        caller_mem = db.query_one("SELECT calls_enabled FROM chat_members WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+                        callee_mem = db.query_one("SELECT calls_enabled FROM chat_members WHERE chat_id = ? AND user_id = ?", (chat_id, to_user_id))
                         print(f"[CALL] REJECTED: calling_permitted failed "
-                              f"chat={chat_id} from={user_id} to={to_user_id}")
+                              f"caller_global={caller_row['calling_enabled'] if caller_row else 'N/A'} "
+                              f"caller_chat={caller_mem['calls_enabled'] if caller_mem else 'N/A'} "
+                              f"callee_global={callee_row['calling_enabled'] if callee_row else 'N/A'} "
+                              f"callee_chat={callee_mem['calls_enabled'] if callee_mem else 'N/A'}")
                         await socket.send_json({
                             "type": "call_error", "chat_id": chat_id,
                             "reason": "This person isn't accepting calls right now",
