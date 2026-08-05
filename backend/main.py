@@ -37,6 +37,7 @@ import urllib.parse
 import urllib.request
 from collections import defaultdict
 from contextlib import asynccontextmanager
+from html.parser import HTMLParser
 
 logger = logging.getLogger("talkex.main")
 
@@ -1140,6 +1141,115 @@ async def _deliver_webhook(hook_id: str, url: str, secret: str, event: dict):
         status = "error"
     db.execute("UPDATE webhooks SET last_triggered_at = ?, last_status = ? WHERE id = ?",
                (time.time(), status, hook_id))
+
+
+# ── Link preview ─────────────────────────────────────────────────────────────
+# Fetching a URL someone pasted into chat is the same shape of request-forgery
+# risk as a webhook (main.py this server making an outbound request to an
+# address a user supplied) — _webhook_url_is_safe already resolves the
+# hostname and refuses anything private/loopback/link-local, so it's reused
+# here verbatim rather than writing a second copy of the same check.
+
+LINK_PREVIEW_TTL_SECONDS = 3600
+LINK_PREVIEW_MAX_CACHE = 500
+LINK_PREVIEW_MAX_BYTES = 300_000  # enough for <head> on any real page
+
+_link_preview_cache: dict[str, tuple[dict, float]] = {}
+
+
+class _OpenGraphParser(HTMLParser):
+    """
+    Pulls just enough out of a page's <head> to build a preview card: the
+    plain <title>, and whichever og:* meta tags are present. Stdlib only —
+    this app has no HTML/DOM parsing dependency anywhere else, and a full
+    parser would be a lot of weight for three optional strings.
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.og = {}
+        self.title = None
+        self._in_title = False
+        self._done = False
+
+    def handle_starttag(self, tag, attrs):
+        if self._done:
+            return
+        if tag == "title":
+            self._in_title = True
+        elif tag == "meta":
+            attrs_dict = dict(attrs)
+            prop = attrs_dict.get("property") or attrs_dict.get("name")
+            if prop in ("og:title", "og:description", "og:image", "og:site_name"):
+                content = attrs_dict.get("content")
+                if content:
+                    self.og[prop] = content
+        elif tag == "body":
+            # Nothing worth reading past <head> starts — stop scanning the
+            # rest of a potentially large page.
+            self._done = True
+
+    def handle_endtag(self, tag):
+        if tag == "title":
+            self._in_title = False
+
+    def handle_data(self, data):
+        if self._in_title and self.title is None:
+            self.title = data.strip()
+
+
+def _fetch_link_preview(url: str) -> dict:
+    request = urllib.request.Request(url, headers={"User-Agent": "TalkExLinkPreview/1.0"})
+    with urllib.request.urlopen(request, timeout=6) as response:
+        raw = response.read(LINK_PREVIEW_MAX_BYTES)
+    html_text = raw.decode(errors="ignore")
+    parser = _OpenGraphParser()
+    try:
+        parser.feed(html_text)
+    except Exception:
+        pass  # a malformed/truncated fetch still yields whatever was parsed before the error
+    parsed_url = urllib.parse.urlparse(url)
+    return {
+        "url": url,
+        "title": parser.og.get("og:title") or parser.title,
+        "description": parser.og.get("og:description"),
+        "image": parser.og.get("og:image"),
+        "site_name": parser.og.get("og:site_name") or parsed_url.hostname,
+    }
+
+
+@app.get("/link-preview")
+async def link_preview(url: str, user: dict = Depends(current_user)):
+    """
+    Metadata for a link card under a chat message — title/description/image,
+    best-effort. Never raises past a bad/unreachable URL; an empty-ish
+    preview (just the hostname) is a perfectly fine thing for the client to
+    render, and a 4xx/5xx here would be a strange way to fail something this
+    optional.
+    """
+    cached = _link_preview_cache.get(url)
+    if cached and cached[1] > time.time():
+        return cached[0]
+
+    if not _webhook_url_is_safe(url):
+        return {"url": url, "title": None, "description": None, "image": None, "site_name": None}
+
+    try:
+        data = await asyncio.to_thread(_fetch_link_preview, url)
+    except Exception:
+        parsed_url = urllib.parse.urlparse(url)
+        data = {
+            "url": url, "title": None, "description": None, "image": None,
+            "site_name": parsed_url.hostname,
+        }
+
+    if len(_link_preview_cache) >= LINK_PREVIEW_MAX_CACHE:
+        now = time.time()
+        for stale_url, (_, expires_at) in list(_link_preview_cache.items()):
+            if expires_at <= now:
+                del _link_preview_cache[stale_url]
+    _link_preview_cache[url] = (data, time.time() + LINK_PREVIEW_TTL_SECONDS)
+    return data
 
 
 async def dispatch_webhooks(background_tasks: BackgroundTasks, chat_id: str, sender_id: str, message: dict):
@@ -4919,6 +5029,42 @@ _group_call_waiting: dict[str, dict[str, dict]] = {}
 _group_call_leave_tasks: dict[tuple[str, str], asyncio.Task] = {}
 GROUP_CALL_RECONNECT_GRACE_SECONDS = 20
 
+# chat_id -> {"screen_share": "host"|"everyone", "whiteboard": "host"|"everyone"}.
+# A feature missing from this dict (the common case) behaves as "everyone" —
+# every call before this existed keeps working exactly as it did. Only the
+# host can flip an entry to "host", putting that action under their control
+# instead of any current participant's.
+_group_call_permissions: dict[str, dict] = {}
+
+# chat_id -> user_id currently sharing their screen, or absent if nobody is.
+# The single source of truth for "who is sharing" — screen share used to have
+# zero backend involvement at all, so no other participant's client had any
+# authoritative way to know it was happening.
+_group_call_screen_sharer: dict[str, str] = {}
+
+# chat_id -> user_id currently spotlighted by the host, or absent.
+_group_call_spotlight: dict[str, str] = {}
+
+
+async def _clear_departing_user_special_state(chat_id: str, user_id: str):
+    """
+    Called for a specific user leaving/being removed from a call room
+    (not just the room emptying out entirely) — if they happened to be the
+    screen-sharer or the spotlighted participant, that fact must not survive
+    them, or everyone else's client would keep pointing its main stage at a
+    stream/person that's no longer even in the call.
+    """
+    if _group_call_screen_sharer.get(chat_id) == user_id:
+        del _group_call_screen_sharer[chat_id]
+        await hub.send_to_chat(chat_id, {
+            "type": "group_call_screen_share_stopped", "chat_id": chat_id, "user_id": user_id,
+        })
+    if _group_call_spotlight.get(chat_id) == user_id:
+        del _group_call_spotlight[chat_id]
+        await hub.send_to_chat(chat_id, {
+            "type": "group_call_spotlight_changed", "chat_id": chat_id, "user_id": None,
+        })
+
 
 def _participant_info(user_id: str) -> dict:
     row = db.query_one("SELECT name, avatar_letter, color FROM users WHERE id = ?", (user_id,))
@@ -4950,6 +5096,24 @@ async def _reassign_host_if_needed(chat_id: str, leaving_user_id: str, remaining
     })
 
 
+def _group_call_room_state(chat_id: str) -> dict:
+    """
+    The facts about a room a joiner (fresh or reconnecting) needs beyond the
+    participant list itself — who's host, what the host has restricted, and
+    who's currently sharing/spotlighted. Without this a late joiner only
+    ever learns these from the NEXT change event, so their client would sit
+    with defaults (host_id None, no screen share visible, etc.) until
+    something happened to happen to re-announce it.
+    """
+    return {
+        "host_id": _group_call_hosts.get(chat_id),
+        "permissions": _group_call_permissions.get(
+            chat_id, {"screen_share": "everyone", "whiteboard": "everyone"}),
+        "screen_sharer_id": _group_call_screen_sharer.get(chat_id),
+        "spotlight_user_id": _group_call_spotlight.get(chat_id),
+    }
+
+
 async def _admit_to_group_call(chat_id: str, user_id: str):
     """The tail end of group_call_start's normal (non-waiting-room) path,
     factored out so an admitted waiting-room joiner goes through the exact
@@ -4959,7 +5123,7 @@ async def _admit_to_group_call(chat_id: str, user_id: str):
     room[user_id] = _participant_info(user_id)
     await hub.send_to_user(user_id, {
         "type": "group_call_roster", "chat_id": chat_id, "participants": roster,
-        "host_id": _group_call_hosts.get(chat_id),
+        **_group_call_room_state(chat_id),
     })
     await hub.send_to_chat(chat_id, {
         "type": "group_call_participant_joined", "chat_id": chat_id, **room[user_id],
@@ -4980,6 +5144,9 @@ async def _force_end_group_call(chat_id: str):
     del _group_calls[chat_id]
     _group_call_hosts.pop(chat_id, None)
     _group_call_waiting.pop(chat_id, None)
+    _group_call_permissions.pop(chat_id, None)
+    _group_call_screen_sharer.pop(chat_id, None)
+    _group_call_spotlight.pop(chat_id, None)
     await hub.send_to_chat(chat_id, {"type": "group_call_ended", "chat_id": chat_id})
 
 
@@ -5027,10 +5194,14 @@ async def _finalize_group_call_departure(chat_id: str, user_id: str):
             "type": "group_call_participant_left", "chat_id": chat_id, "user_id": user_id,
         })
         await _reassign_host_if_needed(chat_id, user_id, participants)
+        await _clear_departing_user_special_state(chat_id, user_id)
     else:
         del _group_calls[chat_id]
         _group_call_hosts.pop(chat_id, None)
         _group_call_waiting.pop(chat_id, None)
+        _group_call_permissions.pop(chat_id, None)
+        _group_call_screen_sharer.pop(chat_id, None)
+        _group_call_spotlight.pop(chat_id, None)
         await _end_live_meeting_for_chat(chat_id)
 
 
@@ -5324,7 +5495,7 @@ async def websocket_endpoint(
 
                 await socket.send_json({
                     "type": "group_call_roster", "chat_id": chat_id, "participants": roster,
-                    "host_id": _group_call_hosts.get(chat_id),
+                    **_group_call_room_state(chat_id),
                 })
                 if rejoining:
                     pass  # resumed silently — the room was never told this person left
@@ -5368,10 +5539,14 @@ async def websocket_endpoint(
                             "type": "group_call_participant_left", "chat_id": chat_id, "user_id": user_id,
                         })
                         await _reassign_host_if_needed(chat_id, user_id, room)
+                        await _clear_departing_user_special_state(chat_id, user_id)
                     else:
                         del _group_calls[chat_id]
                         _group_call_hosts.pop(chat_id, None)
                         _group_call_waiting.pop(chat_id, None)
+                        _group_call_permissions.pop(chat_id, None)
+                        _group_call_screen_sharer.pop(chat_id, None)
+                        _group_call_spotlight.pop(chat_id, None)
                         await _end_live_meeting_for_chat(chat_id)
 
             elif kind in ("group_call_admit", "group_call_deny"):
@@ -5414,6 +5589,115 @@ async def websocket_endpoint(
                 await hub.send_to_chat(chat_id, {
                     "type": "group_call_participant_left", "chat_id": chat_id, "user_id": target_id,
                 }, exclude_user=target_id)
+                await _clear_departing_user_special_state(chat_id, target_id)
+
+            elif kind == "group_call_transfer_host":
+                # Handing the moderation role to someone else, deliberately —
+                # unlike _reassign_host_if_needed, which only fires when the
+                # current host disappears. Reuses that same broadcast type/
+                # shape, so every client's existing group_call_host_changed
+                # handler already does the right thing with this.
+                chat_id = payload.get("chat_id", "")
+                target_id = payload.get("target", "")
+                room = _group_calls.get(chat_id)
+                if not room or _group_call_hosts.get(chat_id) != user_id or target_id not in room:
+                    continue
+                if target_id == user_id:
+                    continue
+                _group_call_hosts[chat_id] = target_id
+                await hub.send_to_chat(chat_id, {
+                    "type": "group_call_host_changed", "chat_id": chat_id, "host_id": target_id,
+                })
+
+            elif kind == "group_call_set_permission":
+                # Host-only: decides whether screen share / whiteboard are
+                # open to anyone currently in the room, or restricted to the
+                # host alone. Missing from _group_call_permissions defaults
+                # to "everyone" — see the dict's own docstring above.
+                chat_id = payload.get("chat_id", "")
+                feature = payload.get("feature", "")
+                policy = payload.get("policy", "")
+                if (_group_call_hosts.get(chat_id) != user_id
+                        or feature not in ("screen_share", "whiteboard")
+                        or policy not in ("host", "everyone")):
+                    continue
+                permissions = _group_call_permissions.setdefault(
+                    chat_id, {"screen_share": "everyone", "whiteboard": "everyone"})
+                permissions[feature] = policy
+                await hub.send_to_chat(chat_id, {
+                    "type": "group_call_permissions_changed", "chat_id": chat_id, "permissions": permissions,
+                })
+
+            elif kind == "group_call_mute_participant":
+                # A single-target sibling of group_call_force_mute_all, same
+                # trust model: the server cannot reach into someone else's
+                # microphone, it can only ask their own client to mute
+                # itself, which every client does unconditionally on
+                # receipt. Everyone ELSE in the room gets a separate,
+                # informational broadcast so their tile can show a "muted by
+                # host" badge on the target.
+                chat_id = payload.get("chat_id", "")
+                target_id = payload.get("target", "")
+                room = _group_calls.get(chat_id)
+                if not room or _group_call_hosts.get(chat_id) != user_id or target_id not in room:
+                    continue
+                if target_id == user_id:
+                    continue
+                await hub.send_to_user(target_id, {"type": "group_call_muted_by_host", "chat_id": chat_id})
+                await hub.send_to_chat(chat_id, {
+                    "type": "group_call_participant_muted", "chat_id": chat_id, "user_id": target_id,
+                }, exclude_user=target_id)
+
+            elif kind == "group_call_spotlight":
+                # target: null clears the spotlight. Host-only, and pinned
+                # for everyone in the room at once — this isn't a personal
+                # "pin for my own view" preference.
+                chat_id = payload.get("chat_id", "")
+                target_id = payload.get("target")
+                room = _group_calls.get(chat_id)
+                if not room or _group_call_hosts.get(chat_id) != user_id:
+                    continue
+                if target_id is not None and target_id != user_id and target_id not in room:
+                    continue
+                if target_id is None:
+                    _group_call_spotlight.pop(chat_id, None)
+                else:
+                    _group_call_spotlight[chat_id] = target_id
+                await hub.send_to_chat(chat_id, {
+                    "type": "group_call_spotlight_changed", "chat_id": chat_id, "user_id": target_id,
+                })
+
+            elif kind in ("group_call_screen_share_start", "group_call_screen_share_stop"):
+                # Screen share used to be pure client-side replaceTrack with
+                # no server involvement at all — nobody else's client had any
+                # authoritative signal that it was even happening, which is
+                # why a share could go out with nothing on the other end
+                # visibly reacting to it. This makes "who is sharing" a real
+                # fact the server tracks and broadcasts, and (for start) the
+                # one place screen-share's own host-only policy is actually
+                # enforced, same shape as the whiteboard_open check below.
+                chat_id = payload.get("chat_id", "")
+                room = _group_calls.get(chat_id)
+                if not room or user_id not in room:
+                    continue
+                if kind == "group_call_screen_share_start":
+                    policy = _group_call_permissions.get(chat_id, {}).get("screen_share", "everyone")
+                    if policy == "host" and _group_call_hosts.get(chat_id) != user_id:
+                        await socket.send_json({
+                            "type": "group_call_action_denied", "chat_id": chat_id, "action": "screen_share",
+                            "reason": "Only the host can share their screen right now",
+                        })
+                        continue
+                    _group_call_screen_sharer[chat_id] = user_id
+                    await hub.send_to_chat(chat_id, {
+                        "type": "group_call_screen_share_started", "chat_id": chat_id, "user_id": user_id,
+                    })
+                else:
+                    if _group_call_screen_sharer.get(chat_id) == user_id:
+                        del _group_call_screen_sharer[chat_id]
+                    await hub.send_to_chat(chat_id, {
+                        "type": "group_call_screen_share_stopped", "chat_id": chat_id, "user_id": user_id,
+                    })
 
             elif kind == "group_call_add_people":
                 # Any current participant can invite specific fellow chat
@@ -5468,6 +5752,24 @@ async def websocket_endpoint(
                 room = _group_calls.get(chat_id)
                 if not room or user_id not in room:
                     continue
+                # Opening the board is the one action here host-only policy
+                # can restrict — drawing on an already-open board, closing
+                # it, and the laser pointer are left alone regardless of
+                # policy, same as a real meeting app doesn't re-gate every
+                # stroke once the tool itself is available. A denied opener
+                # is told directly (rather than just silently not seeing the
+                # relay, which never comes back to them anyway per the
+                # exclude_user below) so their own optimistic client state
+                # gets corrected instead of showing an open board nobody
+                # else can see.
+                if kind == "whiteboard_open":
+                    policy = _group_call_permissions.get(chat_id, {}).get("whiteboard", "everyone")
+                    if policy == "host" and _group_call_hosts.get(chat_id) != user_id:
+                        await socket.send_json({
+                            "type": "group_call_action_denied", "chat_id": chat_id, "action": "whiteboard",
+                            "reason": "Only the host can open the whiteboard right now",
+                        })
+                        continue
                 relay = {"type": kind, "chat_id": chat_id, "from": user_id}
                 if kind == "whiteboard_draw":
                     relay["stroke"] = payload.get("stroke")

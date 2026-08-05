@@ -11,6 +11,9 @@ const GROUP_CALL_EVENT_TYPES = new Set([
   "group_call_reaction", "group_call_raise_hand", "group_call_lower_hand",
   "group_call_caption", "breakout_rooms_created", "breakout_rooms_closed",
   "group_call_waiting", "group_call_admitted", "group_call_join_denied", "group_call_join_request",
+  "group_call_muted_by_host", "group_call_participant_muted",
+  "group_call_screen_share_started", "group_call_screen_share_stopped",
+  "group_call_permissions_changed", "group_call_action_denied", "group_call_spotlight_changed",
 ]);
 
 let reactionKeyCounter = 0; // a plain module counter, not Date.now()/Math.random() — this file has no such restriction, but a counter is simpler and collision-free either way
@@ -38,6 +41,9 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
   //   phase: "incoming" | "active",
   //   chatId, callKind, muted, cameraOff,
   //   inviterName, inviterAvatar, inviterColor,  // only set during "incoming"
+  //   permissions: { screen_share, whiteboard },  // "host" | "everyone", host-set policy
+  //   screenSharerId,  // null | userId — authoritative, from the server, not a local guess
+  //   spotlightUserId, // null | userId — host-pinned main-stage target
   //   localStream,
   //   participants: { [userId]: { name, avatar, color, stream } },
   // }
@@ -150,6 +156,8 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
     setCall((current) => ({
       phase: "active", chatId, callKind, muted: false, cameraOff: false, facingMode: "user",
       localStream, participants: current?.participants || {},
+      permissions: { screen_share: "everyone", whiteboard: "everyone" },
+      screenSharerId: null, spotlightUserId: null,
     }));
 
     sendRef.current({ type: "group_call_start", chat_id: chatId, call_kind: callKind, password });
@@ -256,15 +264,12 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
   // call is a renegotiation this pass doesn't do.
   const shareScreen = useCallback(async () => {
     const current = callRef.current;
-    const peers = Object.values(peersRef.current);
+    const peers = Object.entries(peersRef.current);
     if (!current?.localStream || peers.length === 0) return;
     const senders = peers
-      .map((pc) => pc.getSenders().find((s) => s.track?.kind === "video"))
+      .map(([, pc]) => pc.getSenders().find((s) => s.track?.kind === "video"))
       .filter(Boolean);
-    if (senders.length === 0) {
-      toastRef.current?.("Turn your camera on first to share your screen");
-      return;
-    }
+
     let screenStream;
     try {
       screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
@@ -279,15 +284,54 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
     // crisp static frame matters more than smoothness.
     screenTrack.contentHint = "motion";
     screenTrackRef.current = screenTrack;
-    await Promise.all(senders.map((sender) => sender.replaceTrack(screenTrack)));
-    setCall((c) => (c ? { ...c, sharingScreen: true, screenOptimizeFor: "motion" } : c));
+
+    if (senders.length > 0) {
+      // A video track is already flowing (camera was on) — swap it for the
+      // screen capture on each connection's existing sender, no
+      // renegotiation needed.
+      await Promise.all(senders.map((sender) => sender.replaceTrack(screenTrack)));
+    } else {
+      // No video track yet — this was a voice-only call, or the camera was
+      // never turned on. Mirrors toggleCamera's identical situation above:
+      // add the track to every peer connection and renegotiate, rather than
+      // silently refusing to share (the previous behavior — a share that
+      // required the camera to already be on is why sharing sometimes
+      // looked like it did nothing).
+      current.localStream.addTrack(screenTrack);
+      await Promise.all(peers.map(async ([peerId, pc]) => {
+        pc.addTrack(screenTrack, current.localStream);
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        sendRef.current({ type: "group_call_offer", chat_id: current.chatId, to: peerId, sdp: offer });
+      }));
+    }
+
+    setCall((c) => (c ? {
+      ...c, sharingScreen: true, screenOptimizeFor: "motion",
+      // SelfTile only draws localStream's video when callKind is "video" —
+      // a call that started voice-only needs this flipped or your own
+      // screen-share preview would stay hidden from you (remote
+      // participants aren't affected: their tiles key off the stream's
+      // actual tracks, not callKind).
+      callKind: senders.length > 0 ? c.callKind : "video",
+    } : c));
+    sendRef.current({ type: "group_call_screen_share_start", chat_id: current.chatId });
 
     screenTrack.onended = async () => {
       screenTrackRef.current = null;
-      if (cameraTrack) {
-        await Promise.all(senders.map((sender) => sender.replaceTrack(cameraTrack).catch(() => {})));
+      const c = callRef.current;
+      if (senders.length > 0) {
+        if (cameraTrack) {
+          await Promise.all(senders.map((sender) => sender.replaceTrack(cameraTrack).catch(() => {})));
+        }
+      } else {
+        c?.localStream?.removeTrack(screenTrack);
       }
-      setCall((c) => (c ? { ...c, sharingScreen: false, screenOptimizeFor: null } : c));
+      setCall((current2) => (current2 ? {
+        ...current2, sharingScreen: false, screenOptimizeFor: null,
+        callKind: senders.length > 0 || cameraTrack ? current2.callKind : "voice",
+      } : current2));
+      if (c) sendRef.current({ type: "group_call_screen_share_stop", chat_id: c.chatId });
     };
   }, []);
 
@@ -309,6 +353,33 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
     const current = callRef.current;
     if (!current) return;
     sendRef.current({ type: "group_call_force_mute_all", chat_id: current.chatId });
+  }, []);
+
+  const muteParticipant = useCallback((userId) => {
+    const current = callRef.current;
+    if (!current) return;
+    sendRef.current({ type: "group_call_mute_participant", chat_id: current.chatId, target: userId });
+  }, []);
+
+  const spotlight = useCallback((userId) => {
+    const current = callRef.current;
+    if (!current) return;
+    sendRef.current({ type: "group_call_spotlight", chat_id: current.chatId, target: userId });
+  }, []);
+
+  const transferHost = useCallback((userId) => {
+    const current = callRef.current;
+    if (!current) return;
+    sendRef.current({ type: "group_call_transfer_host", chat_id: current.chatId, target: userId });
+  }, []);
+
+  // "everyone" or "host" for feature "screen_share" | "whiteboard" — the
+  // server is the actual enforcement point (see group_call_set_permission
+  // in main.py); this just asks it to change the policy.
+  const setPermission = useCallback((feature, policy) => {
+    const current = callRef.current;
+    if (!current) return;
+    sendRef.current({ type: "group_call_set_permission", chat_id: current.chatId, feature, policy });
   }, []);
 
   const kickParticipant = useCallback((userId) => {
@@ -465,7 +536,16 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
           teardown();
           setCall(null);
         } else if (event.type === "group_call_roster") {
-          setCall((c) => (c ? { ...c, hostId: event.host_id } : c));
+          // host_id/permissions/screen_sharer_id/spotlight_user_id are the
+          // room's current facts, not just this join's — a reconnect or a
+          // late joiner needs to start from wherever the room already is,
+          // not from these fields' defaults.
+          setCall((c) => (c ? {
+            ...c, hostId: event.host_id,
+            permissions: event.permissions || c.permissions,
+            screenSharerId: event.screen_sharer_id ?? null,
+            spotlightUserId: event.spotlight_user_id ?? null,
+          } : c));
           for (const participant of event.participants) {
             // Already connected — this roster is a resume-after-reconnect
             // (see the reconnectedAt effect above), not a fresh join, and
@@ -480,6 +560,27 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
         } else if (event.type === "group_call_force_muted") {
           if (!current.muted) toggleMute();
           toastRef.current?.("The host muted everyone");
+        } else if (event.type === "group_call_muted_by_host") {
+          if (!current.muted) toggleMute();
+          toastRef.current?.("The host muted you");
+        } else if (event.type === "group_call_participant_muted") {
+          addParticipant(event.user_id, { mutedByHost: true });
+        } else if (event.type === "group_call_screen_share_started") {
+          setCall((c) => (c ? { ...c, screenSharerId: event.user_id } : c));
+        } else if (event.type === "group_call_screen_share_stopped") {
+          setCall((c) => (c && c.screenSharerId === event.user_id ? { ...c, screenSharerId: null } : c));
+        } else if (event.type === "group_call_permissions_changed") {
+          setCall((c) => (c ? { ...c, permissions: event.permissions } : c));
+        } else if (event.type === "group_call_spotlight_changed") {
+          setCall((c) => (c ? { ...c, spotlightUserId: event.user_id } : c));
+        } else if (event.type === "group_call_action_denied") {
+          toastRef.current?.(event.reason || "That's not available right now");
+          if (event.action === "whiteboard") {
+            // Correct an optimistic open the server just rejected — see
+            // toggleWhiteboard's own comment for why the sender never gets
+            // a positive echo back on the allowed path.
+            setCall((c) => (c ? { ...c, whiteboardOpen: false } : c));
+          }
         } else if (event.type === "group_call_kicked") {
           toastRef.current?.("You were removed from the call");
           teardown();
@@ -584,5 +685,6 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
     forceMuteAll, kickParticipant, addPeople, toggleWhiteboard, sendReaction, toggleRaiseHand,
     toggleCaptions, sendCaption, joinBreakoutRoom, returnToMainCall,
     admitParticipant, denyParticipant,
+    muteParticipant, spotlight, transferHost, setPermission,
   };
 }

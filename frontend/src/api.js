@@ -355,6 +355,11 @@ export const Chats = {
   // Shared media (photos/videos/documents) for a chat's info screen.
   media: (chatId) => get(`/chats/${chatId}/media`),
 
+  // Best-effort title/description/image for a link card under a chat
+  // message — the server does the actual fetch (a browser can't reliably
+  // read another origin's HTML itself) and caches the result briefly.
+  linkPreview: (url) => get(`/link-preview?url=${encodeURIComponent(url)}`),
+
   // Shareable join links for groups/channels/communities. Rotating replaces
   // the code outright — the old link stops working the moment a new one is
   // generated, not just when someone remembers to revoke it.

@@ -578,7 +578,9 @@ export default function App() {
                           onSendReaction={groupCall.sendReaction} onToggleRaiseHand={groupCall.toggleRaiseHand}
                           onToggleCaptions={groupCall.toggleCaptions} onCaptionText={groupCall.sendCaption}
                           onJoinBreakoutRoom={groupCall.joinBreakoutRoom} onReturnToMainCall={groupCall.returnToMainCall}
-                          onAdmitParticipant={groupCall.admitParticipant} onDenyParticipant={groupCall.denyParticipant}/>
+                          onAdmitParticipant={groupCall.admitParticipant} onDenyParticipant={groupCall.denyParticipant}
+                          onSetPermission={groupCall.setPermission} onMuteParticipant={groupCall.muteParticipant}
+                          onSpotlight={groupCall.spotlight} onTransferHost={groupCall.transferHost}/>
       </Screen>
     );
   }
@@ -656,7 +658,9 @@ export default function App() {
                           onSendReaction={groupCall.sendReaction} onToggleRaiseHand={groupCall.toggleRaiseHand}
                           onToggleCaptions={groupCall.toggleCaptions} onCaptionText={groupCall.sendCaption}
                           onJoinBreakoutRoom={groupCall.joinBreakoutRoom} onReturnToMainCall={groupCall.returnToMainCall}
-                          onAdmitParticipant={groupCall.admitParticipant} onDenyParticipant={groupCall.denyParticipant}/>
+                          onAdmitParticipant={groupCall.admitParticipant} onDenyParticipant={groupCall.denyParticipant}
+                          onSetPermission={groupCall.setPermission} onMuteParticipant={groupCall.muteParticipant}
+                          onSpotlight={groupCall.spotlight} onTransferHost={groupCall.transferHost}/>
       {discoverOpen && (
         <DiscoverOverlay onClose={() => setDiscoverOpen(false)}
                          onOpenChat={(chat) => { setDiscoverOpen(false); setOpenChat(chat); }}
@@ -1019,7 +1023,9 @@ function DesktopShell({
                           onSendReaction={groupCall.sendReaction} onToggleRaiseHand={groupCall.toggleRaiseHand}
                           onToggleCaptions={groupCall.toggleCaptions} onCaptionText={groupCall.sendCaption}
                           onJoinBreakoutRoom={groupCall.joinBreakoutRoom} onReturnToMainCall={groupCall.returnToMainCall}
-                          onAdmitParticipant={groupCall.admitParticipant} onDenyParticipant={groupCall.denyParticipant}/>
+                          onAdmitParticipant={groupCall.admitParticipant} onDenyParticipant={groupCall.denyParticipant}
+                          onSetPermission={groupCall.setPermission} onMuteParticipant={groupCall.muteParticipant}
+                          onSpotlight={groupCall.spotlight} onTransferHost={groupCall.transferHost}/>
       {discoverOpen && (
         <DiscoverOverlay onClose={onDiscoverClose}
                          onOpenChat={(chat) => { onDiscoverClose(); onOpenChat(chat); }}

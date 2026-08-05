@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Chats } from "../api.js";
+import { Chats, Messages, newClientMessageId } from "../api.js";
 import { Av, Button, G, I, useCallLayout } from "../ui.jsx";
 import { AudioOutputPicker, CallButton, MoreMenu, VideoTag, canPickAudioOutput, mmss } from "./CallOverlay.jsx";
 import { useCallRecording } from "../useCallRecording.js";
@@ -132,40 +132,255 @@ function BreakoutRoomsSetup({ chatId, myUserId, participants, onClose }) {
   );
 }
 
-function ParticipantsList({ call, isHost, onKick, onClose }) {
-  const others = Object.entries(call.participants);
+/**
+ * Chat + participant list, docked to the right of the call on desktop full
+ * screen (the only place a fixed-width panel doesn't just eat the whole
+ * narrow call frame) and a full-screen slide-over everywhere else — same
+ * visual language as the app's other bottom sheets, just filling the whole
+ * screen instead of sliding up partway, since a 340px chat panel squeezed
+ * under a mobile-width call frame has nowhere sensible to sit otherwise.
+ *
+ * Replaces two things that used to be separate: the old ParticipantsList
+ * bottom sheet (now this panel's "People" tab), and the "Chat" button,
+ * which used to just minimize the call to reveal the underlying ChatView —
+ * now it opens a live view of that same chat without leaving the call.
+ */
+function SidePanel({
+  tab, onTabChange, onClose, call, myUserId, isHost, isDesktop, expanded,
+  onKick, onMute, onTransferHost, events, send,
+}) {
+  const docked = isDesktop && expanded;
   return (
-    <div onClick={onClose} style={{
-      position: "fixed", inset: 0, zIndex: 1100, background: "#000000aa",
-      display: "flex", alignItems: "flex-end", justifyContent: "center",
+    <div style={docked ? {
+      width: 340, flexShrink: 0, background: "#111a2c", borderLeft: "1px solid #ffffff1a",
+      display: "flex", flexDirection: "column", height: "100%",
+    } : {
+      position: "fixed", inset: 0, zIndex: 1100, background: "#0b1220",
+      display: "flex", flexDirection: "column",
     }}>
-      <div onClick={(event) => event.stopPropagation()} style={{
-        width: "100%", maxWidth: 430, background: "#182234", borderTopLeftRadius: 20,
-        borderTopRightRadius: 20, padding: "18px 14px 24px", color: "#fff", maxHeight: "70vh", overflowY: "auto",
+      <div style={{
+        display: "flex", alignItems: "center", padding: "12px 14px",
+        borderBottom: "1px solid #ffffff1a", gap: 6, flexShrink: 0,
       }}>
-        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>
-          Participants ({others.length + 1})
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 4px" }}>
-          <Av av="Y" color={G.accent} size={34}/>
-          <div style={{ flex: 1, fontSize: 13.5 }}>You{isHost ? " · host" : ""}</div>
-          {call.muted && I.micOff("#ffffff88", 15)}
-          {call.handRaised && <span style={{ fontSize: 15 }}>✋</span>}
-        </div>
-        {others.map(([userId, participant]) => (
-          <div key={userId} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 4px" }}>
-            <Av av={participant.avatar} color={participant.color} size={34}/>
-            <div style={{ flex: 1, fontSize: 13.5 }}>{participant.name}</div>
-            {participant.handRaised && <span style={{ fontSize: 15 }}>✋</span>}
-            {isHost && (
+        <div onClick={() => onTabChange("chat")} style={{
+          padding: "6px 12px", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 600,
+          background: tab === "chat" ? "#ffffff1a" : "transparent",
+        }}>Chat</div>
+        <div onClick={() => onTabChange("people")} style={{
+          padding: "6px 12px", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 600,
+          background: tab === "people" ? "#ffffff1a" : "transparent",
+        }}>People ({Object.keys(call.participants).length + 1})</div>
+        <div onClick={onClose} style={{
+          marginLeft: "auto", cursor: "pointer", fontSize: 20, color: "#ffffff88", padding: "0 4px",
+        }}>×</div>
+      </div>
+      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+        {tab === "chat" ? (
+          <ChatPanel chatId={call.chatId} myUserId={myUserId} participants={call.participants} events={events}/>
+        ) : (
+          <PeoplePanel call={call} myUserId={myUserId} isHost={isHost}
+                       onKick={onKick} onMute={onMute} onTransferHost={onTransferHost}/>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PeoplePanel({ call, myUserId, isHost, onKick, onMute, onTransferHost }) {
+  const others = Object.entries(call.participants);
+
+  function exportCsv() {
+    const rows = [
+      ["Name", "User ID", "Muted", "Hand raised"],
+      ["You", myUserId || "", call.muted ? "yes" : "no", call.handRaised ? "yes" : "no"],
+      ...others.map(([userId, p]) => [
+        p.name || "", userId, p.mutedByHost ? "yes" : "no", p.handRaised ? "yes" : "no",
+      ]),
+    ];
+    // Quoting every field (and doubling embedded quotes) is the one rule
+    // that keeps a name containing a comma from splitting into extra
+    // columns when this is opened in Excel/Sheets.
+    const csv = rows.map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `talkex-meeting-participants-${new Date().toISOString().replace(/[:.]/g, "-")}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+
+  return (
+    <div style={{ flex: 1, overflowY: "auto", padding: "10px 14px", color: "#fff" }}>
+      <div onClick={exportCsv} title="Download participant list as CSV" style={{
+        display: "flex", alignItems: "center", gap: 6, cursor: "pointer",
+        fontSize: 12.5, color: "#ffffffaa", marginBottom: 10, width: "fit-content",
+      }}>⭳ Export list</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 4px" }}>
+        <Av av="Y" color={G.accent} size={34}/>
+        <div style={{ flex: 1, fontSize: 13.5 }}>You{isHost ? " · host" : ""}</div>
+        {call.muted && I.micOff("#ffffff88", 15)}
+        {call.handRaised && <span style={{ fontSize: 15 }}>✋</span>}
+      </div>
+      {others.map(([userId, participant]) => (
+        <div key={userId} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 4px" }}>
+          <Av av={participant.avatar} color={participant.color} size={34}/>
+          <div style={{ flex: 1, fontSize: 13.5 }}>{participant.name}</div>
+          {participant.mutedByHost && I.micOff("#ffffff88", 15)}
+          {participant.handRaised && <span style={{ fontSize: 15 }}>✋</span>}
+          {isHost && (
+            <>
+              <div onClick={() => onMute(userId)} title="Mute this person" style={{
+                cursor: "pointer", color: "#ffffffaa", fontSize: 12.5, marginLeft: 8,
+              }}>Mute</div>
+              <div onClick={() => onTransferHost(userId)} title="Make this person the host" style={{
+                cursor: "pointer", color: "#ffffffaa", fontSize: 12.5, marginLeft: 8,
+              }}>Make host</div>
               <div onClick={() => onKick(userId)} title="Remove from call" style={{
                 cursor: "pointer", color: "#ff8080", fontSize: 12.5, marginLeft: 8,
               }}>Remove</div>
-            )}
-          </div>
-        ))}
-      </div>
+            </>
+          )}
+        </div>
+      ))}
     </div>
+  );
+}
+
+const URL_PATTERN = /https?:\/\/[^\s<>"']+/i;
+const linkPreviewCache = new Map();
+
+function LinkPreviewCard({ url }) {
+  const [preview, setPreview] = useState(() => linkPreviewCache.get(url) || null);
+
+  useEffect(() => {
+    if (linkPreviewCache.has(url)) return;
+    let cancelled = false;
+    Chats.linkPreview(url).then((data) => {
+      linkPreviewCache.set(url, data);
+      if (!cancelled) setPreview(data);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [url]);
+
+  if (!preview || (!preview.title && !preview.image)) return null;
+  return (
+    <a href={url} target="_blank" rel="noopener noreferrer" style={{
+      display: "flex", gap: 8, marginTop: 6, padding: 8, borderRadius: 8,
+      background: "#ffffff0d", border: "1px solid #ffffff1a", textDecoration: "none", color: "#fff",
+      maxWidth: 260,
+    }}>
+      {preview.image && (
+        <img src={preview.image} alt="" style={{
+          width: 48, height: 48, borderRadius: 6, objectFit: "cover", flexShrink: 0,
+        }}/>
+      )}
+      <div style={{ minWidth: 0 }}>
+        {preview.title && (
+          <div style={{
+            fontSize: 12.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis",
+            display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
+          }}>{preview.title}</div>
+        )}
+        <div style={{ fontSize: 11, color: "#ffffff88", marginTop: 2 }}>{preview.site_name}</div>
+      </div>
+    </a>
+  );
+}
+
+/**
+ * A compact live view of the SAME persisted chat this call belongs to — not
+ * a separate ephemeral in-call protocol. Sends through the normal Messages
+ * API and reads new arrivals off the shared `events` array the same way
+ * Whiteboard reads its own draw events, so anything sent here shows up in
+ * the ordinary chat screen too (and vice versa) — it's one conversation,
+ * just viewable without leaving the call.
+ */
+function ChatPanel({ chatId, myUserId, participants, events }) {
+  const [messages, setMessages] = useState(null);
+  const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
+  const lastAppliedN = useRef(0);
+  const listRef = useRef(null);
+
+  useEffect(() => {
+    Messages.list(chatId).then((list) => setMessages(list)).catch(() => setMessages([]));
+  }, [chatId]);
+
+  useEffect(() => {
+    const fresh = events.filter((event) => event._n > lastAppliedN.current
+      && event.type === "message" && event.message?.chat_id === chatId);
+    if (fresh.length === 0) return;
+    lastAppliedN.current = events[events.length - 1]._n;
+    setMessages((current) => {
+      const known = new Set((current || []).map((m) => m.id));
+      const additions = fresh.map((event) => event.message).filter((m) => !known.has(m.id));
+      return additions.length ? [...(current || []), ...additions] : current;
+    });
+  }, [events, chatId]);
+
+  useEffect(() => {
+    listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
+  }, [messages]);
+
+  async function sendMessage() {
+    const trimmed = text.trim();
+    if (!trimmed || sending) return;
+    setSending(true);
+    setText("");
+    try {
+      const stored = await Messages.send({
+        chat_id: chatId, text: trimmed, kind: "text", client_msg_id: newClientMessageId(),
+      });
+      setMessages((current) => {
+        const known = new Set((current || []).map((m) => m.id));
+        return known.has(stored.id) ? current : [...(current || []), stored];
+      });
+    } catch {
+      setText(trimmed); // give it back so the attempt isn't just silently lost
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <>
+      <div ref={listRef} style={{ flex: 1, overflowY: "auto", padding: "10px 14px" }}>
+        {messages === null ? (
+          <div style={{ fontSize: 12.5, color: "#ffffff77" }}>Loading…</div>
+        ) : messages.length === 0 ? (
+          <div style={{ fontSize: 12.5, color: "#ffffff77" }}>No messages yet — say hi.</div>
+        ) : messages.filter((m) => m.kind === "text" || !m.kind).map((message) => {
+          const mine = message.sender_id === myUserId;
+          const name = mine ? "You" : participants[message.sender_id]?.name || "Someone";
+          const url = message.text?.match(URL_PATTERN)?.[0];
+          return (
+            <div key={message.id} style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 11, color: "#ffffff88", marginBottom: 2 }}>{name}</div>
+              <div style={{
+                display: "inline-block", maxWidth: "100%", padding: "7px 10px", borderRadius: 10,
+                background: mine ? G.accent : "#ffffff14", color: "#fff", fontSize: 13, wordBreak: "break-word",
+              }}>{message.text}</div>
+              {url && <LinkPreviewCard url={url}/>}
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ display: "flex", gap: 8, padding: "10px 14px", borderTop: "1px solid #ffffff1a" }}>
+        <input value={text} onChange={(event) => setText(event.target.value)}
+               onKeyDown={(event) => { if (event.key === "Enter") sendMessage(); }}
+               placeholder="Message" style={{
+                 flex: 1, background: "#ffffff14", border: "none", borderRadius: 20,
+                 padding: "9px 14px", color: "#fff", fontSize: 13, outline: "none",
+               }}/>
+        <button onClick={sendMessage} disabled={sending || !text.trim()} style={{
+          border: "none", borderRadius: "50%", width: 36, height: 36, cursor: "pointer",
+          background: G.accent, color: "#fff", opacity: sending || !text.trim() ? 0.5 : 1,
+        }}>➤</button>
+      </div>
+    </>
   );
 }
 
@@ -185,6 +400,7 @@ export default function GroupCallOverlay({
   onForceMuteAll, onKickParticipant, onAddPeople, onToggleWhiteboard, events, send,
   onSendReaction, onToggleRaiseHand, onToggleCaptions, onCaptionText,
   onJoinBreakoutRoom, onReturnToMainCall, onAdmitParticipant, onDenyParticipant,
+  onSetPermission, onMuteParticipant, onSpotlight, onTransferHost,
 }) {
   const [sinkId, setSinkId] = useState(undefined);
   const [minimized, setMinimized] = useState(false);
@@ -220,6 +436,14 @@ export default function GroupCallOverlay({
       background: "#0b1220", color: "#fff",
       display: "flex", flexDirection: "column",
     }}>
+      {call.phase === "active" && (
+        <div onClick={() => setMinimized(true)} title="Minimize" style={{
+          position: "absolute", top: 14, left: 14, zIndex: 1,
+          width: 34, height: 34, borderRadius: "50%", cursor: "pointer",
+          background: "#ffffff1a", display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 16, color: "#fff",
+        }}>⌄</div>
+      )}
       {isDesktop && (
         <div onClick={toggle} title={expanded ? "Exit full screen" : "Full screen"} style={{
           position: "absolute", top: 14, right: 14, zIndex: 1,
@@ -241,8 +465,10 @@ export default function GroupCallOverlay({
                            onSendReaction={onSendReaction} onToggleRaiseHand={onToggleRaiseHand}
                            onToggleCaptions={onToggleCaptions} onCaptionText={onCaptionText}
                            onJoinBreakoutRoom={onJoinBreakoutRoom} onReturnToMainCall={onReturnToMainCall}
-                           onMinimize={() => setMinimized(true)}
                            onAdmitParticipant={onAdmitParticipant} onDenyParticipant={onDenyParticipant}
+                           onSetPermission={onSetPermission} onMuteParticipant={onMuteParticipant}
+                           onSpotlight={onSpotlight} onTransferHost={onTransferHost}
+                           expanded={expanded} isDesktop={isDesktop}
                            events={events} send={send}
                            sinkId={sinkId} onSinkId={setSinkId}/>}
     </div>
@@ -338,13 +564,15 @@ function ActiveGroupCall({
   onSetScreenOptimization,
   onForceMuteAll, onKickParticipant, onAddPeople, onToggleWhiteboard,
   onSendReaction, onToggleRaiseHand, onToggleCaptions, onCaptionText,
-  onJoinBreakoutRoom, onReturnToMainCall, onMinimize,
-  onAdmitParticipant, onDenyParticipant, events, send,
+  onJoinBreakoutRoom, onReturnToMainCall,
+  onAdmitParticipant, onDenyParticipant,
+  onSetPermission, onMuteParticipant, onSpotlight, onTransferHost,
+  expanded, isDesktop, events, send,
   sinkId, onSinkId,
 }) {
   const [showSpeakerPicker, setShowSpeakerPicker] = useState(false);
   const [showMore, setShowMore] = useState(false);
-  const [showParticipants, setShowParticipants] = useState(false);
+  const [showPanel, setShowPanel] = useState(null); // null | "chat" | "people"
   const [showBreakoutSetup, setShowBreakoutSetup] = useState(false);
   const [showAnnotate, setShowAnnotate] = useState(false);
   const [closingBreakout, setClosingBreakout] = useState(false);
@@ -355,21 +583,59 @@ function ActiveGroupCall({
   const tileCount = others.length + 1; // + yourself
   const columns = tileCount <= 2 ? 1 : 2;
   const isHost = myUserId != null && call.hostId === myUserId;
+  // Screen share wins the main stage over a spotlight when both happen to
+  // be active — the shared content is almost always what everyone actually
+  // wants to look at, same precedence Zoom/Meet use.
+  const mainStageUserId = call.screenSharerId || call.spotlightUserId || null;
+  const toggleSpotlight = (userId) => onSpotlight(call.spotlightUserId === userId ? null : userId);
 
   return (
     <>
-      <div style={{ position: "relative", flex: 1, overflow: "hidden" }}>
-        <div style={{
-          height: "100%", display: "grid", gridTemplateColumns: `repeat(${columns}, 1fr)`,
-          gap: 2, padding: 2, overflow: "hidden",
-        }}>
-          <SelfTile call={call} isHost={isHost} onSwitchCamera={onSwitchCamera}/>
-          {others.map(([userId, participant]) => (
-            <ParticipantTile key={userId} participant={participant} sinkId={sinkId}
-                             canKick={isHost} onKick={() => onKickParticipant(userId)}/>
-          ))}
-        </div>
-        <ReactionOverlay reaction={call.lastReaction}/>
+      <div style={{ position: "relative", flex: 1, overflow: "hidden", display: "flex" }}>
+        <div style={{ flex: 1, minWidth: 0, position: "relative" }}>
+          {mainStageUserId ? (
+            <div style={{ height: "100%", display: "flex", flexDirection: "column", gap: 2, padding: 2 }}>
+              <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+                {mainStageUserId === myUserId ? (
+                  <SelfTile call={call} isHost={isHost} onSwitchCamera={onSwitchCamera}/>
+                ) : (
+                  <ParticipantTile participant={call.participants[mainStageUserId]} sinkId={sinkId}
+                                   canKick={isHost} onKick={() => onKickParticipant(mainStageUserId)}
+                                   canSpotlight={isHost} isSpotlighted={call.spotlightUserId === mainStageUserId}
+                                   onToggleSpotlight={() => toggleSpotlight(mainStageUserId)}/>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: 2, overflowX: "auto", height: 84, flexShrink: 0 }}>
+                {mainStageUserId !== myUserId && (
+                  <div style={{ width: 120, flexShrink: 0 }}>
+                    <SelfTile call={call} isHost={isHost} onSwitchCamera={onSwitchCamera}/>
+                  </div>
+                )}
+                {others.filter(([userId]) => userId !== mainStageUserId).map(([userId, participant]) => (
+                  <div key={userId} style={{ width: 120, flexShrink: 0 }}>
+                    <ParticipantTile participant={participant} sinkId={sinkId}
+                                     canKick={isHost} onKick={() => onKickParticipant(userId)}
+                                     canSpotlight={isHost} isSpotlighted={false}
+                                     onToggleSpotlight={() => toggleSpotlight(userId)}/>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div style={{
+              height: "100%", display: "grid", gridTemplateColumns: `repeat(${columns}, 1fr)`,
+              gap: 2, padding: 2, overflow: "hidden",
+            }}>
+              <SelfTile call={call} isHost={isHost} onSwitchCamera={onSwitchCamera}/>
+              {others.map(([userId, participant]) => (
+                <ParticipantTile key={userId} participant={participant} sinkId={sinkId}
+                                 canKick={isHost} onKick={() => onKickParticipant(userId)}
+                                 canSpotlight={isHost} isSpotlighted={false}
+                                 onToggleSpotlight={() => toggleSpotlight(userId)}/>
+              ))}
+            </div>
+          )}
+          <ReactionOverlay reaction={call.lastReaction}/>
         {recorder.recording && (
           <div style={{
             position: "absolute", top: 10, left: 10, display: "flex", alignItems: "center", gap: 6,
@@ -391,6 +657,13 @@ function ActiveGroupCall({
               }}><b>{line.from === "me" ? "You" : line.from}:</b> {line.text}</div>
             ))}
           </div>
+        )}
+        </div>
+        {showPanel && (
+          <SidePanel tab={showPanel} onTabChange={setShowPanel} onClose={() => setShowPanel(null)}
+                     call={call} myUserId={myUserId} isHost={isHost} isDesktop={isDesktop} expanded={expanded}
+                     onKick={onKickParticipant} onMute={onMuteParticipant} onTransferHost={onTransferHost}
+                     events={events} send={send}/>
         )}
       </div>
       <LiveCaptions enabled={Boolean(call.captionsOn)} onText={onCaptionText}/>
@@ -451,7 +724,7 @@ function ActiveGroupCall({
                     icon={<span style={{ fontSize: 20 }}>😊</span>} label="React" small/>
         <CallButton onClick={onToggleRaiseHand} background={call.handRaised ? "#facc15" : "#ffffff26"}
                     icon={<span style={{ fontSize: 20 }}>✋</span>} label="Hand" small/>
-        <CallButton onClick={onMinimize} background="#ffffff26"
+        <CallButton onClick={() => setShowPanel("chat")} background="#ffffff26"
                     icon={<span style={{ fontSize: 18 }}>💬</span>} label="Chat" small/>
         {canPickAudioOutput && (
           <CallButton onClick={() => setShowSpeakerPicker(true)} background="#ffffff26"
@@ -486,9 +759,10 @@ function ActiveGroupCall({
         <MoreMenu onClose={() => setShowMore(false)} items={[
           {
             label: call.sharingScreen ? "Stop sharing screen" : "Share screen",
-            sub: call.callKind !== "video" ? "Turn your camera on first" : undefined,
+            sub: call.permissions?.screen_share === "host" && !isHost
+              ? "Only the host allows this right now" : undefined,
             icon: I.screenShare("#fff", 18),
-            disabled: call.callKind !== "video",
+            disabled: call.permissions?.screen_share === "host" && !isHost,
             onClick: onShareScreen,
           },
           ...(call.sharingScreen ? [{
@@ -509,7 +783,10 @@ function ActiveGroupCall({
           },
           {
             label: call.whiteboardOpen ? "Close whiteboard" : "Whiteboard",
+            sub: call.permissions?.whiteboard === "host" && !isHost && !call.whiteboardOpen
+              ? "Only the host allows this right now" : undefined,
             icon: I.edit("#fff", 18),
+            disabled: call.permissions?.whiteboard === "host" && !isHost && !call.whiteboardOpen,
             onClick: onToggleWhiteboard,
           },
           {
@@ -539,7 +816,7 @@ function ActiveGroupCall({
           {
             label: "Participants",
             icon: I.user("#fff", 18),
-            onClick: () => setShowParticipants(true),
+            onClick: () => setShowPanel("people"),
           },
           {
             label: "Mute everyone",
@@ -548,6 +825,19 @@ function ActiveGroupCall({
             disabled: !isHost,
             onClick: onForceMuteAll,
           },
+          ...(isHost ? [{
+            label: `Screen share: ${call.permissions?.screen_share === "host" ? "Host only" : "Everyone"}`,
+            sub: "Tap to switch who's allowed to share their screen",
+            icon: I.screenShare("#fff", 18),
+            onClick: () => onSetPermission(
+              "screen_share", call.permissions?.screen_share === "host" ? "everyone" : "host"),
+          }, {
+            label: `Whiteboard: ${call.permissions?.whiteboard === "host" ? "Host only" : "Everyone"}`,
+            sub: "Tap to switch who's allowed to open the whiteboard",
+            icon: I.edit("#fff", 18),
+            onClick: () => onSetPermission(
+              "whiteboard", call.permissions?.whiteboard === "host" ? "everyone" : "host"),
+          }] : []),
           {
             label: "Breakout rooms",
             sub: isHost ? undefined : "Only the person who started this call can do that",
@@ -573,16 +863,12 @@ function ActiveGroupCall({
                          existingIds={[myUserId, ...Object.keys(call.participants)]}
                          onAdd={onAddPeople} onClose={() => setShowAddPeople(false)}/>
       )}
-      {showParticipants && (
-        <ParticipantsList call={call} isHost={isHost} onKick={onKickParticipant}
-                          onClose={() => setShowParticipants(false)}/>
-      )}
       {call.whiteboardOpen && (
-        <Whiteboard chatId={call.chatId} events={events} send={send} onClose={onToggleWhiteboard}/>
+        <Whiteboard chatId={call.chatId} events={events} send={send} onClose={onToggleWhiteboard} expanded={expanded}/>
       )}
       {showAnnotate && (
         <Whiteboard chatId={call.chatId} events={events} send={send}
-                   onClose={() => setShowAnnotate(false)} transparent/>
+                   onClose={() => setShowAnnotate(false)} transparent expanded={expanded}/>
       )}
       {showBreakoutSetup && (
         <BreakoutRoomsSetup chatId={call.chatId} myUserId={myUserId} participants={call.participants}
@@ -653,7 +939,9 @@ function ReactionOverlay({ reaction }) {
   );
 }
 
-function ParticipantTile({ participant, sinkId, canKick, onKick }) {
+function ParticipantTile({
+  participant, sinkId, canKick, onKick, canSpotlight, isSpotlighted, onToggleSpotlight,
+}) {
   const hasVideo = participant.stream?.getVideoTracks().length > 0;
   return (
     <div style={{
@@ -673,19 +961,33 @@ function ParticipantTile({ participant, sinkId, canKick, onKick }) {
       <div style={{
         position: "absolute", bottom: 6, left: 8, fontSize: 11.5, color: "#ffffffcc",
         background: "#00000066", padding: "2px 8px", borderRadius: 8,
-      }}>{participant.name}</div>
+        display: "flex", alignItems: "center", gap: 4,
+      }}>
+        {participant.name}
+        {participant.mutedByHost && I.micOff("#ffffffcc", 11)}
+      </div>
       {!participant.stream && (
         <div style={{ position: "absolute", top: 6, right: 8, fontSize: 10.5, color: "#ffffff99" }}>
           connecting…
         </div>
       )}
-      {canKick && (
-        <div onClick={onKick} title="Remove from call" style={{
-          position: "absolute", top: 6, right: 8, width: 22, height: 22, borderRadius: "50%",
-          background: "#00000088", color: "#ff8080", fontSize: 15, lineHeight: "22px",
-          textAlign: "center", cursor: "pointer",
-        }}>×</div>
-      )}
+      <div style={{ position: "absolute", top: 6, right: 8, display: "flex", gap: 6 }}>
+        {canSpotlight && (
+          <div onClick={onToggleSpotlight} title={isSpotlighted ? "Remove spotlight" : "Spotlight for everyone"}
+               style={{
+                 width: 22, height: 22, borderRadius: "50%", cursor: "pointer", fontSize: 12,
+                 background: isSpotlighted ? G.accent : "#00000088",
+                 display: "flex", alignItems: "center", justifyContent: "center",
+               }}>📌</div>
+        )}
+        {canKick && (
+          <div onClick={onKick} title="Remove from call" style={{
+            width: 22, height: 22, borderRadius: "50%",
+            background: "#00000088", color: "#ff8080", fontSize: 15, lineHeight: "22px",
+            textAlign: "center", cursor: "pointer",
+          }}>×</div>
+        )}
+      </div>
     </div>
   );
 }
@@ -748,7 +1050,7 @@ function wrapCanvasText(context, text, x, y, maxWidth, lineHeight) {
  * mode — same board, same tools, just no opaque background covering the
  * video underneath.
  */
-function Whiteboard({ chatId, events, send, onClose, transparent }) {
+function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
   const canvasRef = useRef(null);
   const drawing = useRef(false);
   const lastPoint = useRef(null);
@@ -778,8 +1080,20 @@ function Whiteboard({ chatId, events, send, onClose, transparent }) {
 
   useEffect(() => {
     resizeCanvas();
-    window.addEventListener("resize", resizeCanvas);
-    return () => window.removeEventListener("resize", resizeCanvas);
+    // A plain window "resize" listener misses every OTHER reason this
+    // canvas's actual box can change size — toggling the call between its
+    // mobile-frame width and full-screen `expanded`, or this panel's own
+    // layout settling after mount, neither of which fires a browser window
+    // resize event at all. ResizeObserver reacts to the element's real box,
+    // whatever caused it to change — which is what "whiteboard size doesn't
+    // stay right" turned out to actually be: strokes drawn before a
+    // container-driven resize landed at coordinates for the OLD size,
+    // because nothing ever told the canvas its backing store was now wrong.
+    const canvas = canvasRef.current;
+    if (!canvas || typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver(() => resizeCanvas());
+    observer.observe(canvas);
+    return () => observer.disconnect();
   }, []);
 
   function paintSegment(fromFrac, toFrac, strokeColor, size) {
@@ -1042,6 +1356,12 @@ function Whiteboard({ chatId, events, send, onClose, transparent }) {
       position: "fixed", inset: 0, zIndex: 1150, display: "flex", flexDirection: "column",
       background: transparent ? "transparent" : "#0b1220",
       pointerEvents: transparent ? "none" : "auto",
+      // Matches the call frame's own mobile-frame constraint (see
+      // GroupCallOverlay's root below) — without this the whiteboard
+      // suddenly spans the full browser window while the rest of the call
+      // stays confined to a phone-width column, a visibly inconsistent
+      // size jump the moment it opens.
+      maxWidth: expanded ? "none" : 430, margin: "0 auto",
     }}>
       <div style={{ position: "relative", flex: 1, pointerEvents: "auto" }}>
         <canvas ref={canvasRef}
