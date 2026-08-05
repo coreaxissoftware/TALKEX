@@ -152,7 +152,7 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
   }
 
   function menuItemsFor(chat) {
-    const callsOn = chat.calls_enabled !== false;
+    const callsOn = Boolean(chat.calls_enabled);
     const isMuted = (chat.muted_until || 0) > Date.now() / 1000;
     return [
       ...(chat.type === "dm" && chat.peer_id

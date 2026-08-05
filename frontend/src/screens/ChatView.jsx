@@ -3444,7 +3444,7 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
   const [locked, setLocked] = useState(Boolean(chat.is_locked));
   const [lockSheet, setLockSheet] = useState(null);   // 'set' | 'remove'
   const [archived, setArchived] = useState(Boolean(chat.archived));
-  const [callsEnabled, setCallsEnabled] = useState(chat.calls_enabled !== false);
+  const [callsEnabled, setCallsEnabled] = useState(Boolean(chat.calls_enabled));
   const [vanishMode, setVanishMode] = useState(Boolean(chat.vanish_mode));
   const [muteSheet, setMuteSheet] = useState(false);
   const [mediaSheet, setMediaSheet] = useState(false);

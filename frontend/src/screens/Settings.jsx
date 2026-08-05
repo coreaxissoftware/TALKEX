@@ -514,7 +514,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
 
         <SRow icon={I.phone(G.accent, 18)} label="Calling"
               sub="When off, you can't be called and can't call anyone — scheduled meetings still work"
-              right={<Toggle on={me.calling_enabled !== false}
+              right={<Toggle on={Boolean(me.calling_enabled)}
                              onChange={(value) => togglePrivacy("calling_enabled", value)}/>}/>
       </Section>
 
