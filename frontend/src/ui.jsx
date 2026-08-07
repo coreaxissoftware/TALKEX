@@ -23,6 +23,7 @@ export const DESKTOP_QUERY = "(min-width: 900px)";
  */
 export function useCallLayout() {
   const isDesktop = useIsDesktop();
+  const isLandscape = useIsLandscape();
   const [expanded, setExpanded] = useState(isDesktop);
 
   useEffect(() => {
@@ -43,7 +44,24 @@ export function useCallLayout() {
     });
   };
 
-  return { expanded, toggle, isDesktop };
+  return { expanded, toggle, isDesktop, isLandscape };
+}
+
+export function useIsLandscape() {
+  const [isLandscape, setIsLandscape] = useState(
+    () => typeof window !== "undefined" && window.innerWidth > window.innerHeight
+  );
+  useEffect(() => {
+    const check = () => setIsLandscape(window.innerWidth > window.innerHeight);
+    window.addEventListener("resize", check);
+    // orientation change event fires on mobile rotation
+    window.addEventListener("orientationchange", () => setTimeout(check, 100));
+    return () => {
+      window.removeEventListener("resize", check);
+      window.removeEventListener("orientationchange", check);
+    };
+  }, []);
+  return isLandscape;
 }
 
 export function useIsDesktop() {

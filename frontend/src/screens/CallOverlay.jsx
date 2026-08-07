@@ -289,7 +289,7 @@ export default function CallOverlay({
   call, onAccept, onReject, onEnd, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen,
 }) {
   const [sinkId, setSinkId] = useState(undefined);
-  const { expanded, toggle, isDesktop } = useCallLayout();
+  const { expanded, toggle, isDesktop, isLandscape } = useCallLayout();
 
   if (!call) return null;
 
@@ -319,7 +319,8 @@ export default function CallOverlay({
       {call.phase === "active" && (
         <ActiveCall call={call} onEnd={onEnd} onToggleMute={onToggleMute} onToggleCamera={onToggleCamera}
                     onSwitchCamera={onSwitchCamera}
-                    onShareScreen={onShareScreen} sinkId={sinkId} onSinkId={setSinkId}/>
+                    onShareScreen={onShareScreen} sinkId={sinkId} onSinkId={setSinkId}
+                    isLandscape={isLandscape}/>
       )}
     </div>
   );
@@ -386,12 +387,19 @@ function OutgoingCall({ call, onEnd }) {
   );
 }
 
-function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen, sinkId, onSinkId }) {
+function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen, sinkId, onSinkId, isLandscape }) {
   const [showSpeakerPicker, setShowSpeakerPicker] = useState(false);
   const [showMore, setShowMore] = useState(false);
   // The remote peer's OWN video state, not mine — turning my camera off
   // must not also blank out video they're still sending.
   const hasRemoteVideo = call.remoteStream?.getVideoTracks().length > 0;
+
+  // Landscape on a phone means very little vertical room — the 60px bottom
+  // safe-area padding that portrait needs (iPhone notch bar) would eat half
+  // the screen. Buttons go inline with minimal padding instead. The self-
+  // preview PiP flips from portrait (tall) to landscape (wide) orientation.
+  const pipW = isLandscape ? 120 : 100;
+  const pipH = isLandscape ? 80 : 140;
 
   return (
     <>
@@ -414,7 +422,7 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
 
         {hasRemoteVideo && (
           <div style={{
-            position: "absolute", top: 16, left: 0, right: 0,
+            position: "absolute", top: isLandscape ? 8 : 16, left: 0, right: 0,
             textAlign: "center", fontSize: 13, color: "#ffffffcc",
           }}>
             {call.peerName} · {mmss(call.duration)}
@@ -422,9 +430,9 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
         )}
 
         {call.callKind === "video" && !call.cameraOff && call.localStream && (
-          <div style={{ position: "absolute", bottom: 16, right: 16 }}>
+          <div style={{ position: "absolute", bottom: isLandscape ? 8 : 16, right: isLandscape ? 8 : 16 }}>
             <VideoTag stream={call.localStream} muted zoomable={false} style={{
-              width: 100, height: 140, borderRadius: 12, objectFit: "cover",
+              width: pipW, height: pipH, borderRadius: 12, objectFit: "cover",
               border: "2px solid #ffffff33",
             }}/>
             {onSwitchCamera && (
@@ -441,14 +449,22 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
 
         {call.sharingScreen && (
           <div style={{
-            position: "absolute", top: 16, left: 16, padding: "5px 10px", borderRadius: 8,
+            position: "absolute", top: isLandscape ? 8 : 16, left: isLandscape ? 8 : 16,
+            padding: "5px 10px", borderRadius: 8,
             background: "#ef444422", border: "1px solid #ef444455", color: "#ff8080",
             fontSize: 12, fontWeight: 600, display: "flex", alignItems: "center", gap: 6,
           }}>{I.screenShare("#ff8080", 13)} Sharing screen</div>
         )}
       </div>
 
-      <div style={{ display: "flex", justifyContent: "center", gap: 16, padding: "0 20px 60px", flexWrap: "wrap" }}>
+      <div style={{
+        display: "flex", justifyContent: "center", gap: isLandscape ? 12 : 16,
+        // Landscape: compact single row with minimal padding — every pixel
+        // of vertical space matters when the screen is short and wide.
+        // Portrait: generous bottom padding absorbs the iPhone safe area.
+        padding: isLandscape ? "8px 20px 12px" : "0 20px 60px",
+        flexWrap: "wrap",
+      }}>
         <CallButton onClick={onToggleMute} background={call.muted ? "#fff" : "#ffffff26"}
                     icon={call.muted ? I.micOff("#0b1220", 20) : I.mic("#fff", 20)} label="Mute" small/>
         <CallButton onClick={onToggleCamera} background={call.cameraOff ? "#fff" : "#ffffff26"}

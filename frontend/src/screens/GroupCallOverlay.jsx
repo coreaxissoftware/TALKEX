@@ -404,7 +404,7 @@ export default function GroupCallOverlay({
 }) {
   const [sinkId, setSinkId] = useState(undefined);
   const [minimized, setMinimized] = useState(false);
-  const { expanded, toggle, isDesktop } = useCallLayout();
+  const { expanded, toggle, isDesktop, isLandscape } = useCallLayout();
 
   if (!call) return null;
 
@@ -468,7 +468,7 @@ export default function GroupCallOverlay({
                            onAdmitParticipant={onAdmitParticipant} onDenyParticipant={onDenyParticipant}
                            onSetPermission={onSetPermission} onMuteParticipant={onMuteParticipant}
                            onSpotlight={onSpotlight} onTransferHost={onTransferHost}
-                           expanded={expanded} isDesktop={isDesktop}
+                           expanded={expanded} isDesktop={isDesktop} isLandscape={isLandscape}
                            events={events} send={send}
                            sinkId={sinkId} onSinkId={setSinkId}/>}
     </div>
@@ -567,7 +567,7 @@ function ActiveGroupCall({
   onJoinBreakoutRoom, onReturnToMainCall,
   onAdmitParticipant, onDenyParticipant,
   onSetPermission, onMuteParticipant, onSpotlight, onTransferHost,
-  expanded, isDesktop, events, send,
+  expanded, isDesktop, isLandscape, events, send,
   sinkId, onSinkId,
 }) {
   const [showSpeakerPicker, setShowSpeakerPicker] = useState(false);
@@ -581,7 +581,12 @@ function ActiveGroupCall({
   const recorder = useCallRecording(call);
   const others = Object.entries(call.participants);
   const tileCount = others.length + 1; // + yourself
-  const columns = tileCount <= 2 ? 1 : 2;
+  // Landscape gives more horizontal room — use more columns so tiles are
+  // wider than tall (matching the screen's own aspect) instead of stacking
+  // vertically and wasting the sides. Portrait keeps the old 1-or-2 rule.
+  const columns = isLandscape
+    ? (tileCount <= 1 ? 1 : tileCount <= 4 ? 2 : 3)
+    : (tileCount <= 2 ? 1 : 2);
   const isHost = myUserId != null && call.hostId === myUserId;
   // Screen share wins the main stage over a spotlight when both happen to
   // be active — the shared content is almost always what everyone actually
@@ -605,14 +610,14 @@ function ActiveGroupCall({
                                    onToggleSpotlight={() => toggleSpotlight(mainStageUserId)}/>
                 )}
               </div>
-              <div style={{ display: "flex", gap: 2, overflowX: "auto", height: 84, flexShrink: 0 }}>
+              <div style={{ display: "flex", gap: 2, overflowX: "auto", height: isLandscape ? 64 : 84, flexShrink: 0 }}>
                 {mainStageUserId !== myUserId && (
-                  <div style={{ width: 120, flexShrink: 0 }}>
+                  <div style={{ width: isLandscape ? 100 : 120, flexShrink: 0 }}>
                     <SelfTile call={call} isHost={isHost} onSwitchCamera={onSwitchCamera} zoomable={false}/>
                   </div>
                 )}
                 {others.filter(([userId]) => userId !== mainStageUserId).map(([userId, participant]) => (
-                  <div key={userId} style={{ width: 120, flexShrink: 0 }}>
+                  <div key={userId} style={{ width: isLandscape ? 100 : 120, flexShrink: 0 }}>
                     <ParticipantTile participant={participant} sinkId={sinkId} zoomable={false}
                                      canKick={isHost} onKick={() => onKickParticipant(userId)}
                                      canSpotlight={isHost} isSpotlighted={false}
@@ -714,7 +719,15 @@ function ActiveGroupCall({
         }}>{I.screenShare("#ff8080", 13)} Sharing screen</div>
       )}
 
-      <div style={{ display: "flex", justifyContent: "center", gap: 16, padding: "16px 20px 60px", flexWrap: "wrap" }}>
+      <div style={{
+        display: "flex", justifyContent: "center",
+        gap: isLandscape ? 10 : 16,
+        // Landscape: compact padding so the buttons don't eat the already-
+        // short vertical space. Portrait: 60px bottom absorbs the phone's
+        // home-indicator/safe-area bar.
+        padding: isLandscape ? "6px 16px 10px" : "16px 20px 60px",
+        flexWrap: "wrap",
+      }}>
         <CallButton onClick={onToggleMute} background={call.muted ? "#fff" : "#ffffff26"}
                     icon={call.muted ? I.micOff("#0b1220", 20) : I.mic("#fff", 20)} label="Mute" small/>
         <CallButton onClick={onToggleCamera} background={call.cameraOff ? "#fff" : "#ffffff26"}
@@ -740,7 +753,7 @@ function ActiveGroupCall({
           position: "fixed", inset: 0, zIndex: 1100,
         }}>
           <div onClick={(event) => event.stopPropagation()} style={{
-            position: "absolute", bottom: 130, left: "50%", transform: "translateX(-50%)",
+            position: "absolute", bottom: isLandscape ? 60 : 130, left: "50%", transform: "translateX(-50%)",
             display: "flex", gap: 8, background: "#182234", border: "1px solid #ffffff26",
             borderRadius: 30, padding: "10px 14px",
           }}>
