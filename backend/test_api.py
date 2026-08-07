@@ -1174,7 +1174,7 @@ def test_chat_wide_disappearing_timer_applies_to_new_messages(client):
 def test_meeting_lifecycle(client):
     alice, alice_id, _ = make_user(client, "Alice")
     bob, bob_id, _ = make_user(client, "Bob")
-    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+    chat_id = make_group(client, alice, [bob_id])
 
     starts_at = time.time() + 2 * HOUR
     meeting = client.post("/meetings", headers=alice, json={
@@ -1242,7 +1242,7 @@ def test_meeting_lifecycle(client):
 def test_a_never_joined_scheduled_meeting_expires_after_its_window(client):
     alice, _, _ = make_user(client, "Alice")
     bob, bob_id, _ = make_user(client, "Bob")
-    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+    chat_id = make_group(client, alice, [bob_id])
 
     starts_at = time.time() + 2 * HOUR
     meeting = client.post("/meetings", headers=alice, json={
@@ -1295,7 +1295,7 @@ def test_a_meeting_ends_when_the_last_participant_disconnects(client, monkeypatc
 def test_only_the_host_can_change_or_cancel_a_meeting(client):
     alice, _, _ = make_user(client, "Alice")
     bob, bob_id, _ = make_user(client, "Bob")
-    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+    chat_id = make_group(client, alice, [bob_id])
 
     meeting = client.post("/meetings", headers=alice, json={
         "chat_id": chat_id, "title": "Standup", "starts_at": time.time() + HOUR,
@@ -1314,7 +1314,7 @@ def test_moving_a_meeting_rearms_its_reminder(client):
     """
     alice, _, _ = make_user(client, "Alice")
     bob, bob_id, _ = make_user(client, "Bob")
-    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+    chat_id = make_group(client, alice, [bob_id])
 
     starts_at = time.time() + HOUR
     meeting = client.post("/meetings", headers=alice, json={
@@ -2730,7 +2730,7 @@ def test_outsider_cannot_see_a_meeting(client):
     alice, _, _ = make_user(client, "Alice")
     bob, bob_id, _ = make_user(client, "Bob")
     mallory, _, _ = make_user(client, "Mallory")
-    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+    chat_id = make_group(client, alice, [bob_id])
 
     meeting = client.post("/meetings", headers=alice, json={
         "chat_id": chat_id, "title": "Private", "starts_at": time.time() + HOUR,

@@ -4720,7 +4720,9 @@ async def create_meeting(request: CreateMeetingRequest, user: dict = Depends(cur
     Posts a card into the chat so it shows up in the conversation, and invites
     either the people named or everyone currently in the chat.
     """
-    require_member(request.chat_id, user["id"])
+    chat = require_member(request.chat_id, user["id"])
+    if chat["type"] in ("dm", "saved"):
+        raise HTTPException(400, "Meetings need a group, channel, or community — not a direct message")
 
     if request.starts_at <= time.time():
         raise HTTPException(400, "starts_at must be in the future")
@@ -4741,7 +4743,9 @@ async def start_instant_meeting(request: InstantMeetingRequest, user: dict = Dep
     means the in-app call room for this chat, exactly like tapping the
     header's call buttons, not an external Zoom/Meet link.
     """
-    require_member(request.chat_id, user["id"])
+    chat = require_member(request.chat_id, user["id"])
+    if chat["type"] in ("dm", "saved"):
+        raise HTTPException(400, "Meetings need a group, channel, or community — not a direct message")
     return await _create_meeting_row(
         request.chat_id, user["id"], request.title or "Instant meeting", "",
         time.time(), 60, "", 0, [], "live",

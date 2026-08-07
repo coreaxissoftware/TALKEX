@@ -293,7 +293,15 @@ export default function Planner({ toast, onOpenChat, chats, onJoinCall, me }) {
 }
 
 function ChatPickerSheet({ chats, onClose, onPick }) {
-  const eligible = chats.filter((chat) => !chat.archived);
+  // A meeting needs an actual group room — whiteboard, docked chat/
+  // participants panel, spotlight, host controls are all meeting-only
+  // features a DM (or your own Saved Messages) has no concept of. Letting
+  // one be picked here used to silently produce a meeting that, on "Join
+  // now," fell back to an ordinary 1:1 call (App.jsx routes a DM's call to
+  // CallOverlay, not GroupCallOverlay) — which then looked like every
+  // meeting feature had simply vanished, when really the meeting was never
+  // backed by a group chat in the first place.
+  const eligible = chats.filter((chat) => !chat.archived && chat.type !== "dm" && chat.type !== "saved");
   return (
     <div onClick={onClose} style={{
       position: "fixed", inset: 0, background: "#000000aa", zIndex: 60,
@@ -308,7 +316,9 @@ function ChatPickerSheet({ chats, onClose, onPick }) {
           Everyone currently in that chat is invited straight away.
         </div>
         {eligible.length === 0 ? (
-          <div style={{ fontSize: 13, color: G.muted, padding: "10px 0" }}>No chats yet</div>
+          <div style={{ fontSize: 13, color: G.muted, padding: "10px 0" }}>
+            No group chats yet — meetings need a group, channel, or community, not a direct message.
+          </div>
         ) : eligible.map((chat) => (
           <div key={chat.id} onClick={() => onPick(chat)} style={{
             display: "flex", alignItems: "center", gap: 12, padding: "10px 4px", cursor: "pointer",

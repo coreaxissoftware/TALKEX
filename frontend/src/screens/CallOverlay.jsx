@@ -482,7 +482,13 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
 }
 
 export function CallButton({ onClick, background, icon, label, small }) {
-  const size = small ? 52 : 64;
+  // The End/Leave button intentionally stays the odd one out here —
+  // slightly bigger and red, the same "the one button you don't want to
+  // hit by accident, but need to find fast" emphasis every real calling
+  // app (WhatsApp, Zoom, Meet) gives it. 58 vs. 52 keeps that without the
+  // more dramatic 64 this used to be, which read as oversized once the
+  // full five-button row is laid out on a wide desktop call screen.
+  const size = small ? 52 : 58;
   return (
     <div onClick={onClick} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, cursor: "pointer" }}>
       <div style={{
