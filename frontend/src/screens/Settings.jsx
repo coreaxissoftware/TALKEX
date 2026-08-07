@@ -25,7 +25,12 @@ import { COUNTRY_CODES, flagFor, samplePlaceholder, splitPhone } from "../countr
 export default function Settings({ me, onUpdated, onSignedOut, toast,
                                     theme, onThemeChange, accent, onAccentChange }) {
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState({ name: me.name, bio: me.bio || "" });
+  const [form, setForm] = useState({
+    name: me.name, bio: me.bio || "",
+    link_website: me.link_website || "", link_facebook: me.link_facebook || "",
+    link_instagram: me.link_instagram || "", link_twitter: me.link_twitter || "",
+    link_youtube: me.link_youtube || "", link_linkedin: me.link_linkedin || "",
+  });
   const [blocked, setBlocked] = useState([]);
   const [sessions, setSessions] = useState([]);
   const [linkingDevice, setLinkingDevice] = useState(false);
@@ -278,7 +283,12 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
   }
 
   async function saveProfile() {
-    const updated = await Me.update({ name: form.name.trim(), bio: form.bio.trim() });
+    const updated = await Me.update({
+      name: form.name.trim(), bio: form.bio.trim(),
+      link_website: form.link_website.trim(), link_facebook: form.link_facebook.trim(),
+      link_instagram: form.link_instagram.trim(), link_twitter: form.link_twitter.trim(),
+      link_youtube: form.link_youtube.trim(), link_linkedin: form.link_linkedin.trim(),
+    });
     onUpdated(updated);
     setEditing(false);
     toast("Profile saved");
@@ -349,7 +359,24 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
                      onChange={(event) => setForm({ ...form, name: event.target.value })}/>
               <Field label="Bio" value={form.bio}
                      onChange={(event) => setForm({ ...form, bio: event.target.value })}/>
-              <div style={{ display: "flex", gap: 10 }}>
+
+              <div style={{ marginTop: 12, marginBottom: 6, fontSize: 13, fontWeight: 700, color: G.sub }}>
+                Social Links
+              </div>
+              {[
+                { key: "link_website", label: "🌐 Website", placeholder: "https://yoursite.com" },
+                { key: "link_facebook", label: "📘 Facebook", placeholder: "https://facebook.com/username" },
+                { key: "link_instagram", label: "📸 Instagram", placeholder: "https://instagram.com/username" },
+                { key: "link_twitter", label: "𝕏 Twitter / X", placeholder: "https://x.com/username" },
+                { key: "link_youtube", label: "▶️ YouTube", placeholder: "https://youtube.com/@channel" },
+                { key: "link_linkedin", label: "💼 LinkedIn", placeholder: "https://linkedin.com/in/username" },
+              ].map(({ key, label, placeholder }) => (
+                <Field key={key} label={label} value={form[key]}
+                       placeholder={placeholder}
+                       onChange={(event) => setForm({ ...form, [key]: event.target.value })}/>
+              ))}
+
+              <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
                 <Button onClick={saveProfile} style={{ flex: 1 }}>Save</Button>
                 <Button variant="ghost" onClick={() => setEditing(false)} style={{ flex: 1 }}>
                   Cancel
@@ -357,8 +384,20 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
               </div>
             </div>
           ) : (
-            <SRow icon={I.edit(G.accent, 18)} label="Edit profile" sub="Name and bio"
-                  onClick={() => setEditing(true)}/>
+            <>
+              <SRow icon={I.edit(G.accent, 18)} label="Edit profile" sub="Name, bio and social links"
+                    onClick={() => setEditing(true)}/>
+              {(me.link_website || me.link_facebook || me.link_instagram || me.link_twitter || me.link_youtube || me.link_linkedin) && (
+                <div style={{ padding: "0 20px 12px", display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  {me.link_website && <SocialChip emoji="🌐" url={me.link_website}/>}
+                  {me.link_facebook && <SocialChip emoji="📘" url={me.link_facebook}/>}
+                  {me.link_instagram && <SocialChip emoji="📸" url={me.link_instagram}/>}
+                  {me.link_twitter && <SocialChip emoji="𝕏" url={me.link_twitter}/>}
+                  {me.link_youtube && <SocialChip emoji="▶️" url={me.link_youtube}/>}
+                  {me.link_linkedin && <SocialChip emoji="💼" url={me.link_linkedin}/>}
+                </div>
+              )}
+            </>
           )}
         </>
       )}
@@ -390,19 +429,19 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
           </div>
 
           <div style={{ fontSize: 12, color: G.muted, margin: "16px 0 10px" }}>Theme color</div>
-          <div style={{ display: "flex", gap: 12 }}>
+          <div style={{ display: "flex", gap: 5 }}>
             {Object.entries(ACCENTS).map(([key, def]) => {
               const active = accent === key;
               return (
                 <div key={key} onClick={() => onAccentChange(key)} title={def.label}
                      style={{
-                       width: 32, height: 32, borderRadius: "50%", cursor: "pointer",
+                       width: 26, height: 26, borderRadius: "50%", cursor: "pointer",
                        background: `linear-gradient(135deg,${def.accent},${def.accentD})`,
                        border: active ? `2px solid ${G.text}` : "2px solid transparent",
                        boxShadow: active ? `0 0 0 2px ${G.surface}` : "none",
                        display: "flex", alignItems: "center", justifyContent: "center",
                      }}>
-                  {active && I.check("#fff", 14)}
+                  {active && I.check("#fff", 11)}
                 </div>
               );
             })}
@@ -1501,6 +1540,25 @@ function WallpaperSwatch({ label, active, onClick, style, children }) {
  * behind a back button. Nothing else on the home screen is visible while a
  * category is open — this is real navigation, not an inline expand/collapse.
  */
+function SocialChip({ emoji, url }) {
+  const domain = (() => {
+    try { return new URL(url).hostname.replace("www.", ""); } catch { return url; }
+  })();
+  return (
+    <a href={url} target="_blank" rel="noopener noreferrer" style={{
+      display: "inline-flex", alignItems: "center", gap: 6,
+      padding: "5px 12px", borderRadius: 20, fontSize: 12.5,
+      background: G.dim, border: `1px solid ${G.border}`,
+      color: G.accent, textDecoration: "none", cursor: "pointer",
+    }}>
+      <span>{emoji}</span>
+      <span style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {domain}
+      </span>
+    </a>
+  );
+}
+
 function Section({ id, icon, title, sub, activeSection, onOpen, onBack, children }) {
   if (activeSection === null) {
     return (

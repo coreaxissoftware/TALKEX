@@ -134,6 +134,12 @@ class UpdateProfileRequest(BaseModel):
     away_enabled: Optional[bool] = None
     away_message: Optional[str] = Field(default=None, max_length=500)
     calling_enabled: Optional[bool] = None
+    link_website: Optional[str] = Field(default=None, max_length=500)
+    link_facebook: Optional[str] = Field(default=None, max_length=500)
+    link_instagram: Optional[str] = Field(default=None, max_length=500)
+    link_twitter: Optional[str] = Field(default=None, max_length=500)
+    link_youtube: Optional[str] = Field(default=None, max_length=500)
+    link_linkedin: Optional[str] = Field(default=None, max_length=500)
 
 
 class StoryAudienceRequest(BaseModel):

@@ -40,3 +40,17 @@ backend/uploads/
 
 # Archived pre-rewrite backup, not part of the active app.
 old/
+
+# Android build artifacts
+frontend/android/
+frontend/capacitor.config.json
+
+# Old build zips
+frontend/talkex-frontend-build*/
+frontend/talkex-frontend/
+
+# Design files
+*.psd
+Teacher_ID_Card_Modern_preview.png
+frontend/assets/
+frontend/talkex-frontend-build.zip

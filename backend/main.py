@@ -6138,6 +6138,136 @@ def admin_reject_template(template_id: str, admin: dict = Depends(require_supera
     return {"status": "rejected"}
 
 
+# ── Music search (iTunes proxy) ──────────────────────────────────────────────
+
+import httpx
+
+_music_cache: dict[str, tuple] = {}
+MUSIC_CACHE_TTL = 3600  # 1 hour
+
+@app.get("/api/music/search")
+async def music_search(q: str = "", limit: int = 25):
+    """Proxy iTunes Search API — avoids CORS issues from frontend."""
+    cache_key = f"{q}:{limit}"
+    cached = _music_cache.get(cache_key)
+    if cached and cached[1] > time.time():
+        return cached[0]
+
+    try:
+        params = {"media": "music", "limit": min(limit, 50)}
+        if q.strip():
+            params["term"] = q
+        else:
+            # Default popular search when no query
+            params["term"] = "top hits 2025"
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get("https://itunes.apple.com/search", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+
+        results = []
+        for item in data.get("results", []):
+            if item.get("previewUrl"):
+                results.append({
+                    "id": item.get("trackId"),
+                    "title": item.get("trackName", "Unknown"),
+                    "artist": item.get("artistName", "Unknown"),
+                    "album": item.get("collectionName", ""),
+                    "artwork": item.get("artworkUrl100", ""),
+                    "artworkLarge": (item.get("artworkUrl100", "")
+                                     .replace("100x100bb", "300x300bb")),
+                    "previewUrl": item.get("previewUrl", ""),
+                    "duration": item.get("trackTimeMillis", 0),
+                    "genre": item.get("primaryGenreName", ""),
+                })
+        result = {"results": results, "count": len(results)}
+        _music_cache[cache_key] = (result, time.time() + MUSIC_CACHE_TTL)
+        return result
+    except Exception:
+        return {"results": [], "count": 0}
+
+
+@app.get("/api/music/trending")
+async def music_trending():
+    """Return a curated set of trending/popular music categories."""
+    categories = [
+        {"key": "bollywood", "label": "🇮🇳 Bollywood", "query": "bollywood hits"},
+        {"key": "pop", "label": "🎵 Pop", "query": "pop hits 2025"},
+        {"key": "hiphop", "label": "🎤 Hip Hop", "query": "hip hop trending"},
+        {"key": "romantic", "label": "💕 Romantic", "query": "romantic songs"},
+        {"key": "sad", "label": "😢 Sad", "query": "sad songs"},
+        {"key": "party", "label": "🎉 Party", "query": "party dance songs"},
+        {"key": "lofi", "label": "🌙 Lo-Fi", "query": "lofi beats"},
+        {"key": "edm", "label": "⚡ EDM", "query": "edm electronic"},
+        {"key": "classical", "label": "🎻 Classical", "query": "classical music"},
+        {"key": "devotional", "label": "🙏 Devotional", "query": "devotional songs"},
+    ]
+    return {"categories": categories}
+
+
+# ── E2EE Key Management ─────────────────────────────────────────────────────
+
+@app.post("/me/keys")
+async def upload_keys(request: Request, user: dict = Depends(current_user)):
+    """Store the user's public identity key and signed pre-key."""
+    body = await request.json()
+    identity_key = body.get("identity_key", "")
+    signed_pre_key = body.get("signed_pre_key", "")
+    one_time_keys = body.get("one_time_keys", [])
+
+    if not identity_key or not signed_pre_key:
+        raise HTTPException(400, "identity_key and signed_pre_key are required")
+
+    db.execute(
+        """UPDATE users SET e2ee_identity_key = ?, e2ee_signed_pre_key = ?
+           WHERE id = ?""",
+        (identity_key, signed_pre_key, user["id"]),
+    )
+    # Store one-time pre-keys
+    for otk in one_time_keys[:100]:  # max 100 at a time
+        db.execute(
+            "INSERT OR IGNORE INTO e2ee_one_time_keys (id, user_id, key_data) VALUES (?, ?, ?)",
+            (new_id(), user["id"], otk),
+        )
+    return {"status": "ok", "one_time_keys_stored": min(len(one_time_keys), 100)}
+
+
+@app.get("/users/{user_id}/keys")
+async def get_user_keys(user_id: str, user: dict = Depends(current_user)):
+    """Fetch another user's public keys for establishing an E2EE session."""
+    target = db.query_one("SELECT id, e2ee_identity_key, e2ee_signed_pre_key FROM users WHERE id = ?", (user_id,))
+    if not target:
+        raise HTTPException(404, "User not found")
+
+    # Pop one one-time pre-key (consume it)
+    otk_row = db.query_one(
+        "SELECT id, key_data FROM e2ee_one_time_keys WHERE user_id = ? LIMIT 1",
+        (user_id,),
+    )
+    one_time_key = None
+    if otk_row:
+        one_time_key = otk_row["key_data"]
+        db.execute("DELETE FROM e2ee_one_time_keys WHERE id = ?", (otk_row["id"],))
+
+    return {
+        "user_id": user_id,
+        "identity_key": target["e2ee_identity_key"] or "",
+        "signed_pre_key": target["e2ee_signed_pre_key"] or "",
+        "one_time_key": one_time_key,
+    }
+
+
+@app.get("/me/keys/count")
+async def my_key_count(user: dict = Depends(current_user)):
+    """How many one-time pre-keys the server still holds for this user."""
+    row = db.query_one(
+        "SELECT COUNT(*) as cnt FROM e2ee_one_time_keys WHERE user_id = ?",
+        (user["id"],),
+    )
+    return {"count": row["cnt"] if row else 0}
+
+
 # ── Health ────────────────────────────────────────────────────────────────────
 
 @app.get("/")

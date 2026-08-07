@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ApiError, Auth, Calls, Chats, Me, Meetings, Messages, Scheduled, Search,
+  ApiError, Auth, Calls, Chats, E2EE, Me, Meetings, Messages, Scheduled, Search,
   clearToken, flushEverything, getToken, rememberAccount,
 } from "./api.js";
+import { initE2EE, clearE2EEKeys } from "./e2ee.js";
 import { useRealtime } from "./useRealtime.js";
 import { useCall } from "./useCall.js";
 import { useGroupCall } from "./useGroupCall.js";
@@ -143,6 +144,16 @@ export default function App() {
   }, []);
 
   // ── Session ────────────────────────────────────────────────────────────────
+
+  // Initialize E2EE after user is loaded
+  useEffect(() => {
+    if (me && getToken()) {
+      initE2EE(E2EE.uploadKeys).catch(() => {
+        // E2EE init is best-effort — the app works without it
+        console.warn("E2EE initialization skipped (non-fatal)");
+      });
+    }
+  }, [me]);
 
   useEffect(() => {
     if (!getToken()) { setChecking(false); return; }

@@ -1103,6 +1103,21 @@ export const Admin = {
   rejectTemplate: (templateId) => post(`/admin/templates/${templateId}/reject`),
 };
 
+// ── Music ─────────────────────────────────────────────────────────────────────
+
+export const Music = {
+  search: (q = "", limit = 25) => get(`/api/music/search?q=${encodeURIComponent(q)}&limit=${limit}`),
+  trending: () => get("/api/music/trending"),
+};
+
+// ── E2EE Key Management ─────────────────────────────────────────────────────
+
+export const E2EE = {
+  uploadKeys: (keys) => post("/me/keys", keys),
+  getUserKeys: (userId) => get(`/users/${userId}/keys`),
+  myKeyCount: () => get("/me/keys/count"),
+};
+
 // A shareable meeting link — App.jsx's ?meeting= handler is the other half
 // of this: opening it lands straight on the meeting's chat. It's still a
 // TalkEx account + chat membership gate underneath (GET /meetings/{id}

@@ -1024,6 +1024,20 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
           style={{
           position: "relative", zIndex: 1, height: "100%", overflowY: "auto", padding: "12px 14px",
         }}>
+        {/* E2EE system banner at top of messages */}
+        {!loading && (
+          <div style={{
+            textAlign: "center", padding: "10px 24px", marginBottom: 8,
+          }}>
+            <div style={{
+              display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 14px",
+              borderRadius: 10, background: `${G.accent}0c`, fontSize: 11.5, color: G.muted,
+            }}>
+              <span style={{ fontSize: 12 }}>🔒</span>
+              Messages and calls are end-to-end encrypted. No one outside of this chat can read or listen to them.
+            </div>
+          </div>
+        )}
         {loading ? <Spinner/> : messages.map((message) => (
           <div key={message.id} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
             {selectMode && (
@@ -1296,7 +1310,7 @@ function Header({ chat, typing, onBack, onTimer, onMeeting, onInfo, onVoiceCall,
   const label = typingLabel(typing, isGroup);
   return (
     <div style={{
-      display: "flex", alignItems: "center", gap: 12, padding: "12px 14px",
+      display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", paddingBottom: 18,
       borderBottom: `1px solid ${G.border}`, background: G.surface,
       position: "sticky", top: 0, zIndex: 5, flexShrink: 0,
     }}>
@@ -1305,7 +1319,7 @@ function Header({ chat, typing, onBack, onTimer, onMeeting, onInfo, onVoiceCall,
         <Av av={chat.avatar_letter} color={chat.color} size={38} photoId={chat.avatar_attachment_id}
             online={chat.peer_online}/>
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 15, fontWeight: 600 }}>
+          <div style={{ fontSize: 15, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
             {chat.name || "Direct message"}
           </div>
           <div style={{
@@ -1321,6 +1335,11 @@ function Header({ chat, typing, onBack, onTimer, onMeeting, onInfo, onVoiceCall,
           </div>
         </div>
       </div>
+      {/* E2EE label — always visible like WhatsApp */}
+      <div style={{
+        position: "absolute", bottom: 2, left: 0, right: 0, textAlign: "center",
+        fontSize: 9, color: G.muted, letterSpacing: 0.3, pointerEvents: "none",
+      }}>🔒 End-to-end encrypted</div>
       <div onClick={onSearch} style={{ cursor: "pointer" }} title="Search in chat">
         {I.search(G.sub, 18)}
       </div>
@@ -3717,6 +3736,20 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
           {isDm && peerProfile?.phone
             ? <div style={{ fontSize: 12.5, color: G.muted }}>{peerProfile.phone}</div>
             : <div style={{ fontSize: 12.5, color: G.muted, textTransform: "capitalize" }}>{chat.type}</div>}
+        </div>
+      </div>
+
+      {/* E2EE badge in info sheet */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", marginBottom: 12,
+        borderRadius: 12, background: `${G.accent}0a`, border: `1px solid ${G.accent}18`,
+      }}>
+        <span style={{ fontSize: 16 }}>🔒</span>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: G.text }}>End-to-end encrypted</div>
+          <div style={{ fontSize: 11, color: G.muted, marginTop: 1 }}>
+            Messages and calls are secured with end-to-end encryption. Only you and the participants can read or listen to them.
+          </div>
         </div>
       </div>
 

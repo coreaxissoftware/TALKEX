@@ -461,6 +461,26 @@ export const ACCENTS = {
     light: { accentSoft: "#e1faf7", accentText: "#0f766e" },
     dark: { accentSoft: "#2dd4bf1f", accentText: "#5eead4" },
   },
+  darkblue: {
+    label: "Dark Blue", accent: "#3b82f6", accentD: "#1e3a5f", accentGlow: "#3b82f633",
+    light: { accentSoft: "#dbeafe", accentText: "#1e40af" },
+    dark: { accentSoft: "#3b82f61f", accentText: "#93c5fd" },
+  },
+  navy: {
+    label: "Navy", accent: "#1e3a8a", accentD: "#0a1628", accentGlow: "#1e3a8a33",
+    light: { accentSoft: "#dce3f4", accentText: "#1e3a8a" },
+    dark: { accentSoft: "#1e3a8a1f", accentText: "#6b8dd6" },
+  },
+  darkpink: {
+    label: "Dark Pink", accent: "#db2777", accentD: "#881337", accentGlow: "#db277733",
+    light: { accentSoft: "#fce7f3", accentText: "#9d174d" },
+    dark: { accentSoft: "#db27771f", accentText: "#f9a8d4" },
+  },
+  litepink: {
+    label: "Lite Pink", accent: "#f9a8d4", accentD: "#ec4899", accentGlow: "#f9a8d433",
+    light: { accentSoft: "#fdf2f8", accentText: "#be185d" },
+    dark: { accentSoft: "#f9a8d41f", accentText: "#fbcfe8" },
+  },
 };
 
 const DEFAULT_ACCENT = "skyblue";

@@ -5,8 +5,10 @@ import {
 } from "../ui.jsx";
 import { MoreMenu } from "./CallOverlay.jsx";
 import PhotoEditor from "../PhotoEditor.jsx";
+import MusicPicker from "../MusicPicker.jsx";
 
 const BACKGROUNDS = [
+  // Classic
   "linear-gradient(135deg,#6366f1,#4f46e5)",
   "linear-gradient(135deg,#f59e0b,#ef4444)",
   "linear-gradient(135deg,#10b981,#059669)",
@@ -15,6 +17,30 @@ const BACKGROUNDS = [
   "linear-gradient(135deg,#1e293b,#334155)",
   "linear-gradient(135deg,#f97316,#ea580c)",
   "linear-gradient(135deg,#06b6d4,#0891b2)",
+  // Dark Blue & Navy
+  "linear-gradient(135deg,#1e3a5f,#0d253f)",
+  "linear-gradient(135deg,#0a1628,#1b2a4a)",
+  // Dark Pink & Light Pink
+  "linear-gradient(135deg,#c2185b,#880e4f)",
+  "linear-gradient(135deg,#f48fb1,#f06292)",
+  // Sunset / Warm gradients
+  "linear-gradient(135deg,#f093fb,#f5576c)",
+  "linear-gradient(135deg,#ff9a9e,#fecfef)",
+  "linear-gradient(135deg,#fbc2eb,#a6c1ee)",
+  // Ocean / Cool gradients
+  "linear-gradient(135deg,#667eea,#764ba2)",
+  "linear-gradient(135deg,#a8edea,#fed6e3)",
+  "linear-gradient(135deg,#89f7fe,#66a6ff)",
+  // Nature / Forest
+  "linear-gradient(135deg,#11998e,#38ef7d)",
+  "linear-gradient(135deg,#fc5c7d,#6a82fb)",
+  // Neon / Vibrant
+  "linear-gradient(135deg,#f7971e,#ffd200)",
+  "linear-gradient(135deg,#00c6ff,#0072ff)",
+  "linear-gradient(135deg,#e100ff,#7f00ff)",
+  // Dark / Moody
+  "linear-gradient(135deg,#0f0c29,#302b63,#24243e)",
+  "linear-gradient(135deg,#000000,#434343)",
 ];
 
 const FONTS = [
@@ -28,9 +54,18 @@ const FONT_STACK_BY_KEY = Object.fromEntries(FONTS.map((f) => [f.key, f.stack]))
 function fontStackFor(key) { return FONT_STACK_BY_KEY[key] || FONT_STACK_BY_KEY.system; }
 
 const FONT_SIZES = [
-  { key: "small", label: "S", px: 15 },
-  { key: "medium", label: "M", px: 19 },
-  { key: "large", label: "L", px: 25 },
+  { key: "10", label: "10", px: 10 },
+  { key: "12", label: "12", px: 12 },
+  { key: "14", label: "14", px: 14 },
+  { key: "16", label: "16", px: 16 },
+  { key: "18", label: "18", px: 18 },
+  { key: "20", label: "20", px: 20 },
+  { key: "22", label: "22", px: 22 },
+  { key: "24", label: "24", px: 24 },
+  { key: "28", label: "28", px: 28 },
+  { key: "32", label: "32", px: 32 },
+  { key: "36", label: "36", px: 36 },
+  { key: "40", label: "40", px: 40 },
 ];
 const FONT_PX_BY_KEY = Object.fromEntries(FONT_SIZES.map((f) => [f.key, f.px]));
 function fontPxFor(key) { return FONT_PX_BY_KEY[key] || FONT_PX_BY_KEY.medium; }
@@ -95,6 +130,14 @@ function injectStyles() {
     @keyframes txFadeIn {
       from { opacity: 0; transform: scale(0.96); }
       to { opacity: 1; transform: scale(1); }
+    }
+    .tx-status-textarea::placeholder {
+      color: transparent;
+    }
+    .tx-status-textarea {
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
   `;
   document.head.appendChild(style);
@@ -481,13 +524,76 @@ function SectionLabel({ children }) {
  * with a compact mode switcher at the top. Text mode shows the gradient
  * preview inline. No more 5 separate tabs — everything is one fluid screen.
  */
+/**
+ * Text area that renders as a centered, vertically-centered editable area
+ * directly on the gradient background — like WhatsApp's text status composer.
+ * Uses a contentEditable div for true vertical centering with the cursor.
+ */
+function StatusTextArea({ text, setText, font, fontSize, background, fontStackFor, fontPxFor }) {
+  const editRef = useRef(null);
+  const containerRef = useRef(null);
+
+  // Sync external text changes to the contentEditable div
+  useEffect(() => {
+    if (editRef.current && editRef.current.innerText !== text) {
+      editRef.current.innerText = text;
+    }
+  }, [font, fontSize]); // only re-sync on font/size change, not on every keystroke
+
+  useEffect(() => {
+    if (editRef.current) editRef.current.focus();
+  }, []);
+
+  function onInput() {
+    if (editRef.current) {
+      setText(editRef.current.innerText);
+    }
+  }
+
+  return (
+    <div ref={containerRef} style={{
+      flex: 1, background, display: "flex", alignItems: "center", justifyContent: "center",
+      padding: 30, minHeight: 200, position: "relative", cursor: "text",
+    }} onClick={() => editRef.current?.focus()}>
+      {/* contentEditable div — cursor is naturally centered via flexbox */}
+      <div
+        ref={editRef}
+        contentEditable
+        suppressContentEditableWarning
+        onInput={onInput}
+        style={{
+          fontSize: fontPxFor(fontSize) + 4,
+          color: "#fff", fontWeight: 600,
+          textAlign: "center",
+          fontFamily: fontStackFor(font),
+          maxWidth: 300, wordBreak: "break-word",
+          lineHeight: 1.4, outline: "none",
+          caretColor: "#fff",
+          minWidth: 60, minHeight: "1.4em",
+        }}
+      />
+      {/* Placeholder — shown only when empty */}
+      {!text && (
+        <div style={{
+          position: "absolute",
+          fontSize: fontPxFor(fontSize) + 4, color: "#ffffff44", fontWeight: 600,
+          textAlign: "center", fontFamily: fontStackFor(font),
+          pointerEvents: "none",
+        }}>
+          Type a status…
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Compose({ initialKind, onClose, onDone, toast }) {
   const [kind, setKind] = useState(initialKind || "photo");
   const [text, setText] = useState("");
   const [emoji, setEmoji] = useState("⚡");
   const [background, setBackground] = useState(BACKGROUNDS[0]);
   const [font, setFont] = useState("system");
-  const [fontSize, setFontSize] = useState("medium");
+  const [fontSize, setFontSize] = useState("20");
   const [linkUrl, setLinkUrl] = useState("");
   const [later, setLater] = useState(false);
   const [when, setWhen] = useState("");
@@ -497,6 +603,8 @@ function Compose({ initialKind, onClose, onDone, toast }) {
   const [uploading, setUploading] = useState(false);
   const [rawPhotoFile, setRawPhotoFile] = useState(null);
   const [editingPhoto, setEditingPhoto] = useState(false);
+  const [showMusicPicker, setShowMusicPicker] = useState(false);
+  const [selectedMusic, setSelectedMusic] = useState(null);
   const fileInputRef = useRef(null);
 
   function switchKind(next) {
@@ -543,6 +651,20 @@ function Compose({ initialKind, onClose, onDone, toast }) {
     setEditingPhoto(false);
     setRawPhotoFile(editedFile);
     uploadFile(editedFile, URL.createObjectURL(editedFile));
+  }
+
+  if (showMusicPicker) {
+    return (
+      <MusicPicker
+        onClose={() => setShowMusicPicker(false)}
+        onSelect={(track) => {
+          setSelectedMusic(track);
+          setShowMusicPicker(false);
+          // Auto-set text to song title + artist
+          if (!text.trim()) setText(`🎵 ${track.title} — ${track.artist}`);
+        }}
+      />
+    );
   }
 
   if (editingPhoto) {
@@ -612,19 +734,19 @@ function Compose({ initialKind, onClose, onDone, toast }) {
           display: "flex", background: "#ffffff14", borderRadius: 20, padding: 3, gap: 2,
         }}>
           {[
-            { k: "text", label: "Aa" },
-            { k: "photo", label: "📷" },
-            { k: "video", label: "🎥" },
-            { k: "audio", label: "🎵" },
-            { k: "link", label: "🔗" },
-          ].map(({ k, label }) => (
+            { k: "text", icon: <span style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>Aa</span> },
+            { k: "photo", icon: I.camera("#fff", 18) },
+            { k: "video", icon: I.video("#fff", 18) },
+            { k: "audio", icon: I.musicNote("#fff", 18) },
+            { k: "link", icon: I.link("#fff", 18) },
+          ].map(({ k, icon }) => (
             <div key={k} onClick={() => switchKind(k)} style={{
-              padding: "6px 12px", borderRadius: 18, cursor: "pointer", fontSize: 13,
+              padding: "6px 12px", borderRadius: 18, cursor: "pointer",
               background: kind === k ? "#ffffff2a" : "transparent",
-              color: kind === k ? "#fff" : "#ffffff88",
-              fontWeight: kind === k ? 700 : 400,
+              opacity: kind === k ? 1 : 0.5,
               transition: "all 0.15s",
-            }}>{label}</div>
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>{icon}</div>
           ))}
         </div>
       </div>
@@ -632,61 +754,77 @@ function Compose({ initialKind, onClose, onDone, toast }) {
       {/* Main area — context-dependent */}
       <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflowY: "auto" }}>
         {kind === "text" ? (
-          /* Text status — full-screen gradient preview like WhatsApp */
+          /* Text status — type directly on gradient preview like WhatsApp */
           <div style={{
             flex: 1, display: "flex", flexDirection: "column",
           }}>
-            <div style={{
-              flex: 1, background, display: "flex", alignItems: "center", justifyContent: "center",
-              padding: 30, minHeight: 200,
-            }}>
-              <div style={{
-                fontSize: fontPxFor(fontSize) + 4, color: "#fff", fontWeight: 600,
-                textAlign: "center", fontFamily: fontStackFor(font),
-                maxWidth: 300, wordBreak: "break-word", lineHeight: 1.4,
-              }}>
-                {text || "Type a status…"}
+            <StatusTextArea
+              text={text} setText={setText} font={font} fontSize={fontSize}
+              background={background} fontStackFor={fontStackFor} fontPxFor={fontPxFor}
+            />
+
+            {/* Font & Size dropdowns — Word/Docs style */}
+            <div style={{ display: "flex", gap: 10, padding: "8px 16px", alignItems: "center", flexShrink: 0 }}>
+              {/* Font dropdown */}
+              <select
+                value={font}
+                onChange={(e) => setFont(e.target.value)}
+                style={{
+                  flex: 1, padding: "8px 12px", borderRadius: 10,
+                  background: "#ffffff14", color: "#fff", border: "1px solid #ffffff22",
+                  fontSize: 13, fontFamily: fontStackFor(font), outline: "none",
+                  cursor: "pointer", appearance: "auto",
+                }}
+              >
+                {FONTS.map(({ key, label }) => (
+                  <option key={key} value={key} style={{ background: "#1a1a2e", color: "#fff" }}>{label}</option>
+                ))}
+              </select>
+
+              {/* Font size dropdown */}
+              <select
+                value={fontSize}
+                onChange={(e) => setFontSize(e.target.value)}
+                style={{
+                  width: 70, padding: "8px 10px", borderRadius: 10,
+                  background: "#ffffff14", color: "#fff", border: "1px solid #ffffff22",
+                  fontSize: 13, fontWeight: 600, outline: "none",
+                  cursor: "pointer", appearance: "auto",
+                }}
+              >
+                {FONT_SIZES.map(({ key, label }) => (
+                  <option key={key} value={key} style={{ background: "#1a1a2e", color: "#fff" }}>{label}</option>
+                ))}
+              </select>
+
+              {/* Increase / Decrease size buttons */}
+              <div style={{ display: "flex", gap: 4 }}>
+                <div onClick={() => {
+                  const idx = FONT_SIZES.findIndex((f) => f.key === fontSize);
+                  if (idx > 0) setFontSize(FONT_SIZES[idx - 1].key);
+                }} style={{
+                  width: 30, height: 30, borderRadius: 8, cursor: "pointer",
+                  background: "#ffffff0d", color: "#ffffffaa", fontSize: 16, fontWeight: 700,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  border: "1px solid #ffffff22",
+                }}>A↓</div>
+                <div onClick={() => {
+                  const idx = FONT_SIZES.findIndex((f) => f.key === fontSize);
+                  if (idx < FONT_SIZES.length - 1) setFontSize(FONT_SIZES[idx + 1].key);
+                }} style={{
+                  width: 30, height: 30, borderRadius: 8, cursor: "pointer",
+                  background: "#ffffff0d", color: "#ffffffaa", fontSize: 16, fontWeight: 700,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  border: "1px solid #ffffff22",
+                }}>A↑</div>
               </div>
             </div>
 
-            {/* Text input overlaid at bottom */}
-            <div style={{ padding: "12px 16px", background: "#111" }}>
-              <input value={text} onChange={(e) => setText(e.target.value)}
-                     placeholder="Type a status…" autoFocus
-                     style={{
-                       width: "100%", background: "#ffffff14", border: "none", borderRadius: 24,
-                       padding: "12px 18px", color: "#fff", fontSize: 15, outline: "none",
-                     }}/>
-            </div>
-
-            {/* Font picker — horizontal scroll */}
-            <div style={{ display: "flex", gap: 8, padding: "8px 16px", overflowX: "auto" }}>
-              {FONTS.map(({ key, label, stack }) => (
-                <div key={key} onClick={() => setFont(key)} style={{
-                  padding: "6px 14px", borderRadius: 20, cursor: "pointer",
-                  fontFamily: stack, fontSize: 12.5, flexShrink: 0, whiteSpace: "nowrap",
-                  background: font === key ? "#ffffff2a" : "#ffffff0d",
-                  color: font === key ? "#fff" : "#ffffff88",
-                  border: `1px solid ${font === key ? "#ffffff44" : "transparent"}`,
-                }}>{label}</div>
-              ))}
-              <div style={{ width: 1, alignSelf: "stretch", background: "#ffffff1a", margin: "0 4px", flexShrink: 0 }}/>
-              {FONT_SIZES.map(({ key, label }) => (
-                <div key={key} onClick={() => setFontSize(key)} style={{
-                  width: 32, height: 32, borderRadius: "50%", cursor: "pointer",
-                  fontSize: 13, fontWeight: 700, flexShrink: 0,
-                  background: fontSize === key ? "#ffffff2a" : "#ffffff0d",
-                  color: fontSize === key ? "#fff" : "#ffffff88",
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                }}>{label}</div>
-              ))}
-            </div>
-
             {/* Background swatches — circular */}
-            <div style={{ display: "flex", gap: 10, padding: "8px 16px", overflowX: "auto" }}>
+            <div style={{ display: "flex", gap: 5, padding: "8px 12px", flexShrink: 0, overflowX: "auto" }}>
               {BACKGROUNDS.map((option) => (
                 <div key={option} onClick={() => setBackground(option)} style={{
-                  width: 32, height: 32, borderRadius: "50%", background: option,
+                  width: 24, height: 24, borderRadius: "50%", background: option,
                   cursor: "pointer", flexShrink: 0,
                   border: background === option ? "2.5px solid #fff" : "2px solid transparent",
                   boxShadow: background === option ? "0 0 0 1px #ffffff44" : "none",
@@ -723,17 +861,71 @@ function Compose({ initialKind, onClose, onDone, toast }) {
                     <audio src={upload.previewUrl || undefined} controls style={{ width: "100%" }}/>
                   </div>
                 )}
-                {kind === "photo" && rawPhotoFile && (
+                {/* Selected music card (from iTunes) */}
+                {kind === "audio" && selectedMusic && !upload && (
+                  <div style={{
+                    display: "flex", flexDirection: "column", alignItems: "center", gap: 12, padding: 24,
+                    background: "#ffffff0d", borderRadius: 16, width: "100%", maxWidth: 320,
+                  }}>
+                    <img src={selectedMusic.artworkLarge || selectedMusic.artwork} alt="" referrerPolicy="no-referrer"
+                         style={{ width: 120, height: 120, borderRadius: 12, objectFit: "cover" }}/>
+                    <div style={{ textAlign: "center" }}>
+                      <div style={{ fontSize: 16, fontWeight: 700, color: "#fff" }}>{selectedMusic.title}</div>
+                      <div style={{ fontSize: 13, color: "#ffffff88", marginTop: 2 }}>{selectedMusic.artist}</div>
+                    </div>
+                    <audio src={selectedMusic.previewUrl} controls style={{ width: "100%" }}/>
+                    <div onClick={() => { setSelectedMusic(null); setText(""); }}
+                         style={{ fontSize: 12, color: "#ffffff66", cursor: "pointer" }}>✕ Remove music</div>
+                  </div>
+                )}
+                {/* Music theme overlay on photo */}
+                {kind === "photo" && selectedMusic && (
+                  <div style={{
+                    position: "absolute", bottom: 52, left: 12, right: 12,
+                    display: "flex", alignItems: "center", gap: 10, padding: "8px 10px",
+                    borderRadius: 12, background: "rgba(0,0,0,0.65)", backdropFilter: "blur(16px)",
+                    animation: "txFadeIn 0.25s ease-out",
+                  }}>
+                    <img src={selectedMusic.artworkLarge || selectedMusic.artwork} alt=""
+                         referrerPolicy="no-referrer"
+                         onError={(e) => { e.target.style.display = "none"; }}
+                         style={{ width: 40, height: 40, borderRadius: 8, objectFit: "cover", flexShrink: 0 }}/>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{
+                        fontSize: 13, fontWeight: 600, color: "#fff",
+                        whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                      }}>{selectedMusic.title}</div>
+                      <div style={{
+                        fontSize: 11, color: "#ffffffaa",
+                        whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                      }}>{selectedMusic.artist}</div>
+                    </div>
+                    <div style={{ fontSize: 16, flexShrink: 0, lineHeight: 1 }}>🎵</div>
+                    <div onClick={() => { setSelectedMusic(null); }}
+                         style={{ fontSize: 14, color: "#ffffff88", cursor: "pointer", flexShrink: 0, lineHeight: 1 }}>✕</div>
+                  </div>
+                )}
+                {kind === "photo" && (
                   <div style={{
                     position: "absolute", bottom: 12, right: 12,
                     display: "flex", gap: 8,
                   }}>
-                    <button onClick={() => setEditingPhoto(true)} style={{
-                      display: "flex", alignItems: "center", gap: 6,
-                      padding: "8px 16px", borderRadius: 24, border: "none", cursor: "pointer",
-                      background: "#000000cc", color: "#fff", fontSize: 13, fontWeight: 600,
-                      backdropFilter: "blur(10px)",
-                    }}>{I.edit("#fff", 14)} Edit</button>
+                    {!selectedMusic && (
+                      <button onClick={() => setShowMusicPicker(true)} style={{
+                        display: "flex", alignItems: "center", gap: 6,
+                        padding: "8px 16px", borderRadius: 24, border: "none", cursor: "pointer",
+                        background: "#000000cc", color: "#fff", fontSize: 13, fontWeight: 600,
+                        backdropFilter: "blur(10px)",
+                      }}>🎵 Music</button>
+                    )}
+                    {rawPhotoFile && (
+                      <button onClick={() => setEditingPhoto(true)} style={{
+                        display: "flex", alignItems: "center", gap: 6,
+                        padding: "8px 16px", borderRadius: 24, border: "none", cursor: "pointer",
+                        background: "#000000cc", color: "#fff", fontSize: 13, fontWeight: 600,
+                        backdropFilter: "blur(10px)",
+                      }}>{I.edit("#fff", 14)} Edit</button>
+                    )}
                   </div>
                 )}
                 <button onClick={() => { setUpload(null); setRawPhotoFile(null); }} style={{
@@ -742,6 +934,80 @@ function Compose({ initialKind, onClose, onDone, toast }) {
                   background: "#000000aa", color: "#fff", fontSize: 16,
                   display: "flex", alignItems: "center", justifyContent: "center",
                 }}>✕</button>
+              </div>
+            ) : selectedMusic ? (
+              /* Selected music displayed */
+              <div style={{
+                flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+              }}>
+                <div style={{
+                  display: "flex", flexDirection: "column", alignItems: "center", gap: 12, padding: 24,
+                  background: "#ffffff0d", borderRadius: 16, width: "100%", maxWidth: 320,
+                }}>
+                  <img src={selectedMusic.artworkLarge || selectedMusic.artwork} alt=""
+                       style={{ width: 140, height: 140, borderRadius: 14, objectFit: "cover" }}/>
+                  <div style={{ textAlign: "center" }}>
+                    <div style={{ fontSize: 16, fontWeight: 700, color: "#fff" }}>{selectedMusic.title}</div>
+                    <div style={{ fontSize: 13, color: "#ffffff88", marginTop: 2 }}>{selectedMusic.artist}</div>
+                    {selectedMusic.genre && (
+                      <div style={{ fontSize: 11, color: "#ffffff44", marginTop: 2 }}>{selectedMusic.genre}</div>
+                    )}
+                  </div>
+                  <audio src={selectedMusic.previewUrl} controls style={{ width: "100%" }}/>
+                  <div style={{ display: "flex", gap: 12, marginTop: 4 }}>
+                    <div onClick={() => setShowMusicPicker(true)} style={{
+                      padding: "6px 14px", borderRadius: 20, cursor: "pointer",
+                      background: `${G.accent}22`, color: G.accent, fontSize: 12, fontWeight: 600,
+                      border: `1px solid ${G.accent}55`,
+                    }}>Change</div>
+                    <div onClick={() => { setSelectedMusic(null); setText(""); }} style={{
+                      padding: "6px 14px", borderRadius: 20, cursor: "pointer",
+                      background: "#ffffff12", color: "#ffffffaa", fontSize: 12, fontWeight: 600,
+                    }}>Remove</div>
+                  </div>
+                </div>
+              </div>
+            ) : kind === "audio" ? (
+              /* Audio mode: Browse Music + Upload file buttons */
+              <div style={{
+                flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                gap: 16, padding: 20,
+              }}>
+                {/* Browse Music — main CTA */}
+                <div onClick={() => setShowMusicPicker(true)} style={{
+                  width: "100%", maxWidth: 300, padding: "40px 20px", borderRadius: 20,
+                  background: `linear-gradient(135deg,${G.accent}22,${G.accent}11)`,
+                  border: `1.5px solid ${G.accent}33`,
+                  display: "flex", flexDirection: "column", alignItems: "center", gap: 14,
+                  cursor: "pointer",
+                }}>
+                  <div style={{
+                    width: 64, height: 64, borderRadius: "50%", background: `${G.accent}33`,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                  }}>{I.musicNote(G.accent, 32)}</div>
+                  <span style={{ fontSize: 15, fontWeight: 600, color: "#fff" }}>Browse Music</span>
+                  <span style={{ fontSize: 12, color: "#ffffff66" }}>Search songs, artists & genres</span>
+                </div>
+
+                {/* Or upload your own */}
+                <label style={{
+                  width: "100%", maxWidth: 300, padding: "16px 20px", borderRadius: 14,
+                  background: "#ffffff08", border: `1px dashed #ffffff22`,
+                  display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
+                  cursor: "pointer",
+                }}>
+                  {uploading ? <Spinner/> : (
+                    <>
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ffffff88" strokeWidth="2" strokeLinecap="round">
+                        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                        <polyline points="17 8 12 3 7 8"/>
+                        <line x1="12" y1="3" x2="12" y2="15"/>
+                      </svg>
+                      <span style={{ fontSize: 13, color: "#ffffff88" }}>Upload audio file</span>
+                    </>
+                  )}
+                  <input ref={fileInputRef} type="file" accept="audio/*" hidden disabled={uploading} onChange={onFilePicked}/>
+                </label>
               </div>
             ) : (
               <label style={{
@@ -758,10 +1024,9 @@ function Compose({ initialKind, onClose, onDone, toast }) {
                     }}>
                       {kind === "photo" && I.image(G.accent, 28)}
                       {kind === "video" && I.video(G.accent, 28)}
-                      {kind === "audio" && I.musicNote(G.accent, 28)}
                     </div>
                     <span style={{ fontSize: 14, color: "#ffffffaa" }}>
-                      Tap to choose {kind === "audio" ? "an audio" : `a ${kind}`}
+                      Tap to choose a {kind}
                     </span>
                   </>
                 )}

@@ -17,8 +17,8 @@
     script-src 'self';
     worker-src 'self';
     style-src 'self' 'unsafe-inline';
-    img-src 'self' data: blob: https://talkex-backend.onrender.com https://*.tile.openstreetmap.org;
-    media-src 'self' blob: https://talkex-backend.onrender.com;
+    img-src 'self' data: blob: https://talkex-backend.onrender.com https://*.tile.openstreetmap.org https://*.mzstatic.com;
+    media-src 'self' blob: https://talkex-backend.onrender.com https://audio-ssl.itunes.apple.com;
     font-src 'self';
     connect-src 'self' https://talkex-backend.onrender.com wss://talkex-backend.onrender.com http://localhost:8090 ws://localhost:8090 stun: turn:;
     object-src 'none';
@@ -40,11 +40,11 @@
     body{background:#f5f9fc;}
     /* Thin scrollbars everywhere — Firefox via scrollbar-width, everything
        else (Chrome/Safari/Edge) via the ::-webkit-scrollbar pseudo-elements. */
-    *{scrollbar-width:thin;scrollbar-color:#8888 transparent;}
-    ::-webkit-scrollbar{width:5px;height:5px;}
+    *{scrollbar-width:thin;scrollbar-color:#8884 transparent;}
+    ::-webkit-scrollbar{width:1px;height:1px;}
     ::-webkit-scrollbar-track{background:transparent;}
-    ::-webkit-scrollbar-thumb{background:#88888899;border-radius:10px;}
-    ::-webkit-scrollbar-thumb:hover{background:#888888cc;}
+    ::-webkit-scrollbar-thumb{background:#88888844;border-radius:10px;}
+    ::-webkit-scrollbar-thumb:hover{background:#88888888;}
   </style>
   <script src="/theme-init.js"></script>
 </head>

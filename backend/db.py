@@ -813,6 +813,13 @@ CREATE TABLE IF NOT EXISTS reports (
 );
 
 CREATE INDEX IF NOT EXISTS idx_reports_created ON reports (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS e2ee_one_time_keys (
+    id      TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    key_data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_e2ee_otk_user ON e2ee_one_time_keys (user_id);
 """
 
 
@@ -921,6 +928,17 @@ COLUMNS_ADDED_LATER = [
     # instead, and turning it back off restores the normal long expiry —
     # see toggle_session_short_lived in main.py.
     ("sessions", "short_lived", "INTEGER NOT NULL DEFAULT 0"),
+    # Social / external profile links — shown on the user's profile card.
+    ("users", "link_website", "TEXT NOT NULL DEFAULT ''"),
+    ("users", "link_facebook", "TEXT NOT NULL DEFAULT ''"),
+    ("users", "link_instagram", "TEXT NOT NULL DEFAULT ''"),
+    ("users", "link_twitter", "TEXT NOT NULL DEFAULT ''"),
+    ("users", "link_youtube", "TEXT NOT NULL DEFAULT ''"),
+    ("users", "link_linkedin", "TEXT NOT NULL DEFAULT ''"),
+    # E2EE public keys — stored as base64-encoded strings.
+    # The private keys NEVER leave the client device.
+    ("users", "e2ee_identity_key", "TEXT NOT NULL DEFAULT ''"),
+    ("users", "e2ee_signed_pre_key", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 
