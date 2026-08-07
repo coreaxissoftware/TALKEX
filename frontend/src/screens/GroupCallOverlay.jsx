@@ -1017,20 +1017,61 @@ function ParticipantTile({
   );
 }
 
-const WHITEBOARD_COLORS = ["#f8fafc", "#ef4444", "#f59e0b", "#22c55e", "#38bdf8", "#a855f7"];
-
-const TOOLS = [
-  { key: "pen", label: "Pen", icon: "✏️" },
-  { key: "highlighter", label: "Highlighter", icon: "🖍️" },
-  { key: "eraser", label: "Eraser", icon: null },
-  { key: "line", label: "Line", icon: "／" },
-  { key: "rect", label: "Rectangle", icon: "▭" },
-  { key: "circle", label: "Circle", icon: "◯" },
-  { key: "text", label: "Text", icon: "T" },
-  { key: "sticky", label: "Sticky note", icon: "🗒️" },
-  { key: "image", label: "Insert image", icon: "🖼️" },
-  { key: "laser", label: "Laser pointer", icon: "🔴" },
+const WHITEBOARD_COLORS = [
+  "#f8fafc", "#ef4444", "#f59e0b", "#22c55e", "#38bdf8", "#a855f7",
+  "#000000", "#6b7280", "#f97316", "#ec4899", "#14b8a6", "#3b82f6",
 ];
+
+const PEN_SIZES = [
+  { key: "S", size: 2 },
+  { key: "M", size: 4 },
+  { key: "L", size: 8 },
+];
+
+// Tools organized into categories for the tabbed toolbar
+const TOOL_CATEGORIES = [
+  {
+    label: "Draw", tools: [
+      { key: "pen", label: "Pen", icon: "✏️" },
+      { key: "marker", label: "Marker", icon: "🖊️" },
+      { key: "highlighter", label: "Highlighter", icon: "🖍️" },
+      { key: "eraser", label: "Eraser", icon: "🧹" },
+    ],
+  },
+  {
+    label: "Shapes", tools: [
+      { key: "line", label: "Line", icon: "／" },
+      { key: "arrow", label: "Arrow", icon: "➡" },
+      { key: "rect", label: "Rectangle", icon: "▭" },
+      { key: "circle", label: "Circle", icon: "◯" },
+      { key: "triangle", label: "Triangle", icon: "△" },
+      { key: "star", label: "Star", icon: "⭐" },
+      { key: "diamond", label: "Diamond", icon: "◇" },
+    ],
+  },
+  {
+    label: "Add", tools: [
+      { key: "text", label: "Text", icon: "T" },
+      { key: "math", label: "Math", icon: "∑" },
+      { key: "sticky", label: "Sticky", icon: "🗒️" },
+      { key: "image", label: "Image", icon: "🖼️" },
+      { key: "stamp", label: "Stamp", icon: "😊" },
+    ],
+  },
+  {
+    label: "Board", tools: [
+      { key: "laser", label: "Laser", icon: "🔴" },
+      { key: "grid", label: "Grid", icon: "⊞" },
+      { key: "ruler", label: "Ruler", icon: "📏" },
+      { key: "undo", label: "Undo", icon: "↩" },
+      { key: "save", label: "Save", icon: "💾" },
+    ],
+  },
+];
+
+const STAMP_EMOJIS = ["✓", "✗", "⭐", "❤️", "👍", "👎", "❓", "❗", "💡", "🎯", "📌", "🔥"];
+
+const SHAPE_TOOLS = ["line", "arrow", "rect", "circle", "triangle", "star", "diamond"];
 
 function isLightColor(hex) {
   const value = (hex || "#000000").replace("#", "");
@@ -1056,41 +1097,61 @@ function wrapCanvasText(context, text, x, y, maxWidth, lineHeight) {
 }
 
 /**
- * A shared drawing surface for the meeting, not a persisted document — it
- * exists only as long as the call room does, same as screen share. Two
- * families of mark, both riding the same whiteboard_draw/_clear relay
- * (a bare stroke.kind is missing entirely for the original freehand case,
- * so old and new clients that only understand pen strokes still degrade
- * gracefully — anything with a kind they don't recognize just doesn't
- * render for them instead of crashing):
- *   - freehand (pen/highlighter/eraser): streamed point-to-point exactly
- *     like before, one segment per pointermove.
- *   - shapes/text (line/rect/circle/text): a single message sent once, on
- *     release — there's nothing meaningful to stream mid-drag for "the
- *     rectangle isn't finished yet."
- * Coordinates always travel as 0–1 fractions of canvas size so a mark lines
- * up the same way on every participant's differently-sized screen.
+ * A shared drawing surface for the meeting — a full-featured smart board
+ * with drawing, shapes, text, stamps, grid/ruler, undo, and save. Not a
+ * persisted document; it exists only as long as the call room does, same
+ * as screen share.
+ *
+ * Two families of mark, both riding the same whiteboard_draw/_clear relay:
+ *   - freehand (pen/marker/highlighter/eraser): streamed point-to-point.
+ *   - shapes/text/stamps: a single message sent once, on release.
+ * Coordinates always travel as 0–1 fractions of canvas size so marks line
+ * up on every participant's differently-sized screen.
  *
  * `transparent`, when true, is the "annotate on top of the shared screen"
- * mode — same board, same tools, just no opaque background covering the
- * video underneath.
+ * mode — same board, same tools, just no opaque background.
  */
 function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
   const canvasRef = useRef(null);
   const drawing = useRef(false);
   const lastPoint = useRef(null);
   const shapeStart = useRef(null);
-  const snapshotRef = useRef(null); // canvas pixels at drag-start, for a live shape preview
+  const snapshotRef = useRef(null);
   const lastAppliedN = useRef(0);
   const [color, setColor] = useState(WHITEBOARD_COLORS[0]);
   const [tool, setTool] = useState("pen");
+  const [penSize, setPenSize] = useState(PEN_SIZES[1]); // Medium default
+  const [toolTab, setToolTab] = useState(0); // which category tab is open
+  const [showGrid, setShowGrid] = useState(false);
+  const [showRuler, setShowRuler] = useState(false);
+  const [showStampPicker, setShowStampPicker] = useState(false);
+  const [showColorPicker, setShowColorPicker] = useState(false);
   const fileInputRef = useRef(null);
   const [laserDots, setLaserDots] = useState({});
   const laserTimers = useRef({});
   const lastLaserSent = useRef(0);
+  // Undo stack: canvas snapshots saved before each drawing action.
+  // Max 20 to avoid blowing up memory on long sessions.
+  const undoStack = useRef([]);
+  const MAX_UNDO = 20;
 
   function ctx() {
     return canvasRef.current?.getContext("2d");
+  }
+
+  function saveUndoSnapshot() {
+    const canvas = canvasRef.current;
+    const context = ctx();
+    if (!canvas || !context) return;
+    const snapshot = context.getImageData(0, 0, canvas.width, canvas.height);
+    undoStack.current.push(snapshot);
+    if (undoStack.current.length > MAX_UNDO) undoStack.current.shift();
+  }
+
+  function undo() {
+    const snapshot = undoStack.current.pop();
+    if (!snapshot) return;
+    ctx()?.putImageData(snapshot, 0, 0);
   }
 
   function resizeCanvas() {
@@ -1105,21 +1166,41 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
 
   useEffect(() => {
     resizeCanvas();
-    // A plain window "resize" listener misses every OTHER reason this
-    // canvas's actual box can change size — toggling the call between its
-    // mobile-frame width and full-screen `expanded`, or this panel's own
-    // layout settling after mount, neither of which fires a browser window
-    // resize event at all. ResizeObserver reacts to the element's real box,
-    // whatever caused it to change — which is what "whiteboard size doesn't
-    // stay right" turned out to actually be: strokes drawn before a
-    // container-driven resize landed at coordinates for the OLD size,
-    // because nothing ever told the canvas its backing store was now wrong.
     const canvas = canvasRef.current;
     if (!canvas || typeof ResizeObserver === "undefined") return undefined;
     const observer = new ResizeObserver(() => resizeCanvas());
     observer.observe(canvas);
     return () => observer.disconnect();
   }, []);
+
+  // Draw grid overlay when enabled
+  useEffect(() => {
+    if (!showGrid) return;
+    const canvas = canvasRef.current;
+    const context = ctx();
+    if (!canvas || !context) return;
+    function drawGrid() {
+      const w = canvas.clientWidth, h = canvas.clientHeight;
+      context.save();
+      context.strokeStyle = "#ffffff18";
+      context.lineWidth = 0.5;
+      const step = 30;
+      for (let x = step; x < w; x += step) {
+        context.beginPath();
+        context.moveTo(x, 0);
+        context.lineTo(x, h);
+        context.stroke();
+      }
+      for (let y = step; y < h; y += step) {
+        context.beginPath();
+        context.moveTo(0, y);
+        context.lineTo(w, y);
+        context.stroke();
+      }
+      context.restore();
+    }
+    drawGrid();
+  }, [showGrid]);
 
   function paintSegment(fromFrac, toFrac, strokeColor, size) {
     const canvas = canvasRef.current;
@@ -1138,6 +1219,16 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
     context.globalAlpha = 1;
   }
 
+  function paintArrowhead(context, x1, y1, x2, y2, headLen) {
+    const angle = Math.atan2(y2 - y1, x2 - x1);
+    context.beginPath();
+    context.moveTo(x2, y2);
+    context.lineTo(x2 - headLen * Math.cos(angle - Math.PI / 6), y2 - headLen * Math.sin(angle - Math.PI / 6));
+    context.moveTo(x2, y2);
+    context.lineTo(x2 - headLen * Math.cos(angle + Math.PI / 6), y2 - headLen * Math.sin(angle + Math.PI / 6));
+    context.stroke();
+  }
+
   function paintShape(shapeType, startFrac, endFrac, strokeColor, size) {
     const canvas = canvasRef.current;
     const context = ctx();
@@ -1153,16 +1244,47 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
     if (shapeType === "line") {
       context.moveTo(x1, y1);
       context.lineTo(x2, y2);
+    } else if (shapeType === "arrow") {
+      context.moveTo(x1, y1);
+      context.lineTo(x2, y2);
+      context.stroke();
+      paintArrowhead(context, x1, y1, x2, y2, 14);
+      return;
     } else if (shapeType === "rect") {
       context.rect(x1, y1, x2 - x1, y2 - y1);
     } else if (shapeType === "circle") {
       const rx = Math.abs(x2 - x1) / 2, ry = Math.abs(y2 - y1) / 2;
       context.ellipse((x1 + x2) / 2, (y1 + y2) / 2, rx, ry, 0, 0, Math.PI * 2);
+    } else if (shapeType === "triangle") {
+      const midX = (x1 + x2) / 2;
+      context.moveTo(midX, y1);
+      context.lineTo(x2, y2);
+      context.lineTo(x1, y2);
+      context.closePath();
+    } else if (shapeType === "star") {
+      const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
+      const outerR = Math.min(Math.abs(x2 - x1), Math.abs(y2 - y1)) / 2;
+      const innerR = outerR * 0.4;
+      for (let i = 0; i < 10; i++) {
+        const r = i % 2 === 0 ? outerR : innerR;
+        const a = (Math.PI * 2 * i) / 10 - Math.PI / 2;
+        const px = cx + r * Math.cos(a), py = cy + r * Math.sin(a);
+        i === 0 ? context.moveTo(px, py) : context.lineTo(px, py);
+      }
+      context.closePath();
+    } else if (shapeType === "diamond") {
+      const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
+      const hw = Math.abs(x2 - x1) / 2, hh = Math.abs(y2 - y1) / 2;
+      context.moveTo(cx, cy - hh);
+      context.lineTo(cx + hw, cy);
+      context.lineTo(cx, cy + hh);
+      context.lineTo(cx - hw, cy);
+      context.closePath();
     }
     context.stroke();
   }
 
-  function paintText(startFrac, text, strokeColor) {
+  function paintText(startFrac, text, strokeColor, fontSize) {
     const canvas = canvasRef.current;
     const context = ctx();
     if (!canvas || !context || !text) return;
@@ -1170,8 +1292,31 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
     context.globalCompositeOperation = "source-over";
     context.globalAlpha = 1;
     context.fillStyle = strokeColor;
-    context.font = "20px sans-serif";
+    context.font = `${fontSize || 20}px sans-serif`;
     context.fillText(text, startFrac.x * w, startFrac.y * h);
+  }
+
+  function paintMath(startFrac, text, strokeColor) {
+    const canvas = canvasRef.current;
+    const context = ctx();
+    if (!canvas || !context || !text) return;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    context.globalCompositeOperation = "source-over";
+    context.globalAlpha = 1;
+    context.fillStyle = strokeColor;
+    context.font = "italic 22px serif";
+    context.fillText(text, startFrac.x * w, startFrac.y * h);
+  }
+
+  function paintStamp(startFrac, emoji, fontSize) {
+    const canvas = canvasRef.current;
+    const context = ctx();
+    if (!canvas || !context || !emoji) return;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    context.globalCompositeOperation = "source-over";
+    context.globalAlpha = 1;
+    context.font = `${fontSize || 36}px sans-serif`;
+    context.fillText(emoji, startFrac.x * w, startFrac.y * h);
   }
 
   function paintSticky(startFrac, text, strokeColor) {
@@ -1212,7 +1357,11 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
     if (stroke.kind === "shape") {
       paintShape(stroke.shapeType, stroke.start, stroke.end, stroke.color, stroke.size);
     } else if (stroke.kind === "text") {
-      paintText(stroke.start, stroke.text, stroke.color);
+      paintText(stroke.start, stroke.text, stroke.color, stroke.fontSize);
+    } else if (stroke.kind === "math") {
+      paintMath(stroke.start, stroke.text, stroke.color);
+    } else if (stroke.kind === "stamp") {
+      paintStamp(stroke.start, stroke.emoji, stroke.fontSize);
     } else if (stroke.kind === "sticky") {
       paintSticky(stroke.start, stroke.text, stroke.color);
     } else if (stroke.kind === "image") {
@@ -1254,6 +1403,7 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
         const dataUrl = off.toDataURL("image/jpeg", 0.72);
         const start = { x: Math.max(0, 0.5 - drawW / cw / 2), y: Math.max(0, 0.5 - drawH / ch / 2) };
         const size = { w: drawW / cw, h: drawH / ch };
+        saveUndoSnapshot();
         paintImage(start, dataUrl, size);
         send({ type: "whiteboard_draw", chat_id: chatId, stroke: { kind: "image", start, size, dataUrl } });
       };
@@ -1262,9 +1412,7 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
     reader.readAsDataURL(file);
   }
 
-  // Remote strokes and clears — read straight from the shared events array
-  // rather than going through useGroupCall's state, so a burst of draw
-  // points never triggers a re-render of the call UI around this canvas.
+  // Remote strokes and clears
   useEffect(() => {
     const fresh = events.filter((event) => event._n > lastAppliedN.current
       && event.chat_id === chatId
@@ -1294,30 +1442,55 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
     return color;
   }
 
+  function currentPenSize() {
+    if (tool === "highlighter") return penSize.size * 3.5;
+    if (tool === "marker") return penSize.size * 2;
+    if (tool === "eraser") return penSize.size * 5;
+    return penSize.size;
+  }
+
   function handlePointerDown(event) {
     const point = pointFromEvent(event);
     if (tool === "text") {
       const text = window.prompt("Text:");
       if (text && text.trim()) {
+        saveUndoSnapshot();
         paintText(point, text.trim(), color);
         send({ type: "whiteboard_draw", chat_id: chatId, stroke: { kind: "text", start: point, text: text.trim(), color } });
+      }
+      return;
+    }
+    if (tool === "math") {
+      const text = window.prompt("Math expression (e.g. x² + y² = r²):");
+      if (text && text.trim()) {
+        saveUndoSnapshot();
+        paintMath(point, text.trim(), color);
+        send({ type: "whiteboard_draw", chat_id: chatId, stroke: { kind: "math", start: point, text: text.trim(), color } });
       }
       return;
     }
     if (tool === "sticky") {
       const text = window.prompt("Note text:");
       if (text && text.trim()) {
+        saveUndoSnapshot();
         paintSticky(point, text.trim(), color);
         send({ type: "whiteboard_draw", chat_id: chatId, stroke: { kind: "sticky", start: point, text: text.trim(), color } });
       }
       return;
     }
+    if (tool === "stamp") {
+      setShowStampPicker(point);
+      return;
+    }
     drawing.current = true;
     lastPoint.current = point;
-    if (["line", "rect", "circle"].includes(tool)) {
+    if (SHAPE_TOOLS.includes(tool)) {
       shapeStart.current = point;
       const canvas = canvasRef.current;
       snapshotRef.current = ctx()?.getImageData(0, 0, canvas.width, canvas.height);
+    } else {
+      // Save undo snapshot before freehand drawing starts
+      saveUndoSnapshot();
     }
   }
 
@@ -1335,16 +1508,13 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
       return;
     }
 
-    if (["line", "rect", "circle"].includes(tool)) {
-      // A live preview only — restore the pre-drag snapshot each frame so
-      // dragging the shape around doesn't leave a trail of every position
-      // it passed through.
+    if (SHAPE_TOOLS.includes(tool)) {
       if (snapshotRef.current) ctx()?.putImageData(snapshotRef.current, 0, 0);
-      paintShape(tool, shapeStart.current, point, color, 3);
+      paintShape(tool, shapeStart.current, point, color, penSize.size);
       return;
     }
 
-    const size = tool === "highlighter" ? 14 : tool === "eraser" ? 22 : 3;
+    const size = currentPenSize();
     const strokeColor = strokeColorFor();
     paintSegment(lastPoint.current, point, strokeColor, size);
     send({
@@ -1355,13 +1525,14 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
   }
 
   function handlePointerUp(event) {
-    if (drawing.current && ["line", "rect", "circle"].includes(tool) && shapeStart.current) {
+    if (drawing.current && SHAPE_TOOLS.includes(tool) && shapeStart.current) {
       const point = pointFromEvent(event);
+      saveUndoSnapshot();
       if (snapshotRef.current) ctx()?.putImageData(snapshotRef.current, 0, 0);
-      paintShape(tool, shapeStart.current, point, color, 3);
+      paintShape(tool, shapeStart.current, point, color, penSize.size);
       send({
         type: "whiteboard_draw", chat_id: chatId,
-        stroke: { kind: "shape", shapeType: tool, start: shapeStart.current, end: point, color, size: 3 },
+        stroke: { kind: "shape", shapeType: tool, start: shapeStart.current, end: point, color, size: penSize.size },
       });
     }
     drawing.current = false;
@@ -1371,24 +1542,59 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
   }
 
   function clearBoard() {
+    saveUndoSnapshot();
     const canvas = canvasRef.current;
     ctx()?.clearRect(0, 0, canvas?.clientWidth || 0, canvas?.clientHeight || 0);
     send({ type: "whiteboard_clear", chat_id: chatId });
   }
+
+  function saveBoard() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    // Create a temporary canvas with white background + current drawing
+    const tmp = document.createElement("canvas");
+    tmp.width = canvas.width;
+    tmp.height = canvas.height;
+    const tmpCtx = tmp.getContext("2d");
+    tmpCtx.fillStyle = transparent ? "transparent" : "#0b1220";
+    tmpCtx.fillRect(0, 0, tmp.width, tmp.height);
+    tmpCtx.drawImage(canvas, 0, 0);
+    const link = document.createElement("a");
+    link.download = `whiteboard-${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
+    link.href = tmp.toDataURL("image/png");
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+
+  function placeStamp(emoji, point) {
+    saveUndoSnapshot();
+    paintStamp(point, emoji, 36);
+    send({ type: "whiteboard_draw", chat_id: chatId, stroke: { kind: "stamp", start: point, emoji, fontSize: 36 } });
+    setShowStampPicker(false);
+  }
+
+  function handleToolClick(key) {
+    if (key === "image") { fileInputRef.current?.click(); return; }
+    if (key === "undo") { undo(); return; }
+    if (key === "save") { saveBoard(); return; }
+    if (key === "grid") { setShowGrid((v) => !v); return; }
+    if (key === "ruler") { setShowRuler((v) => !v); return; }
+    setTool(key);
+  }
+
+  // Which tools in current category
+  const currentCategory = TOOL_CATEGORIES[toolTab];
 
   return (
     <div style={{
       position: "fixed", inset: 0, zIndex: 1150, display: "flex", flexDirection: "column",
       background: transparent ? "transparent" : "#0b1220",
       pointerEvents: transparent ? "none" : "auto",
-      // Matches the call frame's own mobile-frame constraint (see
-      // GroupCallOverlay's root below) — without this the whiteboard
-      // suddenly spans the full browser window while the rest of the call
-      // stays confined to a phone-width column, a visibly inconsistent
-      // size jump the moment it opens.
       maxWidth: expanded ? "none" : 430, margin: "0 auto",
     }}>
-      <div style={{ position: "relative", flex: 1, pointerEvents: "auto" }}>
+      {/* Canvas area */}
+      <div style={{ position: "relative", flex: 1, pointerEvents: "auto", minHeight: 0 }}>
         <canvas ref={canvasRef}
                 onPointerDown={handlePointerDown} onPointerMove={handlePointerMove}
                 onPointerUp={handlePointerUp} onPointerCancel={handlePointerUp}
@@ -1396,6 +1602,29 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
                   width: "100%", height: "100%", touchAction: "none",
                   cursor: tool === "laser" ? "none" : "crosshair",
                 }}/>
+        {/* Ruler overlay */}
+        {showRuler && (
+          <div style={{
+            position: "absolute", bottom: 40, left: 20, right: 20, height: 32, pointerEvents: "none",
+            background: "#ffffff11", borderRadius: 4, border: "1px solid #ffffff33",
+            display: "flex", alignItems: "flex-end", padding: "0 4px",
+          }}>
+            {Array.from({ length: 20 }, (_, i) => (
+              <div key={i} style={{
+                flex: 1, borderLeft: "1px solid #ffffff44",
+                height: i % 5 === 0 ? 18 : i % 2 === 0 ? 10 : 6,
+                position: "relative",
+              }}>
+                {i % 5 === 0 && (
+                  <span style={{
+                    position: "absolute", top: -14, left: -4, fontSize: 8, color: "#ffffff66",
+                  }}>{i}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {/* Laser dots */}
         {Object.entries(laserDots).map(([key, dot]) => (
           <div key={key} style={{
             position: "absolute", left: `${dot.x * 100}%`, top: `${dot.y * 100}%`,
@@ -1403,34 +1632,125 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
             background: dot.color, boxShadow: `0 0 14px 4px ${dot.color}99`, pointerEvents: "none",
           }}/>
         ))}
+        {/* Stamp picker popup */}
+        {showStampPicker && (
+          <div onClick={() => setShowStampPicker(false)} style={{
+            position: "absolute", inset: 0, zIndex: 2,
+          }}>
+            <div onClick={(e) => e.stopPropagation()} style={{
+              position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
+              background: "#182234", border: "1px solid #ffffff26", borderRadius: 16, padding: 14,
+              display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8,
+            }}>
+              {STAMP_EMOJIS.map((emoji) => (
+                <div key={emoji} onClick={() => placeStamp(emoji, showStampPicker)}
+                     style={{ fontSize: 28, cursor: "pointer", textAlign: "center", padding: 4 }}>
+                  {emoji}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
+
       <input ref={fileInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleImageFile}/>
+
+      {/* ── Toolbar ── */}
       <div style={{
-        display: "flex", alignItems: "center", gap: 8, padding: "10px 14px",
-        background: "#111a2cee", borderTop: "1px solid #ffffff1a", flexWrap: "wrap", pointerEvents: "auto",
+        flexShrink: 0, background: "#111a2cee", borderTop: "1px solid #ffffff1a",
+        pointerEvents: "auto", color: "#fff",
       }}>
-        {TOOLS.map((t) => (
-          <div key={t.key}
-               onClick={() => (t.key === "image" ? fileInputRef.current?.click() : setTool(t.key))}
-               title={t.label} style={{
-            width: 28, height: 28, borderRadius: 8, cursor: "pointer", fontSize: 14,
-            display: "flex", alignItems: "center", justifyContent: "center",
-            background: tool === t.key ? "#ffffff33" : "transparent",
-          }}>{t.key === "eraser" ? (I.eraser ? I.eraser("#fff", 15) : "⌫") : t.icon}</div>
-        ))}
-        <div style={{ width: 1, alignSelf: "stretch", background: "#ffffff26", margin: "0 2px" }}/>
-        {WHITEBOARD_COLORS.map((c) => (
-          <div key={c} onClick={() => setColor(c)} style={{
-            width: 22, height: 22, borderRadius: "50%", background: c, cursor: "pointer",
-            border: color === c ? "2px solid #fff" : "2px solid transparent",
-          }}/>
-        ))}
-        <div onClick={clearBoard} style={{
-          fontSize: 12.5, color: "#ff8080", cursor: "pointer", marginLeft: "auto",
-        }}>Clear</div>
-        <div onClick={onClose} style={{
-          fontSize: 12.5, color: "#fff", cursor: "pointer", fontWeight: 600,
-        }}>Close</div>
+        {/* Category tabs */}
+        <div style={{
+          display: "flex", borderBottom: "1px solid #ffffff12", padding: "0 8px",
+        }}>
+          {TOOL_CATEGORIES.map((cat, i) => (
+            <div key={cat.label} onClick={() => setToolTab(i)} style={{
+              flex: 1, textAlign: "center", padding: "8px 0", fontSize: 11.5, fontWeight: 600,
+              cursor: "pointer", color: toolTab === i ? "#fff" : "#ffffff66",
+              borderBottom: toolTab === i ? `2px solid ${G.accent}` : "2px solid transparent",
+            }}>{cat.label}</div>
+          ))}
+          {/* Color dot — tap to toggle color picker */}
+          <div onClick={() => setShowColorPicker((v) => !v)} style={{
+            width: 38, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
+          }}>
+            <div style={{
+              width: 20, height: 20, borderRadius: "50%", background: color,
+              border: "2px solid #ffffff55",
+            }}/>
+          </div>
+        </div>
+
+        {/* Color picker row (shown/hidden) */}
+        {showColorPicker && (
+          <div style={{
+            display: "flex", gap: 6, padding: "8px 12px", overflowX: "auto",
+            borderBottom: "1px solid #ffffff12",
+          }}>
+            {WHITEBOARD_COLORS.map((c) => (
+              <div key={c} onClick={() => { setColor(c); setShowColorPicker(false); }} style={{
+                width: 26, height: 26, borderRadius: "50%", background: c, cursor: "pointer",
+                flexShrink: 0, border: color === c ? "2px solid #fff" : "2px solid transparent",
+              }}/>
+            ))}
+          </div>
+        )}
+
+        {/* Tools row for current category */}
+        <div style={{
+          display: "flex", gap: 4, padding: "6px 8px", overflowX: "auto",
+          alignItems: "center",
+        }}>
+          {currentCategory.tools.map((t) => {
+            const isActive = (t.key === "grid" && showGrid) || (t.key === "ruler" && showRuler)
+              || (t.key !== "undo" && t.key !== "save" && t.key !== "grid" && t.key !== "ruler" && tool === t.key);
+            return (
+              <div key={t.key}
+                   onClick={() => handleToolClick(t.key)}
+                   title={t.label} style={{
+                minWidth: 40, height: 36, borderRadius: 8, cursor: "pointer", fontSize: 15,
+                display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                gap: 1, flexShrink: 0,
+                background: isActive ? "#ffffff22" : "transparent",
+                border: isActive ? "1px solid #ffffff33" : "1px solid transparent",
+              }}>
+                <span style={{ fontSize: 16, lineHeight: 1 }}>{t.icon}</span>
+                <span style={{ fontSize: 9, color: "#ffffffaa" }}>{t.label}</span>
+              </div>
+            );
+          })}
+
+          {/* Divider */}
+          <div style={{ width: 1, alignSelf: "stretch", background: "#ffffff20", margin: "0 4px", flexShrink: 0 }}/>
+
+          {/* Pen size selector */}
+          {(toolTab === 0 || toolTab === 1) && PEN_SIZES.map((ps) => (
+            <div key={ps.key} onClick={() => setPenSize(ps)} title={`Size ${ps.key}`} style={{
+              width: 28, height: 36, borderRadius: 6, cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+              background: penSize.key === ps.key ? "#ffffff22" : "transparent",
+            }}>
+              <div style={{
+                width: ps.size * 2.5, height: ps.size * 2.5, borderRadius: "50%",
+                background: color,
+              }}/>
+            </div>
+          ))}
+
+          {/* Spacer */}
+          <div style={{ flex: 1 }}/>
+
+          {/* Clear and Close always visible */}
+          <div onClick={clearBoard} style={{
+            fontSize: 11, color: "#ff8080", cursor: "pointer", padding: "6px 8px",
+            flexShrink: 0, fontWeight: 600,
+          }}>Clear</div>
+          <div onClick={onClose} style={{
+            fontSize: 11, color: "#fff", cursor: "pointer", fontWeight: 700,
+            padding: "6px 8px", flexShrink: 0,
+          }}>Close</div>
+        </div>
       </div>
     </div>
   );
