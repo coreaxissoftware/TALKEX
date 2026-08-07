@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Chats, Contacts, Me, Stories, Uploads } from "../api.js";
 import {
   Av, Button, Field, G, I, Spinner, countdown, localInputToUnix, whenLabel,
@@ -12,12 +12,11 @@ const BACKGROUNDS = [
   "linear-gradient(135deg,#10b981,#059669)",
   "linear-gradient(135deg,#ec4899,#8b5cf6)",
   "linear-gradient(135deg,#0ea5e9,#2563eb)",
+  "linear-gradient(135deg,#1e293b,#334155)",
+  "linear-gradient(135deg,#f97316,#ea580c)",
+  "linear-gradient(135deg,#06b6d4,#0891b2)",
 ];
 
-// A fixed set rather than a free font-name field — nobody is hand-rolling a
-// @font-face, and a bad/unknown value here should just fall back quietly
-// rather than break the layout, so this is keyed by a short id, not a raw
-// CSS string the client has to trust.
 const FONTS = [
   { key: "system", label: "Classic", stack: "'SF Pro Text',-apple-system,sans-serif" },
   { key: "serif", label: "Serif", stack: "Georgia,'Times New Roman',serif" },
@@ -36,14 +35,6 @@ const FONT_SIZES = [
 const FONT_PX_BY_KEY = Object.fromEntries(FONT_SIZES.map((f) => [f.key, f.px]));
 function fontPxFor(key) { return FONT_PX_BY_KEY[key] || FONT_PX_BY_KEY.medium; }
 
-const KINDS = [
-  { kind: "text", label: "Text", icon: "✍️" },
-  { kind: "photo", label: "Photo", icon: I.image },
-  { kind: "video", label: "Video", icon: I.video },
-  { kind: "audio", label: "Music", icon: I.musicNote },
-  { kind: "link", label: "Link", icon: I.link },
-];
-
 // One line describing a non-text status, used everywhere a row only has
 // room for a preview line rather than the actual media (queued/mine/feed).
 function kindPreviewLabel(story) {
@@ -54,9 +45,7 @@ function kindPreviewLabel(story) {
   return story.text;
 }
 
-// The small circle next to a queued/mine row: the emoji for a text status,
-// or an icon naming the kind for a media/link one (the emoji is still saved
-// but a photo/video/audio/link status is better identified by what it is).
+// The small circle next to a queued/mine row.
 function kindGlyph(story, color) {
   if (story.kind === "photo") return I.image(color, 18);
   if (story.kind === "video") return I.video(color, 18);
@@ -65,11 +54,58 @@ function kindGlyph(story, color) {
   return story.emoji;
 }
 
+const ACCEPT_BY_KIND = {
+  photo: "image/*",
+  video: "video/*",
+  audio: "audio/*",
+};
+
+// CSS keyframes injected once — shared by animated reactions and the like heart.
+let _stylesInjected = false;
+function injectStyles() {
+  if (_stylesInjected) return;
+  _stylesInjected = true;
+  const style = document.createElement("style");
+  style.textContent = `
+    @keyframes txReactionPop {
+      0% { transform: scale(0.3); opacity: 0; }
+      50% { transform: scale(1.25); opacity: 1; }
+      70% { transform: scale(0.95); }
+      100% { transform: scale(1); opacity: 1; }
+    }
+    @keyframes txHeartBeat {
+      0% { transform: scale(1); }
+      15% { transform: scale(1.35); }
+      30% { transform: scale(1); }
+      45% { transform: scale(1.25); }
+      60% { transform: scale(1); }
+    }
+    @keyframes txHeartBurst {
+      0% { transform: scale(0); opacity: 1; }
+      100% { transform: scale(2.5); opacity: 0; }
+    }
+    @keyframes txSlideUp {
+      from { transform: translateY(100%); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    @keyframes txProgressBar {
+      from { width: 0%; }
+      to { width: 100%; }
+    }
+    @keyframes txFadeIn {
+      from { opacity: 0; transform: scale(0.96); }
+      to { opacity: 1; transform: scale(1); }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
 /**
- * Status, including ones queued to publish later.
+ * Status screen — WhatsApp-style unified flow.
  *
- * A scheduled status is deliberately invisible to everyone else until it goes
- * live — it only appears in your own "My status" list, marked as queued.
+ * The "+" FAB opens a single unified composer that starts in camera/gallery
+ * mode and lets you switch to text or other types inline, rather than forcing
+ * a choice between 5 separate module tabs upfront.
  */
 export default function Status({ me, toast }) {
   const [feed, setFeed] = useState([]);
@@ -78,8 +114,11 @@ export default function Status({ me, toast }) {
   const [loading, setLoading] = useState(true);
   const [composing, setComposing] = useState(false);
   const [viewing, setViewing] = useState(null);
+  const [viewingAuthor, setViewingAuthor] = useState(null); // for cycling through an author's stories
   const [privacyOpen, setPrivacyOpen] = useState(false);
-  const [muteMenuFor, setMuteMenuFor] = useState(null); // the author row currently showing its menu
+  const [muteMenuFor, setMuteMenuFor] = useState(null);
+
+  useEffect(() => { injectStyles(); }, []);
 
   function reload() {
     setLoading(true);
@@ -112,8 +151,9 @@ export default function Status({ me, toast }) {
 
   useEffect(reload, []);
 
-  async function open(story) {
+  async function open(story, author) {
     setViewing(story);
+    setViewingAuthor(author || null);
     try { await Stories.view(story.id); } catch { /* viewing is best-effort */ }
   }
 
@@ -123,17 +163,51 @@ export default function Status({ me, toast }) {
   if (loading) return <Spinner/>;
 
   return (
-    <div style={{ flex: 1, overflowY: "auto", paddingBottom: 20 }}>
-      <div style={{ padding: "14px 16px", display: "flex", gap: 8 }}>
-        <Button onClick={() => setComposing(true)} style={{ flex: 1 }}>
-          + Add to my status
-        </Button>
+    <div style={{ flex: 1, overflowY: "auto", paddingBottom: 80 }}>
+      {/* My status ring — WhatsApp-style circular avatar with ring */}
+      <div style={{ padding: "18px 16px 8px", display: "flex", alignItems: "center", gap: 14 }}>
+        <div onClick={() => live.length > 0 ? open(live[0]) : setComposing(true)} style={{
+          position: "relative", cursor: "pointer",
+        }}>
+          <div style={{
+            width: 58, height: 58, borderRadius: "50%",
+            background: live.length > 0
+              ? `conic-gradient(${live.map((_, i) => {
+                  const frac = 1 / live.length;
+                  const start = i * frac * 360;
+                  const end = (i + 1) * frac * 360 - 4;
+                  return `${G.accent} ${start}deg, ${G.accent} ${end}deg, transparent ${end}deg`;
+                }).join(", ")})`
+              : `${G.border}`,
+            padding: 3, display: "flex", alignItems: "center", justifyContent: "center",
+          }}>
+            <div style={{ width: 50, height: 50, borderRadius: "50%", overflow: "hidden" }}>
+              <Av av={me.avatar_letter} color={me.color} size={50} photoId={me.avatar_attachment_id}/>
+            </div>
+          </div>
+          {live.length === 0 && (
+            <div style={{
+              position: "absolute", bottom: -2, right: -2, width: 22, height: 22, borderRadius: "50%",
+              background: G.accent, border: `2px solid ${G.surface}`,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: 14, color: "#fff", fontWeight: 700,
+            }}>+</div>
+          )}
+        </div>
+        <div style={{ flex: 1 }} onClick={() => live.length > 0 ? open(live[0]) : setComposing(true)}>
+          <div style={{ fontSize: 15, fontWeight: 600, cursor: "pointer" }}>My status</div>
+          <div style={{ fontSize: 12.5, color: G.muted, marginTop: 2 }}>
+            {live.length > 0
+              ? `${live.length} update${live.length === 1 ? "" : "s"} · ${whenLabel(live[0].created_at)}`
+              : "Tap to add status update"}
+          </div>
+        </div>
         <div onClick={() => setPrivacyOpen(true)} title="Status privacy" style={{
-          width: 42, height: 42, borderRadius: 12, border: `1px solid ${G.border}`,
+          width: 38, height: 38, borderRadius: "50%", background: G.dim,
           display: "flex", alignItems: "center", justifyContent: "center",
           cursor: "pointer", flexShrink: 0,
         }}>
-          {I.lock(G.sub, 18)}
+          {I.lock(G.sub, 16)}
         </div>
       </div>
 
@@ -146,7 +220,7 @@ export default function Status({ me, toast }) {
               borderBottom: `1px solid ${G.border}`,
             }}>
               <div style={{
-                width: 44, height: 44, borderRadius: "50%", background: story.background,
+                width: 48, height: 48, borderRadius: "50%", background: story.background,
                 display: "flex", alignItems: "center", justifyContent: "center",
                 border: `2px dashed ${G.muted}`,
               }}>{kindGlyph(story, "#fff") || I.clock("#fff", 18)}</div>
@@ -160,65 +234,60 @@ export default function Status({ me, toast }) {
                 await Stories.delete(story.id);
                 toast("Cancelled");
                 reload();
-              }} style={{ cursor: "pointer" }}>{I.trash()}</div>
+              }} style={{ cursor: "pointer", padding: 8 }}>{I.trash()}</div>
             </div>
           ))}
         </>
       )}
 
-      {live.length > 0 && (
-        <>
-          <SectionLabel>My status</SectionLabel>
-          {live.map((story) => (
-            <div key={story.id} onClick={() => open(story)}
-              style={{
-                display: "flex", alignItems: "center", gap: 12, padding: "12px 16px",
-                borderBottom: `1px solid ${G.border}`, cursor: "pointer",
-              }}>
-              <div style={{
-                width: 44, height: 44, borderRadius: "50%", background: story.background,
-                display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: 20, border: `2.5px solid ${G.accent}`,
-              }}>{kindGlyph(story, "#fff")}</div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 14.5 }}>{kindPreviewLabel(story)}</div>
-                <div style={{ fontSize: 12, color: G.muted }}>
-                  {story.view_count} view{story.view_count === 1 ? "" : "s"} ·
-                  gone {countdown(story.expires_at)}
-                </div>
-              </div>
-            </div>
-          ))}
-        </>
-      )}
-
+      {/* Recent updates — WhatsApp-style with story rings */}
       <SectionLabel>Recent updates</SectionLabel>
       {feed.filter((author) => author.user_id !== me.id).length === 0 && (
         <div style={{ padding: 30, textAlign: "center", color: G.muted, fontSize: 13.5 }}>
           Nothing from your contacts yet.
         </div>
       )}
-      {feed.filter((author) => author.user_id !== me.id).map((author) => (
-        <div key={author.user_id} onClick={() => open(author.stories[0])}
-          style={{
-            display: "flex", alignItems: "center", gap: 12, padding: "12px 16px",
-            borderBottom: `1px solid ${G.border}`, cursor: "pointer",
-          }}>
-          <Av av={author.avatar_letter} color={author.color} size={48} photoId={author.avatar_attachment_id}
-              hasStory={author.stories.some((story) => !story.seen)}/>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 15, fontWeight: 600 }}>{author.name}</div>
-            <div style={{ fontSize: 12.5, color: G.muted }}>
-              {author.stories.length} update{author.stories.length === 1 ? "" : "s"} ·
-              {" "}{whenLabel(author.stories[0].created_at)}
+      {feed.filter((author) => author.user_id !== me.id).map((author) => {
+        const hasUnseen = author.stories.some((story) => !story.seen);
+        return (
+          <div key={author.user_id} onClick={() => open(author.stories[0], author)}
+            style={{
+              display: "flex", alignItems: "center", gap: 14, padding: "10px 16px",
+              cursor: "pointer",
+            }}>
+            <div style={{
+              width: 52, height: 52, borderRadius: "50%",
+              padding: 2.5,
+              background: hasUnseen
+                ? `conic-gradient(${author.stories.map((_, i) => {
+                    const frac = 1 / author.stories.length;
+                    const start = i * frac * 360;
+                    const end = (i + 1) * frac * 360 - 4;
+                    const color = hasUnseen ? G.accent : G.muted;
+                    return `${color} ${start}deg, ${color} ${end}deg, transparent ${end}deg`;
+                  }).join(", ")})`
+                : G.border,
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+              <div style={{ width: 45, height: 45, borderRadius: "50%", overflow: "hidden" }}>
+                <Av av={author.avatar_letter} color={author.color} size={45}
+                    photoId={author.avatar_attachment_id}/>
+              </div>
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 15, fontWeight: 600 }}>{author.name}</div>
+              <div style={{ fontSize: 12.5, color: G.muted }}>
+                {author.stories.length} update{author.stories.length === 1 ? "" : "s"} ·
+                {" "}{whenLabel(author.stories[0].created_at)}
+              </div>
+            </div>
+            <div onClick={(event) => { event.stopPropagation(); setMuteMenuFor(author); }}
+                 style={{ padding: 8, cursor: "pointer" }}>
+              {I.moreVertical(G.muted, 18)}
             </div>
           </div>
-          <div onClick={(event) => { event.stopPropagation(); setMuteMenuFor(author); }}
-               style={{ padding: 8, cursor: "pointer" }}>
-            {I.moreVertical(G.muted, 18)}
-          </div>
-        </div>
-      ))}
+        );
+      })}
 
       {muted.length > 0 && (
         <>
@@ -249,15 +318,40 @@ export default function Status({ me, toast }) {
         ]}/>
       )}
 
+      {/* FAB — WhatsApp-style floating compose buttons */}
+      <div style={{
+        position: "fixed", bottom: 80, right: 20, display: "flex", flexDirection: "column", gap: 12,
+        zIndex: 30, maxWidth: 430,
+      }}>
+        <div onClick={() => setComposing("text")} style={{
+          width: 44, height: 44, borderRadius: "50%", background: G.card,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          cursor: "pointer", boxShadow: "0 2px 12px #00000033",
+          border: `1px solid ${G.border}`,
+        }}>
+          <span style={{ fontSize: 18, fontWeight: 700, color: G.sub }}>Aa</span>
+        </div>
+        <div onClick={() => setComposing("photo")} style={{
+          width: 56, height: 56, borderRadius: "50%", background: G.accent,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          cursor: "pointer", boxShadow: `0 4px 16px ${G.accentGlow}`,
+        }}>
+          {I.image("#fff", 24)}
+        </div>
+      </div>
+
       {composing && (
-        <Compose onClose={() => setComposing(false)}
+        <Compose initialKind={composing === "text" ? "text" : "photo"}
+                 onClose={() => setComposing(false)}
                  onDone={() => { setComposing(false); reload(); }}
                  toast={toast}/>
       )}
 
       {viewing && (
-        <Viewer story={viewing} me={me} toast={toast}
-                onClose={() => { setViewing(null); reload(); }}/>
+        <StoryViewer story={viewing} author={viewingAuthor} me={me} toast={toast}
+                     allAuthors={feed}
+                     onClose={() => { setViewing(null); setViewingAuthor(null); reload(); }}
+                     onStoryChange={(story, author) => { setViewing(story); setViewingAuthor(author); }}/>
       )}
 
       {privacyOpen && (
@@ -380,14 +474,15 @@ function SectionLabel({ children }) {
   );
 }
 
-const ACCEPT_BY_KIND = {
-  photo: "image/*",
-  video: "video/*",
-  audio: "audio/*",
-};
-
-function Compose({ onClose, onDone, toast }) {
-  const [kind, setKind] = useState("text");
+/**
+ * Unified WhatsApp-style status composer.
+ *
+ * Opens in photo/camera mode by default (like WhatsApp's camera-first flow),
+ * with a compact mode switcher at the top. Text mode shows the gradient
+ * preview inline. No more 5 separate tabs — everything is one fluid screen.
+ */
+function Compose({ initialKind, onClose, onDone, toast }) {
+  const [kind, setKind] = useState(initialKind || "photo");
   const [text, setText] = useState("");
   const [emoji, setEmoji] = useState("⚡");
   const [background, setBackground] = useState(BACKGROUNDS[0]);
@@ -397,28 +492,19 @@ function Compose({ onClose, onDone, toast }) {
   const [later, setLater] = useState(false);
   const [when, setWhen] = useState("");
   const [busy, setBusy] = useState(false);
-  // Off by default — only you can forward/share this status unless you
-  // turn this on, same WhatsApp-style opt-in the viewer's Forward/Share
-  // menu items are gated on (see moreItems in Viewer below).
   const [allowShare, setAllowShare] = useState(false);
-
-  // Set once the file for a photo/video/audio status has actually finished
-  // uploading — the same two-step "upload, then reference the id" pattern
-  // ChatView's AttachSheet uses, so a failed/retried post never re-sends the
-  // file itself.
-  const [upload, setUpload] = useState(null); // { attachmentId, previewUrl, fileName }
+  const [upload, setUpload] = useState(null);
   const [uploading, setUploading] = useState(false);
-  // The picked (or already-edited) File for a photo status — kept around
-  // so "Edit" can be tapped again after the first upload, same idea as
-  // ChatView's AttachSheet keeping a working copy separate from what's
-  // already gone to the server.
   const [rawPhotoFile, setRawPhotoFile] = useState(null);
   const [editingPhoto, setEditingPhoto] = useState(false);
+  const fileInputRef = useRef(null);
 
-  function pickKind(next) {
+  function switchKind(next) {
     setKind(next);
-    setUpload(null);
-    setRawPhotoFile(null);
+    if (next !== "photo" && next !== "video" && next !== "audio") {
+      setUpload(null);
+      setRawPhotoFile(null);
+    }
   }
 
   async function uploadFile(file, previewUrl) {
@@ -442,8 +528,14 @@ function Compose({ onClose, onDone, toast }) {
     event.target.value = "";
     if (!file) return;
 
-    if (kind === "photo") setRawPhotoFile(file);
-    const previewUrl = kind === "photo" || kind === "video" ? URL.createObjectURL(file) : null;
+    // Auto-detect kind from file type
+    if (file.type.startsWith("image/")) setKind("photo");
+    else if (file.type.startsWith("video/")) setKind("video");
+    else if (file.type.startsWith("audio/")) setKind("audio");
+
+    if (file.type.startsWith("image/")) setRawPhotoFile(file);
+    const previewUrl = file.type.startsWith("image/") || file.type.startsWith("video/")
+      ? URL.createObjectURL(file) : null;
     await uploadFile(file, previewUrl);
   }
 
@@ -498,187 +590,257 @@ function Compose({ onClose, onDone, toast }) {
     }
   }
 
-  return (
-    <div onClick={onClose} style={{
-      position: "fixed", inset: 0, background: "#000000cc", zIndex: 60,
-      display: "flex", alignItems: "flex-end", justifyContent: "center",
-    }}>
-      <div onClick={(event) => event.stopPropagation()} style={{
-        width: "100%", maxWidth: 430, background: G.surface, padding: 20,
-        borderTopLeftRadius: 22, borderTopRightRadius: 22,
-        maxHeight: "85vh", overflowY: "auto",
-      }}>
-        <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 14 }}>New status</div>
+  const isMedia = kind === "photo" || kind === "video" || kind === "audio";
 
-        <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
-          {KINDS.map(({ kind: option, label, icon }) => (
-            <button key={option} onClick={() => pickKind(option)} style={{
-              flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
-              padding: "8px 4px", borderRadius: 10, cursor: "pointer",
-              background: kind === option ? G.accentSoft : G.dim,
-              border: `1px solid ${kind === option ? G.accent : G.border}`,
-              color: kind === option ? G.accent : G.sub,
-            }}>
-              {typeof icon === "function" ? icon(kind === option ? G.accent : G.sub, 18) : icon}
-              <span style={{ fontSize: 10.5, fontWeight: 600 }}>{label}</span>
-            </button>
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "#000", zIndex: 60,
+      display: "flex", flexDirection: "column",
+      animation: "txSlideUp 0.25s ease-out",
+    }}>
+      {/* Top bar */}
+      <div style={{
+        display: "flex", alignItems: "center", padding: "12px 16px", gap: 12, flexShrink: 0,
+      }}>
+        <div onClick={onClose} style={{
+          color: "#fff", fontSize: 14, cursor: "pointer", padding: "6px 0",
+        }}>✕</div>
+        <div style={{ flex: 1 }}/>
+
+        {/* Compact mode switcher — pill-shaped, not separate boxes */}
+        <div style={{
+          display: "flex", background: "#ffffff14", borderRadius: 20, padding: 3, gap: 2,
+        }}>
+          {[
+            { k: "text", label: "Aa" },
+            { k: "photo", label: "📷" },
+            { k: "video", label: "🎥" },
+            { k: "audio", label: "🎵" },
+            { k: "link", label: "🔗" },
+          ].map(({ k, label }) => (
+            <div key={k} onClick={() => switchKind(k)} style={{
+              padding: "6px 12px", borderRadius: 18, cursor: "pointer", fontSize: 13,
+              background: kind === k ? "#ffffff2a" : "transparent",
+              color: kind === k ? "#fff" : "#ffffff88",
+              fontWeight: kind === k ? 700 : 400,
+              transition: "all 0.15s",
+            }}>{label}</div>
           ))}
         </div>
+      </div>
 
-        {kind === "text" && (
-          <>
+      {/* Main area — context-dependent */}
+      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflowY: "auto" }}>
+        {kind === "text" ? (
+          /* Text status — full-screen gradient preview like WhatsApp */
+          <div style={{
+            flex: 1, display: "flex", flexDirection: "column",
+          }}>
             <div style={{
-              height: 120, borderRadius: 16, background, display: "flex",
-              alignItems: "center", justifyContent: "center", marginBottom: 14,
-              fontSize: fontPxFor(fontSize), color: "#fff", fontWeight: 600, padding: 16,
-              textAlign: "center", fontFamily: fontStackFor(font),
-            }}>{emoji} {text || "Your status"}</div>
-
-            <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-              {FONTS.map(({ key, label, stack }) => (
-                <button key={key} onClick={() => setFont(key)} style={{
-                  flex: 1, padding: "7px 4px", borderRadius: 10, cursor: "pointer",
-                  fontFamily: stack, fontSize: 12.5,
-                  background: font === key ? G.accentSoft : G.dim,
-                  border: `1px solid ${font === key ? G.accent : G.border}`,
-                  color: font === key ? G.accent : G.sub,
-                }}>{label}</button>
-              ))}
-            </div>
-
-            <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
-              {FONT_SIZES.map(({ key, label }) => (
-                <button key={key} onClick={() => setFontSize(key)} style={{
-                  flex: 1, padding: "7px 4px", borderRadius: 10, cursor: "pointer",
-                  fontSize: 13, fontWeight: 700,
-                  background: fontSize === key ? G.accentSoft : G.dim,
-                  border: `1px solid ${fontSize === key ? G.accent : G.border}`,
-                  color: fontSize === key ? G.accent : G.sub,
-                }}>{label}</button>
-              ))}
-            </div>
-          </>
-        )}
-
-        {(kind === "photo" || kind === "video" || kind === "audio") && (
-          <div style={{ marginBottom: 14 }}>
-            {upload ? (
+              flex: 1, background, display: "flex", alignItems: "center", justifyContent: "center",
+              padding: 30, minHeight: 200,
+            }}>
               <div style={{
-                position: "relative", borderRadius: 16, overflow: "hidden", background: G.dim,
-                border: `1px solid ${G.border}`,
+                fontSize: fontPxFor(fontSize) + 4, color: "#fff", fontWeight: 600,
+                textAlign: "center", fontFamily: fontStackFor(font),
+                maxWidth: 300, wordBreak: "break-word", lineHeight: 1.4,
               }}>
-                {kind === "photo" && (
-                  <img src={upload.previewUrl} alt="Selected photo preview" style={{ width: "100%", maxHeight: 220, objectFit: "cover", display: "block" }}/>
-                )}
-                {kind === "photo" && rawPhotoFile && (
-                  <button onClick={() => setEditingPhoto(true)} style={{
-                    position: "absolute", top: 10, right: 10, display: "flex", alignItems: "center", gap: 6,
-                    padding: "6px 12px", borderRadius: 20, border: "none", cursor: "pointer",
-                    background: "#00000099", color: "#fff", fontSize: 12.5, fontWeight: 600,
-                  }}>{I.edit("#fff", 14)} Edit</button>
-                )}
-                {kind === "video" && (
-                  <video src={upload.previewUrl} controls style={{ width: "100%", maxHeight: 220, display: "block" }}/>
-                )}
-                {kind === "audio" && (
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 16 }}>
-                    {I.musicNote(G.accent, 24)}
-                    <span style={{ fontSize: 13.5 }}>{upload.fileName}</span>
-                  </div>
-                )}
+                {text || "Type a status…"}
               </div>
-            ) : (
-              <label style={{
-                height: 120, borderRadius: 16, background: G.dim, display: "flex",
-                flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8,
-                border: `1.5px dashed ${G.border}`, cursor: "pointer",
-              }}>
-                {uploading ? <Spinner small/> : (
-                  <>
-                    {kind === "photo" && I.image(G.sub, 26)}
-                    {kind === "video" && I.video(G.sub, 26)}
-                    {kind === "audio" && I.musicNote(G.sub, 26)}
-                    <span style={{ fontSize: 13, color: G.muted }}>
-                      Choose a {kind} file
-                    </span>
-                  </>
-                )}
-                <input type="file" accept={ACCEPT_BY_KIND[kind]} hidden
-                       disabled={uploading} onChange={onFilePicked}/>
-              </label>
-            )}
-          </div>
-        )}
+            </div>
 
-        {kind === "link" && (
-          <Field label="Link" value={linkUrl}
-                 onChange={(event) => setLinkUrl(event.target.value)}
-                 placeholder="https://…" style={{ marginBottom: 4 }}/>
-        )}
+            {/* Text input overlaid at bottom */}
+            <div style={{ padding: "12px 16px", background: "#111" }}>
+              <input value={text} onChange={(e) => setText(e.target.value)}
+                     placeholder="Type a status…" autoFocus
+                     style={{
+                       width: "100%", background: "#ffffff14", border: "none", borderRadius: 24,
+                       padding: "12px 18px", color: "#fff", fontSize: 15, outline: "none",
+                     }}/>
+            </div>
 
-        <Field label={kind === "text" ? "Text" : "Caption (optional)"} value={text}
-               onChange={(event) => setText(event.target.value)}
-               placeholder="What's happening?"/>
-
-        {kind === "text" && (
-          <>
-            <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
-              {["⚡", "🔥", "🚀", "🎉", "☕", "💼"].map((option) => (
-                <button key={option} onClick={() => setEmoji(option)} style={{
-                  fontSize: 20, padding: "6px 10px", borderRadius: 10, cursor: "pointer",
-                  background: emoji === option ? G.accentSoft : G.dim,
-                  border: `1px solid ${emoji === option ? G.accent : G.border}`,
-                }}>{option}</button>
+            {/* Font picker — horizontal scroll */}
+            <div style={{ display: "flex", gap: 8, padding: "8px 16px", overflowX: "auto" }}>
+              {FONTS.map(({ key, label, stack }) => (
+                <div key={key} onClick={() => setFont(key)} style={{
+                  padding: "6px 14px", borderRadius: 20, cursor: "pointer",
+                  fontFamily: stack, fontSize: 12.5, flexShrink: 0, whiteSpace: "nowrap",
+                  background: font === key ? "#ffffff2a" : "#ffffff0d",
+                  color: font === key ? "#fff" : "#ffffff88",
+                  border: `1px solid ${font === key ? "#ffffff44" : "transparent"}`,
+                }}>{label}</div>
+              ))}
+              <div style={{ width: 1, alignSelf: "stretch", background: "#ffffff1a", margin: "0 4px", flexShrink: 0 }}/>
+              {FONT_SIZES.map(({ key, label }) => (
+                <div key={key} onClick={() => setFontSize(key)} style={{
+                  width: 32, height: 32, borderRadius: "50%", cursor: "pointer",
+                  fontSize: 13, fontWeight: 700, flexShrink: 0,
+                  background: fontSize === key ? "#ffffff2a" : "#ffffff0d",
+                  color: fontSize === key ? "#fff" : "#ffffff88",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}>{label}</div>
               ))}
             </div>
 
-            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+            {/* Background swatches — circular */}
+            <div style={{ display: "flex", gap: 10, padding: "8px 16px", overflowX: "auto" }}>
               {BACKGROUNDS.map((option) => (
                 <div key={option} onClick={() => setBackground(option)} style={{
-                  width: 40, height: 40, borderRadius: 10, background: option,
-                  cursor: "pointer",
-                  border: background === option ? `2.5px solid ${G.text}` : "none",
+                  width: 32, height: 32, borderRadius: "50%", background: option,
+                  cursor: "pointer", flexShrink: 0,
+                  border: background === option ? "2.5px solid #fff" : "2px solid transparent",
+                  boxShadow: background === option ? "0 0 0 1px #ffffff44" : "none",
                 }}/>
               ))}
             </div>
-          </>
-        )}
-
-        <label style={{
-          display: "flex", alignItems: "center", gap: 10, marginBottom: 8,
-          fontSize: 14, cursor: "pointer",
-        }}>
-          <input type="checkbox" checked={allowShare}
-                 onChange={(event) => setAllowShare(event.target.checked)}/>
-          Allow others to forward/share this
-        </label>
-        <div style={{ fontSize: 12, color: G.muted, marginBottom: 12, marginLeft: 26 }}>
-          Off by default — only you can forward or share this status elsewhere.
-        </div>
-
-        <label style={{
-          display: "flex", alignItems: "center", gap: 10, marginBottom: 12,
-          fontSize: 14, cursor: "pointer",
-        }}>
-          <input type="checkbox" checked={later}
-                 onChange={(event) => setLater(event.target.checked)}/>
-          Publish later
-        </label>
-
-        {later && (
-          <Field label="Publish at" type="datetime-local" value={when}
-                 onChange={(event) => setWhen(event.target.value)}/>
-        )}
-
-        <Button onClick={save} disabled={busy || uploading} style={{ width: "100%" }}>
-          {busy ? "Saving…" : later ? "Queue status" : "Post status"}
-        </Button>
-
-        {later && (
-          <div style={{ fontSize: 12, color: G.muted, marginTop: 10 }}>
-            Nobody can see it until then. Its 24 hours start when it publishes.
+          </div>
+        ) : isMedia ? (
+          /* Photo/Video/Audio — large preview area */
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 20 }}>
+            {upload ? (
+              <div style={{
+                position: "relative", borderRadius: 16, overflow: "hidden", maxWidth: "100%",
+                animation: "txFadeIn 0.2s ease-out",
+              }}>
+                {kind === "photo" && (
+                  <img src={upload.previewUrl} alt="Selected photo"
+                       style={{ width: "100%", maxHeight: "55vh", objectFit: "contain", display: "block" }}/>
+                )}
+                {kind === "video" && (
+                  <video src={upload.previewUrl} controls
+                         style={{ width: "100%", maxHeight: "55vh", display: "block", borderRadius: 16 }}/>
+                )}
+                {kind === "audio" && (
+                  <div style={{
+                    display: "flex", flexDirection: "column", alignItems: "center", gap: 16, padding: 40,
+                    background: "#ffffff0d", borderRadius: 16,
+                  }}>
+                    <div style={{
+                      width: 80, height: 80, borderRadius: "50%", background: `${G.accent}22`,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                    }}>{I.musicNote(G.accent, 36)}</div>
+                    <span style={{ fontSize: 14, color: "#fff" }}>{upload.fileName}</span>
+                    <audio src={upload.previewUrl || undefined} controls style={{ width: "100%" }}/>
+                  </div>
+                )}
+                {kind === "photo" && rawPhotoFile && (
+                  <div style={{
+                    position: "absolute", bottom: 12, right: 12,
+                    display: "flex", gap: 8,
+                  }}>
+                    <button onClick={() => setEditingPhoto(true)} style={{
+                      display: "flex", alignItems: "center", gap: 6,
+                      padding: "8px 16px", borderRadius: 24, border: "none", cursor: "pointer",
+                      background: "#000000cc", color: "#fff", fontSize: 13, fontWeight: 600,
+                      backdropFilter: "blur(10px)",
+                    }}>{I.edit("#fff", 14)} Edit</button>
+                  </div>
+                )}
+                <button onClick={() => { setUpload(null); setRawPhotoFile(null); }} style={{
+                  position: "absolute", top: 10, right: 10,
+                  width: 28, height: 28, borderRadius: "50%", border: "none", cursor: "pointer",
+                  background: "#000000aa", color: "#fff", fontSize: 16,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}>✕</button>
+              </div>
+            ) : (
+              <label style={{
+                width: "100%", maxWidth: 320, aspectRatio: "3/4", borderRadius: 20,
+                background: "#ffffff08", display: "flex",
+                flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14,
+                border: `2px dashed ${G.border}`, cursor: "pointer",
+              }}>
+                {uploading ? <Spinner/> : (
+                  <>
+                    <div style={{
+                      width: 64, height: 64, borderRadius: "50%", background: `${G.accent}22`,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                    }}>
+                      {kind === "photo" && I.image(G.accent, 28)}
+                      {kind === "video" && I.video(G.accent, 28)}
+                      {kind === "audio" && I.musicNote(G.accent, 28)}
+                    </div>
+                    <span style={{ fontSize: 14, color: "#ffffffaa" }}>
+                      Tap to choose {kind === "audio" ? "an audio" : `a ${kind}`}
+                    </span>
+                  </>
+                )}
+                <input ref={fileInputRef} type="file"
+                       accept={kind === "photo" ? "image/*" : kind === "video" ? "video/*" : "audio/*"}
+                       hidden disabled={uploading} onChange={onFilePicked}/>
+              </label>
+            )}
+          </div>
+        ) : (
+          /* Link — clean input */
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 30 }}>
+            <div style={{
+              width: 64, height: 64, borderRadius: "50%", background: `${G.accent}22`,
+              display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 20,
+            }}>{I.link(G.accent, 28)}</div>
+            <input value={linkUrl} onChange={(e) => setLinkUrl(e.target.value)}
+                   placeholder="Paste a link…" autoFocus
+                   style={{
+                     width: "100%", maxWidth: 320, background: "#ffffff14", border: "none",
+                     borderRadius: 24, padding: "12px 18px", color: "#fff", fontSize: 15, outline: "none",
+                     textAlign: "center",
+                   }}/>
           </div>
         )}
+
+        {/* Caption input — shared across all types except text */}
+        {kind !== "text" && (
+          <div style={{ padding: "0 16px 8px" }}>
+            <input value={text} onChange={(e) => setText(e.target.value)}
+                   placeholder="Add a caption…"
+                   style={{
+                     width: "100%", background: "#ffffff14", border: "none", borderRadius: 24,
+                     padding: "10px 18px", color: "#fff", fontSize: 14, outline: "none",
+                   }}/>
+          </div>
+        )}
+      </div>
+
+      {/* Bottom bar — options + send */}
+      <div style={{
+        padding: "12px 16px", background: "#111", display: "flex", alignItems: "center", gap: 12,
+        borderTop: "1px solid #ffffff1a", flexShrink: 0,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, overflowX: "auto" }}>
+          <label style={{
+            display: "flex", alignItems: "center", gap: 6, cursor: "pointer",
+            fontSize: 12.5, color: "#ffffffaa", whiteSpace: "nowrap",
+          }}>
+            <input type="checkbox" checked={allowShare}
+                   onChange={(e) => setAllowShare(e.target.checked)}
+                   style={{ accentColor: G.accent }}/>
+            Allow sharing
+          </label>
+          <label style={{
+            display: "flex", alignItems: "center", gap: 6, cursor: "pointer",
+            fontSize: 12.5, color: "#ffffffaa", whiteSpace: "nowrap",
+          }}>
+            <input type="checkbox" checked={later}
+                   onChange={(e) => setLater(e.target.checked)}
+                   style={{ accentColor: G.accent }}/>
+            Schedule
+          </label>
+          {later && (
+            <input type="datetime-local" value={when} onChange={(e) => setWhen(e.target.value)}
+                   style={{
+                     background: "#ffffff14", border: "1px solid #ffffff22", borderRadius: 12,
+                     padding: "6px 10px", color: "#fff", fontSize: 12,
+                   }}/>
+          )}
+        </div>
+        <button onClick={save} disabled={busy || uploading} style={{
+          width: 48, height: 48, borderRadius: "50%", border: "none", cursor: "pointer",
+          background: G.accent, display: "flex", alignItems: "center", justifyContent: "center",
+          opacity: busy || uploading ? 0.5 : 1,
+          boxShadow: `0 2px 12px ${G.accentGlow}`,
+        }}>
+          {busy ? <Spinner small/> : I.send("#fff", 20)}
+        </button>
       </div>
     </div>
   );
@@ -686,17 +848,42 @@ function Compose({ onClose, onDone, toast }) {
 
 const QUICK_REACTIONS = ["❤️", "😂", "😮", "😢", "👏", "🔥"];
 
-function Viewer({ story, me, toast, onClose }) {
+/**
+ * Full-screen story viewer with WhatsApp-style features:
+ * - Progress bars at the top for multi-story authors
+ * - Swipe/tap to cycle through stories
+ * - ❤️ like button (sends heart reaction, animated)
+ * - Animated reaction tray
+ * - Author info header
+ */
+function StoryViewer({ story, author, me, toast, allAuthors, onClose, onStoryChange }) {
   const isMedia = story.kind === "photo" || story.kind === "video" || story.kind === "audio";
   const isAuthor = story.user_id === me.id;
   const [myReaction, setMyReaction] = useState(null);
   const [showMore, setShowMore] = useState(false);
   const [forwarding, setForwarding] = useState(false);
-  // Author-only: who's seen it and who reacted, merged into one list —
-  // loaded lazily since a viewer who isn't the author would just get a 404
-  // for both calls.
+  const [showReactionTray, setShowReactionTray] = useState(false);
+  const [heartAnimating, setHeartAnimating] = useState(false);
   const [activity, setActivity] = useState(null);
   const [activityOpen, setActivityOpen] = useState(false);
+  const [replyText, setReplyText] = useState("");
+  const [sending, setSending] = useState(false);
+
+  // Auto-progress for stories
+  const stories = author?.stories || [story];
+  const currentIndex = stories.findIndex((s) => s.id === story.id);
+  const progressTimerRef = useRef(null);
+  const STORY_DURATION = 6000; // 6s per story
+
+  useEffect(() => {
+    if (isMedia) return; // don't auto-advance media
+    progressTimerRef.current = setTimeout(() => {
+      if (currentIndex < stories.length - 1) {
+        onStoryChange(stories[currentIndex + 1], author);
+      }
+    }, STORY_DURATION);
+    return () => clearTimeout(progressTimerRef.current);
+  }, [story.id, isMedia]);
 
   useEffect(() => {
     if (!isAuthor) return;
@@ -706,8 +893,6 @@ function Viewer({ story, me, toast, onClose }) {
   }, [story.id, isAuthor]);
 
   async function react(emoji) {
-    // Tapping the already-active one un-reacts — same "tap again to
-    // remove" convention a message reaction already uses in ChatView.
     const next = myReaction === emoji ? null : emoji;
     const previous = myReaction;
     setMyReaction(next);
@@ -717,6 +902,50 @@ function Viewer({ story, me, toast, onClose }) {
     } catch (problem) {
       setMyReaction(previous);
       toast?.(problem.message || "Could not react");
+    }
+  }
+
+  async function likeStory() {
+    setHeartAnimating(true);
+    setTimeout(() => setHeartAnimating(false), 1000);
+    await react("❤️");
+  }
+
+  async function sendReply() {
+    const trimmed = replyText.trim();
+    if (!trimmed || sending) return;
+    setSending(true);
+    try {
+      await Stories.react(story.id, `💬 ${trimmed}`);
+      setReplyText("");
+      toast?.("Reply sent");
+    } catch (problem) {
+      toast?.(problem.message || "Could not send reply");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  function goNext() {
+    clearTimeout(progressTimerRef.current);
+    if (currentIndex < stories.length - 1) {
+      onStoryChange(stories[currentIndex + 1], author);
+    } else {
+      // Go to next author
+      const authorIndex = allAuthors.findIndex((a) => a.user_id === author?.user_id);
+      if (authorIndex >= 0 && authorIndex < allAuthors.length - 1) {
+        const nextAuthor = allAuthors[authorIndex + 1];
+        onStoryChange(nextAuthor.stories[0], nextAuthor);
+      } else {
+        onClose();
+      }
+    }
+  }
+
+  function goPrev() {
+    clearTimeout(progressTimerRef.current);
+    if (currentIndex > 0) {
+      onStoryChange(stories[currentIndex - 1], author);
     }
   }
 
@@ -766,11 +995,6 @@ function Viewer({ story, me, toast, onClose }) {
     }
   }
 
-  // WhatsApp-style: forwarding/sharing is the author's own privilege by
-  // default. A viewer only gets it too if the author turned "Allow share"
-  // on for this specific status — matches the server-side check in
-  // forward_story (main.py), repeated here so the option isn't even shown
-  // for a viewer it would just 403 for.
   const canReshare = isAuthor || Boolean(story.allow_share);
   const moreItems = [
     ...(canReshare ? [{ label: "Forward", icon: I.fwd("#fff", 18), onClick: () => setForwarding(true) }] : []),
@@ -780,85 +1004,205 @@ function Viewer({ story, me, toast, onClose }) {
   ];
 
   return (
-    <div onClick={onClose} style={{
-      position: "fixed", inset: 0, background: isMedia ? "#000" : (story.background || G.bg),
-      zIndex: 70, display: "flex", flexDirection: "column",
-      alignItems: "center", justifyContent: "center", padding: 30,
+    <div style={{
+      position: "fixed", inset: 0, background: "#000", zIndex: 70,
+      display: "flex", flexDirection: "column",
     }}>
-      {moreItems.length > 0 && (
-        <div onClick={(event) => { event.stopPropagation(); setShowMore(true); }} title="More"
-             style={{
-               position: "absolute", top: 16, right: 16, zIndex: 1,
-               width: 34, height: 34, borderRadius: "50%", cursor: "pointer",
-               background: "#ffffff1a", display: "flex", alignItems: "center", justifyContent: "center",
-             }}>
-          {I.moreVertical("#fff", 18)}
-        </div>
-      )}
-
-      {(story.kind === "photo" || story.kind === "video") && (
-        <div onClick={(event) => event.stopPropagation()}>
-          <StoryMedia story={story}/>
-        </div>
-      )}
-      {story.kind === "audio" && (
-        <div onClick={(event) => event.stopPropagation()} style={{
-          width: "100%", maxWidth: 340, textAlign: "center", color: "#fff",
-        }}>
-          {I.musicNote("#fff", 48)}
-          <StoryMedia story={story}/>
-        </div>
-      )}
-      {story.kind === "link" && (
-        <div style={{ textAlign: "center", color: "#fff" }}>
-          {I.link("#fff", 48)}
-          <a href={story.link_url} target="_blank" rel="noopener noreferrer"
-             onClick={(event) => event.stopPropagation()}
-             style={{ display: "block", color: "#fff", fontSize: 15, marginTop: 14, wordBreak: "break-all" }}>
-            {story.link_url}
-          </a>
-        </div>
-      )}
-      {story.kind !== "link" && !isMedia && (
-        <div style={{ fontSize: 56, marginBottom: 18 }}>{story.emoji}</div>
-      )}
-
-      {story.text && (
+      {/* Progress bars — WhatsApp-style segmented bar */}
+      {stories.length > 1 && (
         <div style={{
-          fontSize: story.kind === "text" ? fontPxFor(story.font_size) + 3 : 15,
-          fontFamily: story.kind === "text" ? fontStackFor(story.font) : undefined,
-          fontWeight: story.kind === "text" ? 600 : 500,
-          lineHeight: 1.4, color: "#fff", textAlign: "center", marginTop: isMedia ? 14 : 0,
-          maxWidth: 340,
-        }}>{story.text}</div>
+          display: "flex", gap: 3, padding: "8px 12px 0", position: "absolute", top: 0, left: 0, right: 0, zIndex: 2,
+        }}>
+          {stories.map((s, i) => (
+            <div key={s.id} style={{
+              flex: 1, height: 2.5, borderRadius: 2, background: "#ffffff33", overflow: "hidden",
+            }}>
+              <div style={{
+                height: "100%", borderRadius: 2,
+                background: "#fff",
+                width: i < currentIndex ? "100%"
+                     : i === currentIndex ? "100%"
+                     : "0%",
+                animation: i === currentIndex && !isMedia ? `txProgressBar ${STORY_DURATION}ms linear` : "none",
+              }}/>
+            </div>
+          ))}
+        </div>
       )}
-      <div style={{ fontSize: 12.5, opacity: 0.75, marginTop: 20, color: "#fff" }}>
-        {whenLabel(story.created_at)} · tap anywhere to close
+
+      {/* Author header */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 10, padding: "20px 12px 8px",
+        position: "absolute", top: stories.length > 1 ? 10 : 0, left: 0, right: 0, zIndex: 2,
+      }}>
+        <Av av={author?.avatar_letter || me.avatar_letter}
+            color={author?.color || me.color} size={36}
+            photoId={author?.avatar_attachment_id || me.avatar_attachment_id}/>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: "#fff" }}>
+            {isAuthor ? "You" : (author?.name || "Someone")}
+          </div>
+          <div style={{ fontSize: 11.5, color: "#ffffffaa" }}>
+            {whenLabel(story.created_at)}
+          </div>
+        </div>
+        {moreItems.length > 0 && (
+          <div onClick={() => setShowMore(true)} style={{
+            width: 34, height: 34, borderRadius: "50%", cursor: "pointer",
+            background: "#ffffff1a", display: "flex", alignItems: "center", justifyContent: "center",
+          }}>
+            {I.moreVertical("#fff", 18)}
+          </div>
+        )}
+        <div onClick={onClose} style={{
+          width: 34, height: 34, borderRadius: "50%", cursor: "pointer",
+          background: "#ffffff1a", display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 18, color: "#fff",
+        }}>✕</div>
       </div>
 
+      {/* Tap zones for prev/next */}
+      <div onClick={goPrev} style={{
+        position: "absolute", left: 0, top: 60, bottom: 80, width: "30%", zIndex: 1,
+      }}/>
+      <div onClick={goNext} style={{
+        position: "absolute", right: 0, top: 60, bottom: 80, width: "30%", zIndex: 1,
+      }}/>
+
+      {/* Story content */}
+      <div style={{
+        flex: 1, display: "flex", flexDirection: "column",
+        alignItems: "center", justifyContent: "center", padding: "70px 30px 20px",
+        background: isMedia ? "#000" : (story.background || G.bg),
+      }}>
+        {(story.kind === "photo" || story.kind === "video") && (
+          <StoryMedia story={story}/>
+        )}
+        {story.kind === "audio" && (
+          <div style={{ width: "100%", maxWidth: 340, textAlign: "center", color: "#fff" }}>
+            <div style={{
+              width: 80, height: 80, borderRadius: "50%", background: `${G.accent}22`,
+              display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px",
+            }}>{I.musicNote(G.accent, 36)}</div>
+            <StoryMedia story={story}/>
+          </div>
+        )}
+        {story.kind === "link" && (
+          <div style={{ textAlign: "center", color: "#fff" }}>
+            <div style={{
+              width: 64, height: 64, borderRadius: "50%", background: `${G.accent}22`,
+              display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px",
+            }}>{I.link(G.accent, 28)}</div>
+            <a href={story.link_url} target="_blank" rel="noopener noreferrer"
+               style={{ display: "block", color: G.accent, fontSize: 15, wordBreak: "break-all" }}>
+              {story.link_url}
+            </a>
+          </div>
+        )}
+
+        {story.text && (
+          <div style={{
+            fontSize: story.kind === "text" ? fontPxFor(story.font_size) + 3 : 15,
+            fontFamily: story.kind === "text" ? fontStackFor(story.font) : undefined,
+            fontWeight: story.kind === "text" ? 600 : 500,
+            lineHeight: 1.4, color: "#fff", textAlign: "center", marginTop: isMedia ? 14 : 0,
+            maxWidth: 340,
+          }}>{story.text}</div>
+        )}
+
+        {/* Animated heart on double-tap / like */}
+        {heartAnimating && (
+          <div style={{
+            position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
+            fontSize: 80, pointerEvents: "none", zIndex: 5,
+            animation: "txHeartBeat 0.8s ease-out",
+          }}>❤️</div>
+        )}
+      </div>
+
+      {/* Bottom interaction area */}
       {isAuthor ? (
-        <div onClick={(event) => { event.stopPropagation(); setActivityOpen(true); }} style={{
-          marginTop: 16, display: "flex", alignItems: "center", gap: 6,
-          color: "#fff", fontSize: 13, cursor: "pointer", background: "#ffffff1a",
-          padding: "8px 16px", borderRadius: 20,
+        <div style={{
+          padding: "12px 16px 28px", display: "flex", justifyContent: "center", gap: 20,
         }}>
-          {I.eye("#fff", 15)}
-          {activity ? `${activity.viewers.length} view${activity.viewers.length === 1 ? "" : "s"}` : "Views"}
-          {activity && activity.reactions.length > 0 &&
-            ` · ${activity.reactions.length} reacted`}
+          <div onClick={() => setActivityOpen(true)} style={{
+            display: "flex", alignItems: "center", gap: 8, cursor: "pointer",
+            color: "#fff", fontSize: 13, background: "#ffffff14",
+            padding: "10px 20px", borderRadius: 24,
+          }}>
+            {I.eye("#fff", 16)}
+            {activity ? `${activity.viewers.length} view${activity.viewers.length === 1 ? "" : "s"}` : "Views"}
+            {activity && activity.reactions.length > 0 &&
+              ` · ${activity.reactions.length} ❤️`}
+          </div>
         </div>
       ) : (
-        <div onClick={(event) => event.stopPropagation()} style={{
-          marginTop: 18, display: "flex", gap: 12, background: "#ffffff1a",
-          padding: "9px 16px", borderRadius: 30,
+        <div style={{
+          padding: "8px 16px 24px", display: "flex", alignItems: "center", gap: 10,
         }}>
-          {QUICK_REACTIONS.map((emoji) => (
-            <button key={emoji} onClick={() => react(emoji)} style={{
-              fontSize: 22, background: "none", border: "none", cursor: "pointer", padding: 0,
-              lineHeight: 1, opacity: myReaction && myReaction !== emoji ? 0.4 : 1,
-              transform: myReaction === emoji ? "scale(1.3)" : "scale(1)",
-              transition: "transform 0.15s, opacity 0.15s",
-            }}>{emoji}</button>
+          {/* Reply input */}
+          <input value={replyText} onChange={(e) => setReplyText(e.target.value)}
+                 onKeyDown={(e) => { if (e.key === "Enter") sendReply(); }}
+                 placeholder="Reply…"
+                 style={{
+                   flex: 1, background: "#ffffff14", border: "1px solid #ffffff22",
+                   borderRadius: 24, padding: "10px 16px", color: "#fff", fontSize: 14,
+                   outline: "none",
+                 }}/>
+
+          {/* Reaction tray toggle */}
+          <div onClick={() => setShowReactionTray((v) => !v)} style={{
+            cursor: "pointer", padding: 4,
+          }}>
+            <span style={{ fontSize: 22 }}>😊</span>
+          </div>
+
+          {/* Like button — WhatsApp-style heart */}
+          <div onClick={likeStory} style={{
+            cursor: "pointer", padding: 4, position: "relative",
+          }}>
+            <span style={{
+              fontSize: 24,
+              display: "inline-block",
+              animation: myReaction === "❤️" ? "txHeartBeat 0.6s ease-out" : "none",
+              filter: myReaction === "❤️" ? "none" : "grayscale(1) opacity(0.6)",
+              transition: "filter 0.2s",
+            }}>❤️</span>
+            {myReaction === "❤️" && (
+              <span style={{
+                position: "absolute", inset: 0, fontSize: 24,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                animation: "txHeartBurst 0.6s ease-out forwards", pointerEvents: "none",
+              }}>❤️</span>
+            )}
+          </div>
+
+          {replyText.trim() && (
+            <button onClick={sendReply} disabled={sending} style={{
+              width: 36, height: 36, borderRadius: "50%", border: "none", cursor: "pointer",
+              background: G.accent, display: "flex", alignItems: "center", justifyContent: "center",
+            }}>{I.send("#fff", 16)}</button>
+          )}
+        </div>
+      )}
+
+      {/* Animated reaction tray */}
+      {showReactionTray && (
+        <div onClick={() => setShowReactionTray(false)} style={{
+          position: "absolute", bottom: 80, left: "50%", transform: "translateX(-50%)", zIndex: 10,
+          display: "flex", gap: 4, background: "#1a1a2e", border: "1px solid #ffffff22",
+          borderRadius: 30, padding: "8px 12px",
+          animation: "txFadeIn 0.15s ease-out",
+        }}>
+          {QUICK_REACTIONS.map((emoji, i) => (
+            <button key={emoji} onClick={(e) => { e.stopPropagation(); react(emoji); setShowReactionTray(false); }}
+                    style={{
+                      fontSize: 28, background: "none", border: "none", cursor: "pointer", padding: "4px 6px",
+                      animation: `txReactionPop 0.3s ease-out ${i * 0.05}s both`,
+                      display: "inline-block",
+                      opacity: myReaction && myReaction !== emoji ? 0.4 : 1,
+                      transition: "opacity 0.15s",
+                    }}>{emoji}</button>
           ))}
         </div>
       )}
@@ -878,8 +1222,7 @@ function Viewer({ story, me, toast, onClose }) {
   );
 }
 
-/** Send a status update into one or more chats as an ordinary message —
- * same chat-picker shape ChatView's own ForwardSheet uses for a message. */
+/** Send a status update into one or more chats as an ordinary message. */
 function StoryForwardSheet({ story, onClose, onDone, toast }) {
   const [chats, setChats] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -942,8 +1285,7 @@ function StoryForwardSheet({ story, onClose, onDone, toast }) {
   );
 }
 
-/** Author-only: everyone who's seen a status, newest first, with their
- * reaction emoji alongside their name if they left one. */
+/** Author-only: everyone who's seen a status. */
 function StoryActivitySheet({ activity, onClose }) {
   const reactionByUser = new Map((activity?.reactions || []).map((r) => [r.user_id, r.emoji]));
   const viewers = activity?.viewers || [];
@@ -981,11 +1323,6 @@ function StoryActivitySheet({ activity, onClose }) {
   );
 }
 
-/**
- * The actual photo/video/audio bytes for a status, fetched as a blob for the
- * same reason ChatView's Attachment does it: downloading needs the bearer
- * token, which a plain <img src> cannot carry.
- */
 function StoryMedia({ story }) {
   const [blobUrl, setBlobUrl] = useState(null);
   const [error, setError] = useState(false);
@@ -1013,10 +1350,12 @@ function StoryMedia({ story }) {
   if (!blobUrl) return <Spinner/>;
 
   if (story.kind === "photo") {
-    return <img src={blobUrl} alt={story.text || "Status photo"} style={{ maxWidth: "100%", maxHeight: "70vh", borderRadius: 10 }}/>;
+    return <img src={blobUrl} alt={story.text || "Status photo"}
+                style={{ maxWidth: "100%", maxHeight: "60vh", borderRadius: 12, objectFit: "contain" }}/>;
   }
   if (story.kind === "video") {
-    return <video src={blobUrl} controls autoPlay style={{ maxWidth: "100%", maxHeight: "70vh", borderRadius: 10 }}/>;
+    return <video src={blobUrl} controls autoPlay
+                  style={{ maxWidth: "100%", maxHeight: "60vh", borderRadius: 12 }}/>;
   }
   return <audio src={blobUrl} controls autoPlay style={{ width: "100%", marginTop: 14 }}/>;
 }

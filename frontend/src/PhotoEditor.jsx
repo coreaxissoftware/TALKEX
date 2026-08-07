@@ -2,20 +2,17 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, G, I } from "./ui.jsx";
 
 const FILTERS = [
-  { key: "none", label: "Normal", css: "none" },
-  { key: "bw", label: "B&W", css: "grayscale(1) contrast(1.05)" },
-  { key: "sepia", label: "Sepia", css: "sepia(0.65) saturate(1.1)" },
-  { key: "vivid", label: "Vivid", css: "saturate(1.6) contrast(1.12)" },
-  { key: "cool", label: "Cool", css: "saturate(1.1) hue-rotate(-8deg) brightness(1.04)" },
-  { key: "warm", label: "Warm", css: "saturate(1.2) hue-rotate(8deg) sepia(0.18) brightness(1.02)" },
-  { key: "fade", label: "Fade", css: "contrast(0.85) brightness(1.12) saturate(0.8)" },
+  { key: "none", label: "Original", css: "none", icon: "○" },
+  { key: "bw", label: "B&W", css: "grayscale(1) contrast(1.05)", icon: "◐" },
+  { key: "sepia", label: "Sepia", css: "sepia(0.65) saturate(1.1)", icon: "◉" },
+  { key: "vivid", label: "Vivid", css: "saturate(1.6) contrast(1.12)", icon: "◈" },
+  { key: "cool", label: "Cool", css: "saturate(1.1) hue-rotate(-8deg) brightness(1.04)", icon: "◇" },
+  { key: "warm", label: "Warm", css: "saturate(1.2) hue-rotate(8deg) sepia(0.18) brightness(1.02)", icon: "◆" },
+  { key: "fade", label: "Fade", css: "contrast(0.85) brightness(1.12) saturate(0.8)", icon: "◌" },
+  { key: "dramatic", label: "Drama", css: "contrast(1.3) saturate(1.1) brightness(0.95)", icon: "◍" },
+  { key: "noir", label: "Noir", css: "grayscale(1) contrast(1.25) brightness(0.9)", icon: "●" },
 ];
 
-// A fixed, one-tap boost rather than a real auto-enhance algorithm (which
-// would mean actually analyzing the image's histogram) — the same trade a
-// filter preset already makes, just framed as "fix this photo" instead of
-// "restyle this photo." Multiplies with whatever FILTERS preset is active
-// rather than replacing it.
 const ENHANCE_CSS = "saturate(1.15) contrast(1.08) brightness(1.03)";
 
 const ASPECTS = [
@@ -23,51 +20,75 @@ const ASPECTS = [
   { key: "square", label: "1:1", ratio: 1 },
   { key: "portrait", label: "4:5", ratio: 4 / 5 },
   { key: "wide", label: "16:9", ratio: 16 / 9 },
+  { key: "story", label: "9:16", ratio: 9 / 16 },
 ];
 
-const DRAW_COLORS = ["#f8fafc", "#ef4444", "#f59e0b", "#22c55e", "#38bdf8", "#a855f7"];
+const DRAW_COLORS = ["#ffffff", "#ef4444", "#f59e0b", "#22c55e", "#38bdf8", "#a855f7", "#ec4899", "#000000"];
 
-// Plain emoji rather than the app's SVG sticker pack (stickers.jsx) — those
-// are React components meant for a chat bubble, not something easily baked
-// onto an export <canvas>. An emoji is just a glyph `fillText` already
-// knows how to draw, which is what actually needs to happen here.
-const STICKER_EMOJIS = ["😀", "😂", "😍", "🔥", "❤️", "👍", "🎉", "😎", "✨", "😢", "😮", "🙌"];
+const STICKER_EMOJIS = ["😀", "😂", "😍", "🔥", "❤️", "👍", "🎉", "😎", "✨", "😢", "😮", "🙌",
+                        "🥳", "💪", "🤩", "🥺", "😴", "🤯", "🫡", "🚀", "💯", "🎊", "🦋", "🌈"];
 
 const VIEWPORT_MAX_WIDTH = 340;
-const OUTPUT_LONG_EDGE = 1600; // caps export size — a phone photo's native
-// resolution is already far more than a chat bubble ever needs, and this
-// keeps the exported file a sane size regardless of the source.
+const OUTPUT_LONG_EDGE = 1600;
 const OUTPUT_LONG_EDGE_HD = 2400;
 
+// Tool categories for the modern toolbar
+const TOOL_GROUPS = [
+  { key: "adjust", label: "Adjust", tools: [
+    { key: "crop", icon: "⬡", label: "Crop" },
+    { key: "rotate", icon: "↻", label: "Rotate" },
+    { key: "flip", icon: "⇔", label: "Flip" },
+  ]},
+  { key: "annotate", label: "Draw", tools: [
+    { key: "draw", icon: "✏️", label: "Pen" },
+    { key: "highlighter", icon: "🖍️", label: "Marker" },
+    { key: "eraser", icon: "⌫", label: "Eraser" },
+  ]},
+  { key: "insert", label: "Add", tools: [
+    { key: "text", icon: "Aa", label: "Text" },
+    { key: "sticker", icon: "😊", label: "Sticker" },
+    { key: "shape", icon: "□", label: "Shape" },
+  ]},
+];
+
+let _editorStylesInjected = false;
+function injectEditorStyles() {
+  if (_editorStylesInjected) return;
+  _editorStylesInjected = true;
+  const style = document.createElement("style");
+  style.textContent = `
+    @keyframes txEditorSlideIn {
+      from { transform: translateY(100%); }
+      to { transform: translateY(0); }
+    }
+    @keyframes txToolPop {
+      0% { transform: scale(0.8); opacity: 0; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+    .tx-editor-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 20px; height: 20px; border-radius: 50%;
+      background: #fff; cursor: pointer;
+      box-shadow: 0 1px 4px #00000055;
+    }
+    .tx-editor-slider::-webkit-slider-runnable-track {
+      height: 3px; background: #ffffff33; border-radius: 2px;
+    }
+  `;
+  document.head.appendChild(style);
+}
+
 /**
- * Crop/rotate/filter/draw/text/sticker a photo before it's sent —
- * canvas-based, no server round trip until the edited result is handed
- * back as a File the same shape a raw camera/gallery pick would be.
+ * Modern photo editor — Instagram/WhatsApp-inspired with a clean dark UI.
  *
- * Crop works Instagram-style rather than draggable corner handles: the
- * crop FRAME is fixed (sized by the chosen aspect ratio), and the photo
- * pans/zooms underneath it. That's a meaningfully smaller state space to
- * get right than freeform resize handles — pan is always clamped so the
- * photo fully covers the frame, so there's no "empty corner" case to
- * handle at all.
- *
- * Rotation is baked onto an offscreen canvas immediately on each rotate
- * tap, rather than combined into the same CSS transform as pan/zoom/crop —
- * treating "the rotated bitmap" as the working image from then on removes
- * rotation from every other transform's math entirely.
- *
- * Draw/text/sticker marks are captured in 0–1 viewport-fraction
- * coordinates, same convention the meeting Whiteboard uses, and rendered
- * onto a transparent overlay canvas sitting on top of the photo. Panning
- * and zooming are locked while a mark tool is active (see `locked` below)
- * — marks are anchored to the CURRENT crop view, not the underlying photo,
- * so letting the photo move underneath them after they're placed would
- * leave them pointing at the wrong thing. This is the same "adjust first,
- * then annotate" split most photo editors use.
+ * Three tool categories (Adjust, Draw, Add) accessible via a bottom tab bar.
+ * Filter thumbnails show actual previewed images. The edit viewport uses the
+ * same pan/zoom/crop math as before but with a polished UI wrapper.
  */
 export default function PhotoEditor({ file, onCancel, onDone }) {
-  const [rotatedSrc, setRotatedSrc] = useState(null); // {canvas, w, h} — the working (rotated) bitmap
+  const [rotatedSrc, setRotatedSrc] = useState(null);
   const [rotation, setRotation] = useState(0);
+  const [flipped, setFlipped] = useState(false);
   const [aspect, setAspect] = useState(ASPECTS[0]);
   const [filter, setFilter] = useState(FILTERS[0]);
   const [enhanced, setEnhanced] = useState(false);
@@ -78,19 +99,36 @@ export default function PhotoEditor({ file, onCancel, onDone }) {
   const dragRef = useRef(null);
   const viewportRef = useRef(null);
 
-  // Marks: [{kind:"stroke", points:[{x,y}...], color} | {kind:"text", x,y,text,color} | {kind:"sticker", x,y,emoji}]
+  // Adjustment sliders
+  const [brightness, setBrightness] = useState(100);
+  const [contrast, setContrast] = useState(100);
+  const [saturation, setSaturation] = useState(100);
+
   const [marks, setMarks] = useState([]);
-  const [tool, setTool] = useState(null); // null | "draw" | "text" | "sticker"
+  const [tool, setTool] = useState(null);
+  const [activeGroup, setActiveGroup] = useState(null); // "adjust" | "annotate" | "insert" | null
   const [drawColor, setDrawColor] = useState(DRAW_COLORS[0]);
+  const [drawSize, setDrawSize] = useState(3);
   const [showStickers, setShowStickers] = useState(false);
+  const [shapeType, setShapeType] = useState("rect");
   const overlayCanvasRef = useRef(null);
-  const strokingRef = useRef(null); // current in-progress stroke's points, while drawing
-  const locked = tool !== null; // pan/zoom disabled while annotating — see file docstring
+  const strokingRef = useRef(null);
+  const shapeStartRef = useRef(null);
+  const locked = tool === "draw" || tool === "highlighter" || tool === "eraser" || tool === "text"
+    || tool === "sticker" || tool === "shape";
 
-  const activeFilterCss = enhanced && filter.css !== "none"
-    ? `${filter.css} ${ENHANCE_CSS}` : enhanced ? ENHANCE_CSS : filter.css;
+  useEffect(() => { injectEditorStyles(); }, []);
 
-  // Load the source file once into a natural-size <img>, kept for re-rotation.
+  const adjustmentCss = (brightness !== 100 || contrast !== 100 || saturation !== 100)
+    ? `brightness(${brightness / 100}) contrast(${contrast / 100}) saturate(${saturation / 100})`
+    : "";
+
+  const activeFilterCss = [
+    filter.css !== "none" ? filter.css : "",
+    enhanced ? ENHANCE_CSS : "",
+    adjustmentCss,
+  ].filter(Boolean).join(" ") || "none";
+
   const [sourceImg, setSourceImg] = useState(null);
   useEffect(() => {
     const url = URL.createObjectURL(file);
@@ -100,7 +138,6 @@ export default function PhotoEditor({ file, onCancel, onDone }) {
     return () => URL.revokeObjectURL(url);
   }, [file]);
 
-  // Bake rotation onto an offscreen canvas whenever it changes.
   useEffect(() => {
     if (!sourceImg) return;
     const swapped = rotation === 90 || rotation === 270;
@@ -112,24 +149,17 @@ export default function PhotoEditor({ file, onCancel, onDone }) {
     const ctx = canvas.getContext("2d");
     ctx.translate(w / 2, h / 2);
     ctx.rotate((rotation * Math.PI) / 180);
+    if (flipped) ctx.scale(-1, 1);
     ctx.drawImage(sourceImg, -sourceImg.naturalWidth / 2, -sourceImg.naturalHeight / 2);
     setRotatedSrc({ canvas, w, h });
-    // Rotating resets any in-progress pan/zoom — the old offsets were
-    // relative to a differently-shaped frame and no longer mean anything.
-    // Marks are reset too, for the same reason: they were anchored to a
-    // crop view that no longer exists once the underlying photo rotates.
     setPan({ x: 0, y: 0 });
     setZoom(1);
     setMarks([]);
-  }, [sourceImg, rotation]);
+  }, [sourceImg, rotation, flipped]);
 
   const viewportW = VIEWPORT_MAX_WIDTH;
   const viewportH = aspect.ratio ? viewportW / aspect.ratio : (rotatedSrc ? (viewportW * rotatedSrc.h) / rotatedSrc.w : viewportW);
 
-  // "Cover" scale: the smallest scale at which the rotated image fully
-  // covers the viewport, same math object-fit: cover uses. Zoom multiplies
-  // this rather than replacing it, so 1x always means "fills the frame,
-  // nothing cut off unnecessarily."
   const coverScale = rotatedSrc ? Math.max(viewportW / rotatedSrc.w, viewportH / rotatedSrc.h) : 1;
   const effectiveScale = coverScale * zoom;
   const displayedW = rotatedSrc ? rotatedSrc.w * effectiveScale : 0;
@@ -144,12 +174,7 @@ export default function PhotoEditor({ file, onCancel, onDone }) {
     };
   }
 
-  // Re-clamp whenever zoom/aspect change the bounds — otherwise a pan that
-  // was valid at a higher zoom can leave a gap once zoom decreases.
   useEffect(() => { setPan((p) => clampPan(p)); }, [zoom, aspect, rotatedSrc]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Resets marks whenever the aspect/crop frame's own shape changes — a 0–1
-  // fraction position only means the same thing on the same-shaped frame.
   useEffect(() => { setMarks([]); }, [aspect]);
 
   function pointFromEvent(event) {
@@ -161,23 +186,33 @@ export default function PhotoEditor({ file, onCancel, onDone }) {
   }
 
   function onPointerDown(event) {
-    if (tool === "draw") {
+    if (tool === "draw" || tool === "highlighter" || tool === "eraser") {
       const point = pointFromEvent(event);
       strokingRef.current = [point];
       event.currentTarget.setPointerCapture?.(event.pointerId);
       return;
     }
-    if (locked) return; // text/sticker tools place on tap, not drag
+    if (tool === "shape") {
+      shapeStartRef.current = pointFromEvent(event);
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+      return;
+    }
+    if (locked) return;
     dragRef.current = {
       startX: event.clientX, startY: event.clientY,
       startPan: pan,
     };
     event.currentTarget.setPointerCapture?.(event.pointerId);
   }
+
   function onPointerMove(event) {
-    if (tool === "draw" && strokingRef.current) {
+    if ((tool === "draw" || tool === "highlighter" || tool === "eraser") && strokingRef.current) {
       strokingRef.current = [...strokingRef.current, pointFromEvent(event)];
       drawOverlay();
+      return;
+    }
+    if (tool === "shape" && shapeStartRef.current) {
+      drawOverlay(pointFromEvent(event));
       return;
     }
     if (!dragRef.current) return;
@@ -185,12 +220,23 @@ export default function PhotoEditor({ file, onCancel, onDone }) {
     const dy = event.clientY - dragRef.current.startY;
     setPan(clampPan({ x: dragRef.current.startPan.x + dx, y: dragRef.current.startPan.y + dy }));
   }
-  function onPointerUp() {
-    if (tool === "draw" && strokingRef.current) {
+
+  function onPointerUp(event) {
+    if ((tool === "draw" || tool === "highlighter" || tool === "eraser") && strokingRef.current) {
       if (strokingRef.current.length > 1) {
-        setMarks((current) => [...current, { kind: "stroke", points: strokingRef.current, color: drawColor }]);
+        const strokeColor = tool === "eraser" ? "erase" : tool === "highlighter" ? "highlight" : drawColor;
+        const size = tool === "highlighter" ? 14 : tool === "eraser" ? 22 : drawSize;
+        setMarks((current) => [...current, { kind: "stroke", points: strokingRef.current, color: strokeColor, size }]);
       }
       strokingRef.current = null;
+      return;
+    }
+    if (tool === "shape" && shapeStartRef.current) {
+      const endPoint = pointFromEvent(event);
+      setMarks((current) => [...current, {
+        kind: "shape", shapeType, start: shapeStartRef.current, end: endPoint, color: drawColor, size: drawSize,
+      }]);
+      shapeStartRef.current = null;
       return;
     }
     dragRef.current = null;
@@ -203,7 +249,6 @@ export default function PhotoEditor({ file, onCancel, onDone }) {
       if (text && text.trim()) {
         setMarks((current) => [...current, { kind: "text", x: point.x, y: point.y, text: text.trim(), color: drawColor }]);
       }
-      setTool(null);
     }
   }
 
@@ -215,19 +260,23 @@ export default function PhotoEditor({ file, onCancel, onDone }) {
 
   function paintMark(ctx, w, h, mark) {
     if (mark.kind === "stroke") {
-      ctx.strokeStyle = mark.color;
-      ctx.lineWidth = Math.max(2, w * 0.01);
+      ctx.strokeStyle = mark.color === "highlight" ? drawColor : mark.color;
+      ctx.lineWidth = mark.size || Math.max(2, w * 0.01);
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
+      ctx.globalAlpha = mark.color === "highlight" ? 0.35 : 1;
+      ctx.globalCompositeOperation = mark.color === "erase" ? "destination-out" : "source-over";
       ctx.beginPath();
       mark.points.forEach((point, i) => {
         const x = point.x * w, y = point.y * h;
         if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       });
       ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = "source-over";
     } else if (mark.kind === "text") {
       ctx.fillStyle = mark.color;
-      ctx.font = `${Math.round(h * 0.045)}px sans-serif`;
+      ctx.font = `bold ${Math.round(h * 0.05)}px sans-serif`;
       ctx.textBaseline = "top";
       ctx.fillText(mark.text, mark.x * w, mark.y * h);
     } else if (mark.kind === "sticker") {
@@ -237,24 +286,52 @@ export default function PhotoEditor({ file, onCancel, onDone }) {
       ctx.fillText(mark.emoji, mark.x * w, mark.y * h);
       ctx.textAlign = "left";
       ctx.textBaseline = "alphabetic";
+    } else if (mark.kind === "shape") {
+      ctx.strokeStyle = mark.color;
+      ctx.lineWidth = mark.size || 3;
+      ctx.globalCompositeOperation = "source-over";
+      ctx.beginPath();
+      const x1 = mark.start.x * w, y1 = mark.start.y * h;
+      const x2 = mark.end.x * w, y2 = mark.end.y * h;
+      if (mark.shapeType === "rect") {
+        ctx.rect(x1, y1, x2 - x1, y2 - y1);
+      } else if (mark.shapeType === "circle") {
+        const rx = Math.abs(x2 - x1) / 2, ry = Math.abs(y2 - y1) / 2;
+        ctx.ellipse((x1 + x2) / 2, (y1 + y2) / 2, rx, ry, 0, 0, Math.PI * 2);
+      } else if (mark.shapeType === "line") {
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+      } else if (mark.shapeType === "arrow") {
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        const angle = Math.atan2(y2 - y1, x2 - x1);
+        const headLen = 12;
+        ctx.lineTo(x2 - headLen * Math.cos(angle - Math.PI / 6), y2 - headLen * Math.sin(angle - Math.PI / 6));
+        ctx.moveTo(x2, y2);
+        ctx.lineTo(x2 - headLen * Math.cos(angle + Math.PI / 6), y2 - headLen * Math.sin(angle + Math.PI / 6));
+      }
+      ctx.stroke();
     }
   }
 
-  // Redraws the overlay canvas from `marks` (plus whatever stroke is
-  // currently mid-drag) — called on every draw-move and whenever marks
-  // change, same "just repaint everything" approach the meeting Whiteboard
-  // uses, simple to keep correct since there's no live-collab ordering to
-  // worry about here.
-  function drawOverlay() {
+  function drawOverlay(shapeEnd) {
     const canvas = overlayCanvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     for (const mark of marks) paintMark(ctx, canvas.width, canvas.height, mark);
     if (strokingRef.current) {
-      paintMark(ctx, canvas.width, canvas.height, { kind: "stroke", points: strokingRef.current, color: drawColor });
+      const strokeColor = tool === "eraser" ? "erase" : tool === "highlighter" ? "highlight" : drawColor;
+      const size = tool === "highlighter" ? 14 : tool === "eraser" ? 22 : drawSize;
+      paintMark(ctx, canvas.width, canvas.height, { kind: "stroke", points: strokingRef.current, color: strokeColor, size });
+    }
+    if (shapeEnd && shapeStartRef.current) {
+      paintMark(ctx, canvas.width, canvas.height, {
+        kind: "shape", shapeType, start: shapeStartRef.current, end: shapeEnd, color: drawColor, size: drawSize,
+      });
     }
   }
+
   useEffect(() => {
     const canvas = overlayCanvasRef.current;
     if (!canvas) return;
@@ -278,16 +355,11 @@ export default function PhotoEditor({ file, onCancel, onDone }) {
       canvas.height = Math.round(outH);
       const ctx = canvas.getContext("2d");
       ctx.filter = activeFilterCss;
-      // Same viewport-to-source mapping the preview uses, just scaled up
-      // to the export resolution instead of VIEWPORT_MAX_WIDTH.
       const exportScale = canvas.width / viewportW;
       const scale = effectiveScale * exportScale;
       const dx = canvas.width / 2 - (rotatedSrc.w / 2) * scale + pan.x * exportScale;
       const dy = canvas.height / 2 - (rotatedSrc.h / 2) * scale + pan.y * exportScale;
       ctx.drawImage(rotatedSrc.canvas, dx, dy, rotatedSrc.w * scale, rotatedSrc.h * scale);
-      // Marks are drawn AFTER the filter is reset — a filter is meant to
-      // grade the photo, not desaturate a red pen stroke someone just drew
-      // on top of it.
       ctx.filter = "none";
       for (const mark of marks) paintMark(ctx, canvas.width, canvas.height, mark);
       canvas.toBlob((blob) => {
@@ -300,45 +372,58 @@ export default function PhotoEditor({ file, onCancel, onDone }) {
     }
   }
 
+  function undoLast() {
+    setMarks((current) => current.slice(0, -1));
+  }
+
   return (
     <div style={{
-      position: "fixed", inset: 0, background: "#000", zIndex: 90,
+      position: "fixed", inset: 0, background: "#0a0a0a", zIndex: 90,
       display: "flex", flexDirection: "column",
+      animation: "txEditorSlideIn 0.3s ease-out",
     }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: 16 }}>
-        <div onClick={onCancel} style={{ color: "#fff", fontSize: 14, cursor: "pointer" }}>Cancel</div>
-        <div style={{ display: "flex", gap: 18, alignItems: "center" }}>
-          <div onClick={() => setRotation((r) => (r + 90) % 360)} title="Rotate" style={{ cursor: "pointer" }}>
-            {I.rotateRight("#fff", 22)}
-          </div>
-          <div onClick={() => setEnhanced((v) => !v)} title="Enhance" style={{
-            cursor: "pointer", fontSize: 20, opacity: enhanced ? 1 : 0.55,
-          }}>✨</div>
-          <div onClick={() => { setTool((t) => (t === "draw" ? null : "draw")); setShowStickers(false); }}
-               title="Draw" style={{ cursor: "pointer", opacity: tool === "draw" ? 1 : 0.55 }}>
-            {I.edit("#fff", 20)}
-          </div>
-          <div onClick={() => setTool((t) => (t === "text" ? null : "text"))}
-               title="Add text" style={{
-                 cursor: "pointer", fontSize: 16, fontWeight: 700, color: "#fff", opacity: tool === "text" ? 1 : 0.55,
-               }}>Aa</div>
-          <div onClick={() => { setTool("sticker"); setShowStickers((v) => !v); }}
-               title="Sticker" style={{ cursor: "pointer", fontSize: 18, opacity: tool === "sticker" ? 1 : 0.55 }}>😊</div>
+      {/* Top bar — minimal, modern */}
+      <div style={{
+        display: "flex", alignItems: "center", padding: "12px 16px", flexShrink: 0,
+        background: "#0a0a0a",
+      }}>
+        <div onClick={onCancel} style={{
+          color: "#fff", fontSize: 14, cursor: "pointer", padding: "6px 12px",
+          borderRadius: 20, background: "#ffffff14",
+        }}>Cancel</div>
+        <div style={{ flex: 1 }}/>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {marks.length > 0 && (
+            <div onClick={undoLast} title="Undo" style={{
+              cursor: "pointer", padding: "6px 10px", borderRadius: 16,
+              background: "#ffffff14", fontSize: 13, color: "#ffffffcc",
+            }}>↩ Undo</div>
+          )}
+          <div onClick={() => setEnhanced((v) => !v)} title="Auto-enhance" style={{
+            cursor: "pointer", padding: "6px 12px", borderRadius: 16, fontSize: 13,
+            background: enhanced ? `${G.accent}33` : "#ffffff14",
+            color: enhanced ? G.accent : "#ffffffcc",
+            border: enhanced ? `1px solid ${G.accent}55` : "1px solid transparent",
+          }}>✨ Enhance</div>
           <div onClick={() => setHd((v) => !v)} title="HD quality" style={{
-            cursor: "pointer", fontSize: 11, fontWeight: 700, padding: "3px 7px", borderRadius: 6,
-            border: `1px solid ${hd ? G.accent : "#ffffff55"}`, color: hd ? G.accentText : "#ffffffaa",
-            background: hd ? G.accentSoft : "transparent",
+            cursor: "pointer", padding: "6px 12px", borderRadius: 16, fontSize: 12, fontWeight: 700,
+            background: hd ? `${G.accent}33` : "#ffffff14",
+            color: hd ? G.accent : "#ffffffcc",
+            border: hd ? `1px solid ${G.accent}55` : "1px solid transparent",
           }}>HD</div>
         </div>
       </div>
 
+      {/* Viewport */}
       <div ref={viewportRef} style={{
         flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center",
       }}>
         <div style={{
-          width: viewportW, height: viewportH, borderRadius: 8, overflow: "hidden",
+          width: viewportW, height: viewportH, borderRadius: 12, overflow: "hidden",
           position: "relative", background: "#111",
-          touchAction: "none", cursor: tool === "draw" ? "crosshair" : locked ? "default" : "grab",
+          touchAction: "none",
+          cursor: locked ? (tool === "draw" || tool === "highlighter" || tool === "eraser" ? "crosshair"
+            : tool === "shape" ? "crosshair" : "default") : "grab",
         }}
              onPointerDown={onPointerDown} onPointerMove={onPointerMove}
              onPointerUp={onPointerUp} onPointerLeave={onPointerUp}
@@ -358,63 +443,137 @@ export default function PhotoEditor({ file, onCancel, onDone }) {
         </div>
       </div>
 
-      {tool === "draw" && (
-        <div style={{ display: "flex", gap: 10, padding: "6px 16px", justifyContent: "center" }}>
-          {DRAW_COLORS.map((color) => (
-            <div key={color} onClick={() => setDrawColor(color)} style={{
-              width: 24, height: 24, borderRadius: "50%", background: color, cursor: "pointer",
-              border: drawColor === color ? "2px solid #fff" : "2px solid transparent",
-            }}/>
+      {/* Context-sensitive tool options — shown based on activeGroup */}
+      {activeGroup === "adjust" && !tool && (
+        <div style={{ padding: "0 16px 8px" }}>
+          {/* Aspect ratio pills */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 12, overflowX: "auto" }}>
+            {ASPECTS.map((option) => (
+              <div key={option.key} onClick={() => setAspect(option)} style={{
+                padding: "6px 14px", borderRadius: 20, fontSize: 12.5, flexShrink: 0, cursor: "pointer",
+                border: `1px solid ${aspect.key === option.key ? G.accent : "#ffffff22"}`,
+                background: aspect.key === option.key ? `${G.accent}22` : "transparent",
+                color: aspect.key === option.key ? G.accent : "#ffffffcc",
+              }}>{option.label}</div>
+            ))}
+          </div>
+          {/* Brightness / Contrast / Saturation sliders */}
+          {[
+            { label: "Brightness", value: brightness, set: setBrightness },
+            { label: "Contrast", value: contrast, set: setContrast },
+            { label: "Saturation", value: saturation, set: setSaturation },
+          ].map(({ label, value, set }) => (
+            <div key={label} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+              <span style={{ fontSize: 11, color: "#ffffff88", width: 64, flexShrink: 0 }}>{label}</span>
+              <input type="range" min={50} max={150} value={value}
+                     onChange={(e) => set(Number(e.target.value))}
+                     className="tx-editor-slider"
+                     style={{ flex: 1, appearance: "none", background: "transparent", height: 20 }}/>
+              <span style={{ fontSize: 11, color: "#ffffff88", width: 28, textAlign: "right" }}>{value}</span>
+            </div>
           ))}
+          {/* Zoom slider */}
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ fontSize: 11, color: "#ffffff88", width: 64, flexShrink: 0 }}>Zoom</span>
+            <input type="range" min={1} max={3} step={0.01} value={zoom}
+                   onChange={(e) => setZoom(Number(e.target.value))}
+                   className="tx-editor-slider"
+                   style={{ flex: 1, appearance: "none", background: "transparent", height: 20 }}/>
+          </div>
+        </div>
+      )}
+
+      {activeGroup === "annotate" && (
+        <div style={{ padding: "8px 16px" }}>
+          {/* Color picker */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 10, justifyContent: "center", alignItems: "center" }}>
+            {DRAW_COLORS.map((color) => (
+              <div key={color} onClick={() => setDrawColor(color)} style={{
+                width: drawColor === color ? 28 : 22, height: drawColor === color ? 28 : 22,
+                borderRadius: "50%", background: color, cursor: "pointer",
+                border: drawColor === color ? "2.5px solid #fff" : "2px solid #ffffff33",
+                transition: "all 0.15s",
+                boxShadow: drawColor === color ? `0 0 8px ${color}88` : "none",
+              }}/>
+            ))}
+          </div>
+          {/* Size slider for pen */}
+          {tool === "draw" && (
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#fff" }}/>
+              <input type="range" min={1} max={12} value={drawSize}
+                     onChange={(e) => setDrawSize(Number(e.target.value))}
+                     className="tx-editor-slider"
+                     style={{ flex: 1, appearance: "none", background: "transparent", height: 20 }}/>
+              <div style={{ width: 14, height: 14, borderRadius: "50%", background: "#fff" }}/>
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeGroup === "insert" && tool === "shape" && (
+        <div style={{ padding: "8px 16px" }}>
+          <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 8 }}>
+            {[
+              { key: "rect", icon: "□" }, { key: "circle", icon: "○" },
+              { key: "line", icon: "╱" }, { key: "arrow", icon: "→" },
+            ].map((s) => (
+              <div key={s.key} onClick={() => setShapeType(s.key)} style={{
+                width: 36, height: 36, borderRadius: 10, cursor: "pointer", fontSize: 18,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                background: shapeType === s.key ? "#ffffff2a" : "#ffffff0d",
+                color: shapeType === s.key ? "#fff" : "#ffffff88",
+              }}>{s.icon}</div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+            {DRAW_COLORS.slice(0, 6).map((color) => (
+              <div key={color} onClick={() => setDrawColor(color)} style={{
+                width: 22, height: 22, borderRadius: "50%", background: color, cursor: "pointer",
+                border: drawColor === color ? "2px solid #fff" : "2px solid transparent",
+              }}/>
+            ))}
+          </div>
         </div>
       )}
 
       {showStickers && (
-        <div style={{ display: "flex", gap: 10, padding: "6px 16px", flexWrap: "wrap", justifyContent: "center" }}>
-          {STICKER_EMOJIS.map((emoji) => (
-            <div key={emoji} onClick={() => placeSticker(emoji)} style={{ fontSize: 26, cursor: "pointer" }}>
+        <div style={{
+          display: "flex", gap: 8, padding: "8px 16px", flexWrap: "wrap", justifyContent: "center",
+          maxHeight: 160, overflowY: "auto",
+        }}>
+          {STICKER_EMOJIS.map((emoji, i) => (
+            <div key={emoji} onClick={() => placeSticker(emoji)} style={{
+              fontSize: 28, cursor: "pointer", padding: 4,
+              animation: `txToolPop 0.2s ease-out ${i * 0.02}s both`,
+            }}>
               {emoji}
             </div>
           ))}
         </div>
       )}
 
-      {!locked && (
-        <div style={{ padding: "8px 16px" }}>
-          <input type="range" min={1} max={3} step={0.01} value={zoom}
-                 onChange={(event) => setZoom(Number(event.target.value))}
-                 style={{ width: "100%" }}/>
-        </div>
-      )}
-
-      {!locked && (
-        <div style={{ display: "flex", gap: 8, padding: "4px 16px 12px", overflowX: "auto" }}>
-          {ASPECTS.map((option) => (
-            <button key={option.key} onClick={() => setAspect(option)} style={{
-              padding: "6px 14px", borderRadius: 20, fontSize: 12.5, flexShrink: 0, cursor: "pointer",
-              border: `1px solid ${aspect.key === option.key ? G.accent : "#ffffff33"}`,
-              background: aspect.key === option.key ? G.accentSoft : "transparent",
-              color: aspect.key === option.key ? G.accentText : "#fff",
-            }}>{option.label}</button>
-          ))}
-        </div>
-      )}
-
-      {!locked && (
-        <div style={{ display: "flex", gap: 10, padding: "0 16px 16px", overflowX: "auto" }}>
+      {/* Filter strip — always visible, horizontal scroll */}
+      {(!activeGroup || activeGroup === "adjust") && !locked && (
+        <div style={{ display: "flex", gap: 10, padding: "8px 16px", overflowX: "auto", flexShrink: 0 }}>
           {FILTERS.map((option) => (
             <div key={option.key} onClick={() => setFilter(option)} style={{
               display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
               flexShrink: 0, cursor: "pointer",
             }}>
               <div style={{
-                width: 48, height: 48, borderRadius: 8, overflow: "hidden",
-                border: `2px solid ${filter.key === option.key ? G.accent : "transparent"}`,
+                width: 52, height: 52, borderRadius: 10, overflow: "hidden",
+                border: `2.5px solid ${filter.key === option.key ? G.accent : "transparent"}`,
                 backgroundImage: rotatedUrl ? `url(${rotatedUrl})` : "none",
                 backgroundSize: "cover", backgroundPosition: "center",
                 filter: option.css,
+                transition: "border-color 0.15s",
               }}/>
-              <span style={{ fontSize: 10.5, color: filter.key === option.key ? G.accentText : "#ffffffaa" }}>
+              <span style={{
+                fontSize: 10, letterSpacing: 0.3,
+                color: filter.key === option.key ? G.accent : "#ffffff88",
+                fontWeight: filter.key === option.key ? 700 : 400,
+              }}>
                 {option.label}
               </span>
             </div>
@@ -422,10 +581,64 @@ export default function PhotoEditor({ file, onCancel, onDone }) {
         </div>
       )}
 
-      <div style={{ padding: "0 16px 28px" }}>
-        <Button onClick={done} disabled={!rotatedSrc || processing} style={{ width: "100%" }}>
-          {processing ? "Processing…" : "Done"}
-        </Button>
+      {/* Bottom toolbar — modern category tabs */}
+      <div style={{
+        padding: "8px 16px 24px", background: "#0a0a0a",
+        borderTop: "1px solid #ffffff12", flexShrink: 0,
+      }}>
+        {/* Tool category bar */}
+        <div style={{ display: "flex", gap: 4, marginBottom: 10 }}>
+          {TOOL_GROUPS.map((group) => (
+            <div key={group.key} onClick={() => {
+              setActiveGroup((g) => g === group.key ? null : group.key);
+              setTool(null);
+              setShowStickers(false);
+            }} style={{
+              flex: 1, padding: "8px", borderRadius: 12, cursor: "pointer",
+              textAlign: "center", fontSize: 12.5, fontWeight: 600,
+              background: activeGroup === group.key ? "#ffffff1a" : "transparent",
+              color: activeGroup === group.key ? "#fff" : "#ffffff66",
+              transition: "all 0.15s",
+            }}>{group.label}</div>
+          ))}
+        </div>
+
+        {/* Expanded tool row when a group is active */}
+        {activeGroup && (
+          <div style={{
+            display: "flex", gap: 6, justifyContent: "center", marginBottom: 10,
+          }}>
+            {TOOL_GROUPS.find((g) => g.key === activeGroup)?.tools.map((t, i) => (
+              <div key={t.key} onClick={() => {
+                if (t.key === "rotate") { setRotation((r) => (r + 90) % 360); return; }
+                if (t.key === "flip") { setFlipped((f) => !f); return; }
+                if (t.key === "crop") { setTool(null); return; }
+                if (t.key === "sticker") { setShowStickers((v) => !v); setTool("sticker"); return; }
+                setTool((current) => current === t.key ? null : t.key);
+                setShowStickers(false);
+              }} style={{
+                display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
+                padding: "8px 14px", borderRadius: 12, cursor: "pointer",
+                background: tool === t.key ? `${G.accent}22` : "#ffffff0d",
+                border: `1px solid ${tool === t.key ? G.accent : "transparent"}`,
+                animation: `txToolPop 0.2s ease-out ${i * 0.05}s both`,
+              }}>
+                <span style={{ fontSize: 18 }}>{t.icon}</span>
+                <span style={{ fontSize: 10, color: tool === t.key ? G.accent : "#ffffffaa" }}>{t.label}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Done button */}
+        <button onClick={done} disabled={!rotatedSrc || processing} style={{
+          width: "100%", padding: "14px", borderRadius: 14, border: "none", cursor: "pointer",
+          background: G.accent, color: "#fff", fontSize: 15, fontWeight: 700,
+          opacity: !rotatedSrc || processing ? 0.5 : 1,
+          boxShadow: `0 2px 16px ${G.accentGlow}`,
+        }}>
+          {processing ? "Processing…" : "Done ✓"}
+        </button>
       </div>
     </div>
   );
