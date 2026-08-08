@@ -2509,9 +2509,14 @@ def test_create_list_and_revoke_api_key(client):
 
 
 def test_bulk_send_creates_a_dm_and_delivers_normally(client):
-    alice, alice_id, _ = make_user(client, "Alice")
+    alice, alice_id, alice_username = make_user(client, "Alice")
     bob, bob_id, bob_username = make_user(client, "Bob")
     key, _, _ = make_api_key(client, alice)
+
+    # A cold bulk send needs Bob's consent first — see
+    # test_bulk_send_without_optin_or_open_window_is_rejected below for the
+    # gate itself.
+    client.post(f"/business/optin/{alice_username}", headers=bob)
 
     response = client.post("/api/v1/messages", headers=key,
                            json={"to": bob_username, "text": "Your OTP is 482913"})
@@ -2527,10 +2532,11 @@ def test_bulk_send_creates_a_dm_and_delivers_normally(client):
 
 
 def test_bulk_send_reuses_the_same_dm_a_human_would_land_in(client):
-    alice, _, _ = make_user(client, "Alice")
+    alice, _, alice_username = make_user(client, "Alice")
     bob, bob_id, bob_username = make_user(client, "Bob")
 
     human_chat = client.post(f"/chats/dm/{bob_id}", headers=alice).json()
+    client.post(f"/business/optin/{alice_username}", headers=bob)
     key, _, _ = make_api_key(client, alice)
     sent = client.post("/api/v1/messages", headers=key,
                        json={"to": bob_username, "text": "hi"}).json()
@@ -2539,9 +2545,10 @@ def test_bulk_send_reuses_the_same_dm_a_human_would_land_in(client):
 
 
 def test_bulk_send_deduplicates_on_client_msg_id(client):
-    alice, _, _ = make_user(client, "Alice")
+    alice, _, alice_username = make_user(client, "Alice")
     bob, bob_id, bob_username = make_user(client, "Bob")
     key, _, _ = make_api_key(client, alice)
+    client.post(f"/business/optin/{alice_username}", headers=bob)
 
     body = {"to": bob_username, "text": "retry-safe", "client_msg_id": "job-42"}
     first = client.post("/api/v1/messages", headers=key, json=body).json()
@@ -2574,9 +2581,10 @@ def test_bulk_send_respects_blocking(client):
 
 
 def test_bulk_send_is_rate_limited_separately_from_interactive_sends(client):
-    alice, alice_id, _ = make_user(client, "Alice")
+    alice, alice_id, alice_username = make_user(client, "Alice")
     bob, bob_id, bob_username = make_user(client, "Bob")
     key, _, _ = make_api_key(client, alice)
+    client.post(f"/business/optin/{alice_username}", headers=bob)
 
     codes = [
         client.post("/api/v1/messages", headers=key,
@@ -2591,9 +2599,10 @@ def test_bulk_send_is_rate_limited_separately_from_interactive_sends(client):
 
 
 def test_a_revoked_key_stops_working_immediately(client):
-    alice, _, _ = make_user(client, "Alice")
+    alice, _, alice_username = make_user(client, "Alice")
     bob, bob_id, bob_username = make_user(client, "Bob")
     key, key_id, _ = make_api_key(client, alice)
+    client.post(f"/business/optin/{alice_username}", headers=bob)
 
     assert client.post("/api/v1/messages", headers=key,
                        json={"to": bob_username, "text": "before"}).status_code == 200
@@ -2629,6 +2638,158 @@ def test_cannot_manage_someone_elses_api_key(client):
     assert client.delete(f"/me/api-keys/{key_id}", headers=bob).status_code == 404
     # Alice's key is untouched — Bob's attempt did nothing.
     assert len(client.get("/me/api-keys", headers=alice).json()) == 1
+
+
+# ── Business messaging consent ──────────────────────────────────────────────
+# TalkEx's own equivalent of WhatsApp Business API's opt-in + 24-hour
+# customer-service-window gate: before this, an api_keys holder could bulk-DM
+# any registered user cold, with nothing but a reactive block able to stop
+# them. See has_business_optin / has_open_conversation_window / bulk_send_message
+# in main.py.
+
+def test_bulk_send_without_optin_or_open_window_is_rejected(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, bob_username = make_user(client, "Bob")
+    key, _, _ = make_api_key(client, alice)
+
+    # Bob has never opted in, and has never messaged Alice — a cold send
+    # must be refused rather than silently delivered.
+    response = client.post("/api/v1/messages", headers=key,
+                           json={"to": bob_username, "text": "buy now"})
+    assert response.status_code == 403
+
+
+def test_bulk_send_allowed_after_explicit_optin(client):
+    alice, _, alice_username = make_user(client, "Alice")
+    bob, _, bob_username = make_user(client, "Bob")
+    key, _, _ = make_api_key(client, alice)
+
+    opted = client.post(f"/business/optin/{alice_username}", headers=bob)
+    assert opted.status_code == 200
+    assert opted.json()["opted_in"] is True
+
+    response = client.post("/api/v1/messages", headers=key,
+                           json={"to": bob_username, "text": "welcome!"})
+    assert response.status_code == 200
+
+
+def test_bulk_send_allowed_when_recipient_messaged_first(client):
+    """The 24-hour-window half of the gate: no explicit opt-in on file, but
+    Bob messaged Alice first through the ordinary interactive app — that
+    alone should open the window, same as texting a WhatsApp Business
+    number first lets it free-form-reply without a template."""
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, _, bob_username = make_user(client, "Bob")
+    key, _, _ = make_api_key(client, alice)
+
+    dm = client.post(f"/chats/dm/{alice_id}", headers=bob).json()
+    assert client.post("/messages", headers=bob, json={
+        "chat_id": dm["id"], "kind": "text", "text": "Hi, do you sell X?",
+    }).status_code == 200
+
+    response = client.post("/api/v1/messages", headers=key,
+                           json={"to": bob_username, "text": "Yes, here's a link"})
+    assert response.status_code == 200
+
+
+def test_optout_revokes_a_standing_optin(client):
+    alice, _, alice_username = make_user(client, "Alice")
+    bob, _, bob_username = make_user(client, "Bob")
+    key, _, _ = make_api_key(client, alice)
+
+    client.post(f"/business/optin/{alice_username}", headers=bob)
+    assert client.post("/api/v1/messages", headers=key,
+                       json={"to": bob_username, "text": "1"}).status_code == 200
+
+    revoked = client.delete(f"/business/optin/{alice_username}", headers=bob)
+    assert revoked.status_code == 200
+    assert revoked.json()["opted_in"] is False
+
+    assert client.post("/api/v1/messages", headers=key,
+                       json={"to": bob_username, "text": "2"}).status_code == 403
+
+
+def test_optins_list_shows_who_you_agreed_to_hear_from(client):
+    alice, _, alice_username = make_user(client, "Alice")
+    bob, _, _ = make_user(client, "Bob")
+
+    client.post(f"/business/optin/{alice_username}", headers=bob)
+    listed = client.get("/business/optins", headers=bob).json()
+    assert len(listed) == 1
+    assert listed[0]["username"] == alice_username
+
+
+def test_bulk_sender_is_suspended_after_enough_blocks(client):
+    """TalkEx's stand-in for a WhatsApp number's quality rating dropping to
+    Red: enough recipients blocking a bulk sender and their API access is
+    cut off entirely, not just for the recipients who blocked them."""
+    alice, alice_id, alice_username = make_user(client, "Alice")
+    key, _, _ = make_api_key(client, alice)
+
+    blockers = []
+    for i in range(main.ABUSE_SIGNAL_THRESHOLD):
+        blocker, _, blocker_username = make_user(client, f"Blocker{i}")
+        client.post(f"/business/optin/{alice_username}", headers=blocker)
+        assert client.post("/api/v1/messages", headers=key,
+                           json={"to": blocker_username, "text": "spam"}).status_code == 200
+        blockers.append((blocker, blocker_username))
+
+    for blocker, _ in blockers:
+        client.post(f"/users/{alice_id}/block", headers=blocker)
+
+    # A brand-new recipient who HAS opted in still gets refused — the
+    # suspension is account-wide, not per-recipient.
+    victim, _, victim_username = make_user(client, "Victim")
+    client.post(f"/business/optin/{alice_username}", headers=victim)
+    response = client.post("/api/v1/messages", headers=key,
+                           json={"to": victim_username, "text": "one more"})
+    assert response.status_code == 403
+
+
+def test_admin_can_clear_a_quality_flag(client, monkeypatch):
+    alice, alice_id, alice_username = make_user(client, "Alice")
+    key, _, _ = make_api_key(client, alice)
+
+    for i in range(main.ABUSE_SIGNAL_THRESHOLD):
+        blocker, blocker_id, _ = make_user(client, f"Blocker{i}")
+        client.post(f"/users/{alice_id}/block", headers=blocker)
+
+    victim, _, victim_username = make_user(client, "Victim")
+    client.post(f"/business/optin/{alice_username}", headers=victim)
+    assert client.post("/api/v1/messages", headers=key,
+                       json={"to": victim_username, "text": "hi"}).status_code == 403
+
+    admin, _ = make_superadmin(client, monkeypatch)
+    assert client.post(f"/admin/users/{alice_id}/unflag-quality", headers=admin).status_code == 200
+
+    assert client.post("/api/v1/messages", headers=key,
+                       json={"to": victim_username, "text": "hi again"}).status_code == 200
+
+
+def test_admin_can_verify_and_unverify_a_business_account(client, monkeypatch):
+    admin, _ = make_superadmin(client, monkeypatch)
+    alice, alice_id, _ = make_user(client, "Alice")
+
+    assert client.get("/me", headers=alice).json()["is_business"] == 0
+
+    verified = client.post(f"/admin/users/{alice_id}/verify-business", headers=admin)
+    assert verified.status_code == 200
+    assert verified.json()["is_business"] is True
+    assert client.get("/me", headers=alice).json()["is_business"] == 1
+
+    unverified = client.post(f"/admin/users/{alice_id}/unverify-business", headers=admin)
+    assert unverified.status_code == 200
+    assert client.get("/me", headers=alice).json()["is_business"] == 0
+
+
+def test_is_business_cannot_be_self_granted_via_profile_update(client):
+    """is_business is admin-only — mirrors Meta granting WhatsApp Business
+    Verification, not something an account can flip on for itself."""
+    alice, _, _ = make_user(client, "Alice")
+    response = client.patch("/me", headers=alice, json={"business_category": "Retail"})
+    assert response.status_code == 200
+    assert response.json()["is_business"] == 0
+    assert response.json()["business_category"] == "Retail"
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -4845,6 +5006,9 @@ ADMIN_ROUTES = [
     ("GET", "/admin/templates", None),
     ("POST", "/admin/templates/nonexistent-id/approve", None),
     ("POST", "/admin/templates/nonexistent-id/reject", None),
+    ("POST", "/admin/users/nonexistent-id/verify-business", None),
+    ("POST", "/admin/users/nonexistent-id/unverify-business", None),
+    ("POST", "/admin/users/nonexistent-id/unflag-quality", None),
 ]
 
 

@@ -253,6 +253,11 @@ def public_user(row, viewer_id: str | None = None) -> dict:
         user.pop("away_enabled", None)
         user.pop("away_message", None)
         user.pop("is_superadmin", None)
+        # Whether this account has been auto-flagged for abusive bulk
+        # sending is moderation-internal, same as is_superadmin — a
+        # recipient sees the effect (they stop getting cold-messaged) but
+        # has no business reading the flag itself off someone else's profile.
+        user.pop("quality_flagged_at", None)
     return user
 
 
@@ -381,6 +386,20 @@ bulk_rate_limiter = RateLimiter(max_events=60, window_seconds=60)
 # code a couple of times, tight enough that spamming an SMS provider's bill
 # (or a phone number that isn't yours) isn't free.
 otp_rate_limiter = RateLimiter(max_events=5, window_seconds=300)
+
+# TalkEx's own equivalent of WhatsApp Business API's 24-hour customer
+# service window: a bulk sender may free-form-reply this long after the
+# recipient last messaged them first, without needing an explicit opt-in on
+# file. See has_open_conversation_window() / bulk_send_message() below.
+BUSINESS_WINDOW_SECONDS = 24 * 3600
+
+# TalkEx's stand-in for WhatsApp's quality-rating system, since there is no
+# per-number "tier" here to downgrade — enough blocks/reports against a bulk
+# sender in this trailing window and their API access is auto-suspended
+# (see sender_reputation_flagged()), rather than relying on a human
+# moderator to notice the /report queue before real damage is done.
+REPUTATION_WINDOW_SECONDS = 7 * 24 * 3600
+ABUSE_SIGNAL_THRESHOLD = 5
 
 # Keyed by reporter — reporting is a rare, deliberate action; this only
 # exists to stop a script from flooding the queue, not to limit a genuine
@@ -1576,6 +1595,71 @@ async def notify_incoming_call(user_id: str, chat_id: str, caller_name: str, cal
     )
 
 
+def refresh_quality_flag(target_id: str) -> None:
+    """
+    Re-checks whether `target_id` has crossed ABUSE_SIGNAL_THRESHOLD blocks +
+    reports in the trailing REPUTATION_WINDOW_SECONDS, and stamps
+    users.quality_flagged_at the moment it first does — TalkEx's own
+    equivalent of a WhatsApp number's quality rating dropping to Red. Called
+    from block_user() and submit_report() (wherever a new signal is added),
+    not from the bulk_send_message() hot path, so a flagged sender's gate
+    check is a plain column read rather than re-aggregating both tables on
+    every single send.
+
+    Deliberately does nothing once quality_flagged_at is already set: an
+    admin's admin_unflag_quality() override is meant to hold until fresh
+    abuse re-trips it, not get silently re-flagged by a report filed the
+    same week the moderator already reviewed and dismissed.
+    """
+    since = time.time() - REPUTATION_WINDOW_SECONDS
+    already_flagged = db.query_one(
+        "SELECT quality_flagged_at FROM users WHERE id = ?", (target_id,)
+    )
+    if already_flagged is None or already_flagged["quality_flagged_at"]:
+        return
+    block_count = db.query_one(
+        "SELECT COUNT(*) AS n FROM blocks WHERE blocked_id = ? AND created_at > ?",
+        (target_id, since),
+    )["n"]
+    report_count = db.query_one(
+        "SELECT COUNT(*) AS n FROM reports "
+        "WHERE target_type = 'user' AND target_id = ? AND created_at > ?",
+        (target_id, since),
+    )["n"]
+    if (block_count + report_count) >= ABUSE_SIGNAL_THRESHOLD:
+        db.execute("UPDATE users SET quality_flagged_at = ? WHERE id = ?",
+                   (time.time(), target_id))
+
+
+def has_business_optin(sender_id: str, recipient_id: str) -> bool:
+    """Whether the recipient has an on-file opt-in for this specific sender —
+    see the business_optins table comment in db.py for the full mechanic."""
+    return db.query_one(
+        "SELECT 1 FROM business_optins WHERE sender_id = ? AND recipient_id = ?",
+        (sender_id, recipient_id),
+    ) is not None
+
+
+def has_open_conversation_window(sender_id: str, recipient_id: str) -> bool:
+    """
+    Whether the recipient messaged this sender first within the trailing
+    BUSINESS_WINDOW_SECONDS — the same "customer service window" mechanic
+    that lets a WhatsApp Business number free-form-reply without a template
+    for 24 hours after the customer's last message. Checked against the same
+    deterministic dm_<low>_<high> chat id the interactive and bulk send
+    paths both already use, so it lines up with whatever chat the two of
+    them actually share.
+    """
+    low, high = sorted([sender_id, recipient_id])
+    chat_id = f"dm_{low}_{high}"
+    since = time.time() - BUSINESS_WINDOW_SECONDS
+    return db.query_one(
+        "SELECT 1 FROM messages WHERE chat_id = ? AND sender_id = ? AND created_at > ? "
+        "AND unsent_at IS NULL LIMIT 1",
+        (chat_id, recipient_id, since),
+    ) is not None
+
+
 @app.post("/api/v1/messages")
 async def bulk_send_message(request: BulkSendRequest, sender: dict = Depends(require_api_key)):
     """
@@ -1588,8 +1672,25 @@ async def bulk_send_message(request: BulkSendRequest, sender: dict = Depends(req
     for. Finds or creates the same DM a human clicking that username would
     land in, so a reply from the recipient shows up in the ordinary app UI,
     not a parallel inbox.
+
+    Gated by the same two mechanics a WhatsApp Business number is: a
+    consent/opt-in check (has_business_optin or an open
+    has_open_conversation_window) before a single message goes out, and a
+    reputation check (quality_flagged_at, stamped by refresh_quality_flag)
+    that suspends the sender entirely once enough recipients have blocked or
+    reported them. Without both of these, an API key was previously enough
+    to cold-message any registered user with nothing but a reactive block
+    able to stop it.
     """
     bulk_rate_limiter.check(sender["id"])
+
+    if sender["quality_flagged_at"]:
+        raise HTTPException(
+            403,
+            "This account's bulk-sending access is suspended due to recent blocks/reports "
+            "against it — the same quality-rating mechanic WhatsApp Business enforces. "
+            "Contact support for review.",
+        )
 
     recipient = db.query_one("SELECT * FROM users WHERE lower(username) = ?",
                              (request.to.lower(),))
@@ -1600,6 +1701,15 @@ async def bulk_send_message(request: BulkSendRequest, sender: dict = Depends(req
 
     if blocked_between(sender["id"], recipient["id"]):
         raise HTTPException(403, "This recipient cannot be messaged")
+
+    if not (has_business_optin(sender["id"], recipient["id"])
+            or has_open_conversation_window(sender["id"], recipient["id"])):
+        raise HTTPException(
+            403,
+            "This recipient hasn't opted in to receive messages from this account, and "
+            "hasn't messaged first in the last 24 hours. Have them opt in via "
+            "POST /business/optin/{your_username}, or wait for them to message you first.",
+        )
 
     # Same deterministic-id DM lookup/creation as the interactive endpoint, so
     # this lands in the exact conversation the recipient already has (or would
@@ -1873,6 +1983,9 @@ def block_user(user_id: str, user: dict = Depends(current_user)):
         "INSERT OR IGNORE INTO blocks (blocker_id, blocked_id, created_at) VALUES (?, ?, ?)",
         (user["id"], user_id, time.time()),
     )
+    # A block is the strongest "this sender is unwanted" signal there is —
+    # feeds straight into the same reputation check a report does.
+    refresh_quality_flag(user_id)
     return {"blocked": True}
 
 
@@ -1941,7 +2054,59 @@ def submit_report(request: ReportRequest, user: dict = Depends(current_user)):
         (new_id("report"), user["id"], request.target_type, request.target_id,
          request.reason, request.details, time.time()),
     )
+    if request.target_type == "user":
+        refresh_quality_flag(request.target_id)
     return {"reported": True}
+
+
+# ── Business messaging consent ──────────────────────────────────────────────
+# The opt-in half of the mechanic bulk_send_message() enforces (see
+# has_business_optin / has_open_conversation_window above): a recipient
+# explicitly agreeing to receive business-initiated messages from a given
+# sender, independent of — and outlasting — any single 24-hour conversation
+# window. This is TalkEx's own version of a "click to message us on TalkEx"
+# opt-in widget/checkbox.
+
+@app.post("/business/optin/{sender_username}")
+def optin_to_business(sender_username: str, user: dict = Depends(current_user)):
+    sender_row = db.query_one("SELECT * FROM users WHERE lower(username) = ?",
+                               (sender_username.lower(),))
+    if sender_row is None:
+        raise HTTPException(404, "No such username")
+    if sender_row["id"] == user["id"]:
+        raise HTTPException(400, "Cannot opt in to your own messages")
+    db.execute(
+        "INSERT OR IGNORE INTO business_optins (sender_id, recipient_id, created_at) "
+        "VALUES (?, ?, ?)",
+        (sender_row["id"], user["id"], time.time()),
+    )
+    return {"opted_in": True, "sender": public_user(sender_row, viewer_id=user["id"])}
+
+
+@app.delete("/business/optin/{sender_username}")
+def optout_of_business(sender_username: str, user: dict = Depends(current_user)):
+    sender_row = db.query_one("SELECT id FROM users WHERE lower(username) = ?",
+                               (sender_username.lower(),))
+    if sender_row is None:
+        raise HTTPException(404, "No such username")
+    db.execute(
+        "DELETE FROM business_optins WHERE sender_id = ? AND recipient_id = ?",
+        (sender_row["id"], user["id"]),
+    )
+    return {"opted_in": False}
+
+
+@app.get("/business/optins")
+def list_business_optins(user: dict = Depends(current_user)):
+    """Businesses this account has opted in to receive messages from — the
+    Settings-screen list of who can message it cold, and the place each one
+    would be revoked from."""
+    rows = db.query_all(
+        "SELECT u.* FROM business_optins b JOIN users u ON u.id = b.sender_id "
+        "WHERE b.recipient_id = ? ORDER BY b.created_at DESC",
+        (user["id"],),
+    )
+    return [public_user(row, viewer_id=user["id"]) for row in rows]
 
 
 # ── Contacts ──────────────────────────────────────────────────────────────────
@@ -6038,6 +6203,42 @@ def admin_delete_user(user_id: str, admin: dict = Depends(require_superadmin)):
         raise HTTPException(404, "User not found")
     delete_user_account(user_id)
     return {"deleted": True}
+
+
+@app.post("/admin/users/{user_id}/verify-business")
+def admin_verify_business(user_id: str, admin: dict = Depends(require_superadmin)):
+    """
+    TalkEx's own Business Verification, mirroring Meta's for WhatsApp — a
+    badge an admin grants after checking the account is who it claims to be,
+    not something the account can flip on itself via PATCH /me.
+    """
+    changed = db.execute("UPDATE users SET is_business = 1 WHERE id = ?", (user_id,))
+    if changed.rowcount == 0:
+        raise HTTPException(404, "User not found")
+    return {"is_business": True}
+
+
+@app.post("/admin/users/{user_id}/unverify-business")
+def admin_unverify_business(user_id: str, admin: dict = Depends(require_superadmin)):
+    changed = db.execute("UPDATE users SET is_business = 0 WHERE id = ?", (user_id,))
+    if changed.rowcount == 0:
+        raise HTTPException(404, "User not found")
+    return {"is_business": False}
+
+
+@app.post("/admin/users/{user_id}/unflag-quality")
+def admin_unflag_quality(user_id: str, admin: dict = Depends(require_superadmin)):
+    """
+    Manually clears a sender_reputation_flagged() suspension before it would
+    otherwise age out on its own — the moderator override for a flag a
+    human has reviewed and judged unfounded (e.g. a competitor mass-reporting
+    a legitimate business), same purpose as admin_enable_user for a full
+    account disable.
+    """
+    changed = db.execute("UPDATE users SET quality_flagged_at = NULL WHERE id = ?", (user_id,))
+    if changed.rowcount == 0:
+        raise HTTPException(404, "User not found")
+    return {"unflagged": True}
 
 
 @app.get("/admin/integrations")

@@ -664,6 +664,26 @@ CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments (message_id);
 -- before that column is guaranteed to exist on a pre-existing database.
 
 
+-- Business messaging consent — the TalkEx-owned equivalent of WhatsApp
+-- Business API's opt-in + 24-hour customer-service-window mechanic.
+-- Without this, any api_keys holder could bulk-DM any registered user cold
+-- (see bulk_send_message in main.py) with nothing but a reactive block to
+-- stop them — the exact behaviour that tanks a WhatsApp number's quality
+-- rating, except TalkEx had no equivalent gate at all. An explicit row here
+-- means the recipient agreed (e.g. via a "message us on TalkEx" opt-in
+-- link) to receive business-initiated messages from that sender, and lasts
+-- until they revoke it — independent of any single 24-hour window, which is
+-- checked separately, against `messages`, at send time.
+CREATE TABLE IF NOT EXISTS business_optins (
+    sender_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    recipient_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at   REAL NOT NULL,
+    PRIMARY KEY (sender_id, recipient_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_business_optins_recipient ON business_optins (recipient_id);
+
+
 CREATE TABLE IF NOT EXISTS blocks (
     blocker_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     blocked_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -814,6 +834,12 @@ CREATE TABLE IF NOT EXISTS reports (
 
 CREATE INDEX IF NOT EXISTS idx_reports_created ON reports (created_at DESC);
 
+-- Looked up by (target_type='user', target_id=<sender>) in
+-- sender_reputation_flagged() to count reports against a bulk sender —
+-- without this the query falls back to a full table scan as the reports
+-- table grows.
+CREATE INDEX IF NOT EXISTS idx_reports_target ON reports (target_type, target_id);
+
 CREATE TABLE IF NOT EXISTS e2ee_one_time_keys (
     id      TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -939,6 +965,18 @@ COLUMNS_ADDED_LATER = [
     # The private keys NEVER leave the client device.
     ("users", "e2ee_identity_key", "TEXT NOT NULL DEFAULT ''"),
     ("users", "e2ee_signed_pre_key", "TEXT NOT NULL DEFAULT ''"),
+    # TalkEx's equivalent of WhatsApp Business Verification — a badge shown
+    # on the profile, set by an admin/onboarding flow rather than the user
+    # themselves (see toggle_business_verification in main.py), not
+    # something a PATCH /me caller can flip on their own account.
+    ("users", "is_business", "INTEGER NOT NULL DEFAULT 0"),
+    ("users", "business_category", "TEXT NOT NULL DEFAULT ''"),
+    # Set by sender_reputation_flagged()'s caller when a bulk sender crosses
+    # ABUSE_SIGNAL_THRESHOLD blocks/reports in the trailing window — TalkEx's
+    # stand-in for a WhatsApp number's quality rating dropping to Red.
+    # Recorded (not just computed on the fly) so it survives past the
+    # reputation window and shows up for a moderator, same as `disabled_at`.
+    ("users", "quality_flagged_at", "REAL"),
 ]
 
 
