@@ -121,21 +121,24 @@ app = FastAPI(title="TalkEx API", version="2.0.0", lifespan=lifespan)
 # Browsers reject that combination outright, and where it is honoured it lets
 # any site on the internet call the API with the user's credentials. Origins are
 # now listed explicitly.
-# https://localhost / capacitor://localhost are the origins the Android app
-# (Capacitor's androidScheme: "https") sends its requests from — without them
-# the packaged app's fetch() calls are rejected by CORS while the same code
-# works fine from a real browser tab.
-DEFAULT_DEV_ORIGINS = (
-    "http://localhost:3000,http://localhost:3020,http://127.0.0.1:3020,"
-    "https://talkex.coreaxis.cloud,"
-    "https://localhost,capacitor://localhost,http://localhost"
-)
+DEFAULT_DEV_ORIGINS = "http://localhost:3000,http://localhost:3020,http://127.0.0.1:3020"
 
-ALLOWED_ORIGINS = [
-    origin.strip()
-    for origin in os.environ.get("CORS_ALLOWED_ORIGINS", DEFAULT_DEV_ORIGINS).split(",")
-    if origin.strip()
-]
+# https://localhost / capacitor://localhost / http://localhost are the origins
+# the packaged Android app (Capacitor's androidScheme: "https") sends its
+# requests from. They're merged in unconditionally — not just left in the
+# default — so that setting CORS_ALLOWED_ORIGINS on Render (e.g. to the
+# Hostinger domain) can't accidentally drop them and break login from the APK
+# while the same code keeps working fine from a browser tab.
+CAPACITOR_ORIGINS = ["https://localhost", "capacitor://localhost", "http://localhost"]
+
+ALLOWED_ORIGINS = list(dict.fromkeys(
+    [
+        origin.strip()
+        for origin in os.environ.get("CORS_ALLOWED_ORIGINS", DEFAULT_DEV_ORIGINS).split(",")
+        if origin.strip()
+    ]
+    + CAPACITOR_ORIGINS
+))
 
 app.add_middleware(
     CORSMiddleware,
