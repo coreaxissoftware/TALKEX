@@ -339,7 +339,9 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
               }}>{I.camera("#fff", 13)}</div>
             </div>
             <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 19, fontWeight: 700 }}>{me.name}</div>
+              <div style={{ fontSize: 19, fontWeight: 700, display: "flex", alignItems: "center", gap: 5 }}>
+                {me.name} {me.blue_tick && I.blueTick(16)}
+              </div>
               <div onClick={() => setEditingUsername(true)}
                    style={{ fontSize: 13, color: G.sub, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 4 }}>
                 @{me.username} {I.edit(G.muted, 12)}

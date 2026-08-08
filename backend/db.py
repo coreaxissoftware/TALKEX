@@ -977,6 +977,12 @@ COLUMNS_ADDED_LATER = [
     # Recorded (not just computed on the fly) so it survives past the
     # reputation window and shows up for a moderator, same as `disabled_at`.
     ("users", "quality_flagged_at", "REAL"),
+    # TalkEx's activity-earned blue tick: NULL until this account has sent at
+    # least one message in BLUE_TICK_TARGET distinct DMs, set once by
+    # maybe_award_blue_tick() (see main.py) and never cleared again — same
+    # "recorded, not recomputed on every read" shape as quality_flagged_at
+    # above, so the badge doesn't flicker off if a DM is later deleted.
+    ("users", "blue_tick_awarded_at", "REAL"),
 ]
 
 

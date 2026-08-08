@@ -247,6 +247,9 @@ export const Me = {
   createWebhook: (url) => post("/me/webhooks", { url }),
   deleteWebhook: (webhookId) => remove(`/me/webhooks/${webhookId}`),
 
+  // Progress toward the activity-earned blue tick — { chatted_with, target, earned }.
+  blueTickProgress: () => get("/me/blue-tick-progress"),
+
   // Saved quick-reply snippets for the composer picker.
   cannedReplies: () => get("/me/canned-replies"),
   createCannedReply: (label, text) => post("/me/canned-replies", { label, text }),

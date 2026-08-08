@@ -546,12 +546,28 @@ export const EMOJIS = [
   "😍", "😊", "😅", "🤔", "😎", "🥳", "😴", "🤯",
   "👏", "🙌", "💯", "✅", "❌", "👀", "💔", "😡",
   "🤝", "🎂", "☕", "😭", "🤣", "😘", "🫡", "🚀",
+  "🥹", "🫶", "🫠", "🩷", "🩵", "🤌", "🫰", "🥸",
 ];
 
 // The composer's full picker, one tier up from EMOJIS above: grouped into
 // tabs the way WhatsApp/Telegram do, plus a name so a text search can find
 // "fire" without the person knowing which category it lives in.
 export const EMOJI_GROUPS = [
+  // A dedicated first tab for the newest Unicode additions (14.0–15.1,
+  // 2022-2023) — faces, gestures, hearts and objects that didn't exist in
+  // most emoji pickers until recently. Called out as its own tab rather than
+  // only folded into the older categories below so it's obvious at a glance
+  // that these are here, not just quietly present somewhere in Smileys.
+  { label: "New", icon: "🆕", items: [
+    ["🫠", "melting face"], ["🫢", "hand over mouth"], ["🫣", "peeking eye"],
+    ["🫡", "salute"], ["🫤", "diagonal mouth"], ["🥹", "holding back tears"],
+    ["🫶", "heart hands"], ["🫰", "money finger snap"], ["🩷", "pink heart"],
+    ["🩵", "light blue heart"], ["🩶", "grey heart"], ["🫀", "anatomical heart"],
+    ["🫁", "lungs"], ["🪷", "lotus"], ["🫧", "bubbles"], ["🪺", "nest eggs"],
+    ["🫙", "jar"], ["🪸", "coral"], ["🫘", "beans"], ["🫗", "pouring liquid"],
+    ["🛞", "wheel"], ["🪫", "low battery"], ["🩻", "x-ray"], ["🫥", "dotted face"],
+    ["🫱", "hand right"], ["🫲", "hand left"], ["🫳", "palm down"], ["🫴", "palm up"],
+  ]},
   { label: "Smileys", icon: "😀", items: [
     ["😀", "grinning"], ["😃", "smile"], ["😄", "happy"], ["😁", "grin"], ["😆", "laugh"],
     ["😅", "sweat smile"], ["🤣", "rofl"], ["😂", "joy tears"], ["🙂", "slight smile"],
@@ -567,6 +583,7 @@ export const EMOJI_GROUPS = [
     ["😨", "fearful"], ["😰", "anxious"], ["😥", "disappointed"], ["😓", "sweat"],
     ["🤢", "nauseous"], ["🤮", "vomit"], ["🥴", "woozy"], ["😵", "dizzy"], ["🤐", "zip mouth"],
     ["🥲", "smile tear"], ["😑", "expressionless"], ["😐", "neutral"], ["😶", "no mouth"],
+    ["🫠", "melting face"], ["🫤", "diagonal mouth"], ["🥹", "holding back tears"],
   ]},
   { label: "Gestures", icon: "👍", items: [
     ["👍", "thumbs up"], ["👎", "thumbs down"], ["👌", "ok"], ["🤌", "pinched"],
@@ -576,11 +593,13 @@ export const EMOJI_GROUPS = [
     ["✊", "fist"], ["👆", "point up"], ["👇", "point down"], ["👈", "point left"],
     ["👉", "point right"], ["☝️", "index up"], ["🖐️", "hand raised"], ["🤚", "back hand"],
     ["✋", "stop hand"], ["🖖", "vulcan"], ["👀", "eyes look"], ["🧠", "brain"],
+    ["🫶", "heart hands"], ["🫡", "salute"], ["🫰", "money finger snap"],
   ]},
   { label: "Hearts", icon: "❤️", items: [
     ["❤️", "red heart love"], ["🧡", "orange heart"], ["💛", "yellow heart"],
     ["💚", "green heart"], ["💙", "blue heart"], ["💜", "purple heart"], ["🖤", "black heart"],
-    ["🤍", "white heart"], ["🤎", "brown heart"], ["💔", "broken heart"], ["❣️", "heart exclaim"],
+    ["🤍", "white heart"], ["🤎", "brown heart"], ["🩷", "pink heart"], ["🩵", "light blue heart"],
+    ["🩶", "grey heart"], ["💔", "broken heart"], ["❣️", "heart exclaim"],
     ["💕", "two hearts"], ["💞", "revolving hearts"], ["💓", "beating heart"],
     ["💗", "growing heart"], ["💖", "sparkling heart"], ["💘", "cupid arrow"],
     ["💝", "gift heart"], ["💯", "hundred points"], ["🔥", "fire lit"], ["✨", "sparkles"],
@@ -648,7 +667,20 @@ export const I = {
     <circle cx="12" cy="12" r="9.5" stroke={c} strokeWidth="2" strokeDasharray="4.2 3.4" strokeLinecap="round"/>
     <circle cx="12" cy="12" r="4.5" fill={c}/>
   </svg>,
-  send: (c = "#fff", s = 18) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2.5" strokeLinecap="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>,
+  // TalkEx's own send glyph — a solid, faceted paper dart rather than the
+  // stock outline icon this replaced. The old version was fill="none" with
+  // only a thin 2.5px stroke tracing a concave polygon; at the 18px it's
+  // actually rendered on a phone WebView that hairline anti-aliases down to
+  // nearly nothing, which is why it was reported as "missing" on device even
+  // though desktop Chrome rendered it fine. Solid fill removes that failure
+  // mode outright. The two overlapping facets (full-opacity top half, dimmer
+  // underside) are the same layered-shading trick `chat` above uses — it's
+  // what makes this read as TalkEx's icon set rather than a generic
+  // send-arrow dropped in from an icon library.
+  send: (c = "#fff", s = 18) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none">
+    <polygon points="22,2 15,22 11,13 2,9" fill={c}/>
+    <polygon points="22,2 11,13 2,9" fill={c} fillOpacity="0.5"/>
+  </svg>,
   back: (c = G.accent, s = 24) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2.5" strokeLinecap="round"><polyline points="15 18 9 12 15 6"/></svg>,
   edit: (c = G.muted, s = 16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>,
   trash: (c = G.red, s = 16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>,
@@ -668,6 +700,14 @@ export const I = {
   fwd: (c = G.sub, s = 16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round"><polyline points="15 10 20 15 15 20"/><path d="M4 4v7a4 4 0 0 0 4 4h12"/></svg>,
   reply: (c = G.sub, s = 16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round"><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg>,
   verified: (c = G.accent, s = 14) => <svg width={s} height={s} viewBox="0 0 24 24" fill={c}><path d="M9 12l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>,
+  // The activity-earned blue tick (see BLUE_TICK_TARGET in main.py) — a
+  // fixed brand blue rather than `verified`'s theme-accent color on purpose.
+  // `verified` already means something else here (a chat/channel's own
+  // is_verified), and it tracks whatever accent color the viewer picked, so
+  // it can render in green, pink, anything — this badge needs to read as
+  // "the blue tick" specifically, in every theme, the way it does on every
+  // other platform that has one.
+  blueTick: (s = 14) => <svg width={s} height={s} viewBox="0 0 24 24" fill="#1d9bf0"><path d="M9 12l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>,
   check: (c = G.accent, s = 14) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>,
   checkDouble: (c = G.accent, s = 15) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 7 17l-5-5"/><path d="M22 6 12.5 15.5"/></svg>,
   doc: (c = G.accent, s = 28) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>,

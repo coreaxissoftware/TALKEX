@@ -70,6 +70,15 @@ export default function App() {
   const [theme, setThemeState] = useState(getStoredTheme);
   const [accent, setAccentState] = useState(getStoredAccent);
 
+  // The "chat with N people to earn the blue tick" nudge — { chatted_with,
+  // target } while still working toward it, cleared (never re-fetched) once
+  // me.blue_tick is true. Deliberately component state, not persisted to
+  // localStorage: the ask was "every time the app opens, until earned",
+  // and a fresh mount is exactly what "the app opens" means here — a
+  // dismiss should not suppress it forever, only until the next open.
+  const [blueTickNudge, setBlueTickNudge] = useState(null);
+  const [blueTickCelebrate, setBlueTickCelebrate] = useState(false);
+
   // Chats unlocked with a PIN this session. Deliberately not persisted — the
   // whole point of a lock is that it re-engages the next time the app is
   // actually reopened, not just the next time this component re-renders.
@@ -372,6 +381,17 @@ export default function App() {
       toast(`A scheduled message was not sent: ${event.error}`);
     }
 
+    // Pushed once, the instant maybe_award_blue_tick's DM-count check
+    // crosses BLUE_TICK_TARGET server-side — updates the badge everywhere
+    // it's shown (profile, chat headers) without waiting for the next GET
+    // /me, and swaps the ongoing "N/10" nudge for a one-time celebration
+    // instead of it just quietly disappearing.
+    if (event.type === "blue_tick_awarded") {
+      setMe((current) => (current ? { ...current, blue_tick: true } : current));
+      setBlueTickNudge(null);
+      setBlueTickCelebrate(true);
+    }
+
     // Anything that changes what Planner's badge is counting.
     if ([
       "meeting_created", "meeting_updated", "meeting_cancelled", "meeting_started",
@@ -406,6 +426,24 @@ export default function App() {
   useEffect(() => {
     if (realtime.status === "unauthorized") setMe(null);
   }, [realtime.status]);
+
+  // The blue-tick nudge, checked once per app open — keyed on me?.id rather
+  // than the whole `me` object so a profile edit elsewhere doesn't re-fire
+  // this. Skipped entirely once me.blue_tick is true, so an account that
+  // already has the badge never makes this call at all. appLocked/
+  // reactivatePending are excluded on purpose: this only needs to run once
+  // the person is actually looking at their chats, not while still staring
+  // at a PIN screen.
+  useEffect(() => {
+    if (!me || me.blue_tick || appLocked || reactivatePending) return;
+    let cancelled = false;
+    Me.blueTickProgress().then((progress) => {
+      if (cancelled || progress.earned) return;
+      setBlueTickNudge(progress);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [me?.id, me?.blue_tick, appLocked, reactivatePending]);
 
   // Anything queued while offline goes out as soon as the tab is visible
   // again — flushEverything covers the plain-text Outbox, queued
@@ -677,7 +715,112 @@ export default function App() {
                          onOpenChat={(chat) => { setDiscoverOpen(false); setOpenChat(chat); }}
                          onChanged={reloadChats} toast={toast}/>
       )}
+      {blueTickNudge && (
+        <BlueTickNudge progress={blueTickNudge} onClose={() => setBlueTickNudge(null)}
+                       onStartChat={() => { setBlueTickNudge(null); setDiscoverOpen(true); }}/>
+      )}
+      {blueTickCelebrate && (
+        <BlueTickCelebrate onClose={() => setBlueTickCelebrate(false)}/>
+      )}
     </Screen>
+  );
+}
+
+/**
+ * The "chat with N people to earn the blue tick" nudge — shown once per app
+ * open (see the fetch effect in App) for as long as the account hasn't
+ * earned it yet. A bottom sheet, not a hard blocking dialog: dismissible
+ * with a tap outside or "Maybe later", because this is a nudge toward a
+ * badge, not something that should ever stop someone from reading a chat.
+ */
+function BlueTickNudge({ progress, onClose, onStartChat }) {
+  const remaining = Math.max(0, progress.target - progress.chatted_with);
+  const pct = Math.min(100, Math.round((progress.chatted_with / progress.target) * 100));
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "#000000aa", zIndex: 60,
+      display: "flex", alignItems: "flex-end", justifyContent: "center",
+    }}>
+      <div onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" style={{
+        width: "100%", maxWidth: 430, background: G.surface, padding: 24,
+        borderTopLeftRadius: 22, borderTopRightRadius: 22,
+        border: `1px solid ${G.border}`, textAlign: "center",
+      }}>
+        <div style={{
+          width: 56, height: 56, borderRadius: "50%", background: "#1d9bf022",
+          display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px",
+        }}>
+          {I.blueTick(30)}
+        </div>
+        <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 6 }}>Get the TalkEx Blue Tick</div>
+        <div style={{ fontSize: 13.5, color: G.sub, marginBottom: 18, lineHeight: 1.5 }}>
+          Chat with {progress.target} different people on TalkEx and a blue tick badge
+          is added to your profile automatically — {remaining > 0
+            ? `just ${remaining} more to go.`
+            : "almost there!"}
+        </div>
+
+        <div style={{
+          height: 8, borderRadius: 4, background: G.dim, overflow: "hidden", marginBottom: 8,
+        }}>
+          <div style={{
+            height: "100%", width: `${pct}%`, borderRadius: 4,
+            background: "linear-gradient(90deg,#1d9bf0,#0d7bc4)", transition: "width .3s ease",
+          }}/>
+        </div>
+        <div style={{ fontSize: 12, color: G.muted, marginBottom: 20 }}>
+          {progress.chatted_with} of {progress.target} people
+        </div>
+
+        <Button onClick={onStartChat} style={{ width: "100%", marginBottom: 8 }}>
+          Start a new chat
+        </Button>
+        <Button variant="ghost" onClick={onClose} style={{ width: "100%" }}>
+          Maybe later
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The one-time congratulations moment when maybe_award_blue_tick's realtime
+ * push lands — see the "blue_tick_awarded" case in onEvent. Auto-dismisses
+ * so it doesn't linger over whatever the person was doing (they were mid
+ * DM-send when this fired), but stays closable immediately too.
+ */
+function BlueTickCelebrate({ onClose }) {
+  useEffect(() => {
+    const timer = setTimeout(onClose, 6000);
+    return () => clearTimeout(timer);
+  }, [onClose]);
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "#000000aa", zIndex: 60,
+      display: "flex", alignItems: "flex-end", justifyContent: "center",
+    }}>
+      <div onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" style={{
+        width: "100%", maxWidth: 430, background: G.surface, padding: 24,
+        borderTopLeftRadius: 22, borderTopRightRadius: 22,
+        border: `1px solid ${G.border}`, textAlign: "center",
+      }}>
+        <div style={{
+          width: 64, height: 64, borderRadius: "50%", background: "#1d9bf022",
+          display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px",
+        }}>
+          {I.blueTick(36)}
+        </div>
+        <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>
+          🎉 You earned the blue tick!
+        </div>
+        <div style={{ fontSize: 13.5, color: G.sub, marginBottom: 20, lineHeight: 1.5 }}>
+          Your profile now shows a blue tick badge — thanks for being active on TalkEx.
+        </div>
+        <Button onClick={onClose} style={{ width: "100%" }}>Nice!</Button>
+      </div>
+    </div>
   );
 }
 

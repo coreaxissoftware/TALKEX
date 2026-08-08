@@ -1319,8 +1319,12 @@ function Header({ chat, typing, onBack, onTimer, onMeeting, onInfo, onVoiceCall,
         <Av av={chat.avatar_letter} color={chat.color} size={38} photoId={chat.avatar_attachment_id}
             online={chat.peer_online}/>
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 15, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-            {chat.name || "Direct message"}
+          <div style={{
+            fontSize: 15, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden",
+            textOverflow: "ellipsis", display: "flex", alignItems: "center", gap: 4,
+          }}>
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{chat.name || "Direct message"}</span>
+            {chat.peer_blue_tick && <span style={{ flexShrink: 0 }}>{I.blueTick(14)}</span>}
           </div>
           <div style={{
             fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
@@ -1384,7 +1388,16 @@ function EmojiPicker({ onPick, onClose }) {
     <div onClick={(e) => e.stopPropagation()} style={{
       position: "absolute", bottom: "100%", left: 12, right: 12, marginBottom: 4,
       background: G.surface, border: `1px solid ${G.border}`, borderRadius: 14,
-      boxShadow: `0 4px 16px ${G.border}`, overflow: "hidden", height: 280, display: "flex", flexDirection: "column",
+      // Capped to the smaller of a fixed height or 60% of the viewport, not
+      // a flat 280px — on a phone with the on-screen keyboard still up
+      // (exactly when someone taps this, mid-message), 280px can be taller
+      // than the space actually left above the composer and push its own
+      // top off-screen, which is what "the picker doesn't work" looks like
+      // in practice even though the tap handlers themselves were fine.
+      // z-index makes sure nothing else in the composer row can ever paint
+      // over it, which position/DOM-order alone doesn't guarantee.
+      boxShadow: `0 4px 16px ${G.border}`, overflow: "hidden",
+      height: "min(280px, 60vh)", display: "flex", flexDirection: "column", zIndex: 20,
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 10px", borderBottom: `1px solid ${G.border}` }}>
         <input value={query} onChange={(e) => setQuery(e.target.value)}
@@ -1392,29 +1405,39 @@ function EmojiPicker({ onPick, onClose }) {
                  flex: 1, border: "none", outline: "none", background: G.dim,
                  borderRadius: 8, padding: "6px 10px", fontSize: 12.5, color: G.text,
                }}/>
-        <div onClick={onClose} style={{ cursor: "pointer", fontSize: 16, color: G.muted }}>×</div>
+        <button type="button" onClick={onClose} style={{
+          cursor: "pointer", fontSize: 18, color: G.muted, background: "none", border: "none",
+          padding: 4, lineHeight: 1,
+        }}>×</button>
       </div>
 
       {!query.trim() && (
         <div style={{ display: "flex", overflowX: "auto", borderBottom: `1px solid ${G.border}` }}>
           {EMOJI_GROUPS.map((g, i) => (
-            <div key={g.label} onClick={() => setTab(i)} style={{
+            <button key={g.label} type="button" onClick={() => setTab(i)} style={{
               padding: "6px 10px", fontSize: 16, cursor: "pointer", flexShrink: 0,
-              background: tab === i ? G.accentSoft : "transparent",
+              background: tab === i ? G.accentSoft : "transparent", border: "none",
               borderBottom: tab === i ? `2px solid ${G.accent}` : "2px solid transparent",
-            }}>{g.icon}</div>
+            }}>{g.icon}</button>
           ))}
         </div>
       )}
 
+      {/* Real <button> tap targets, not <div onClick> — buttons get Android
+          WebView's native touch/active-state handling for free, where a
+          bare div can occasionally eat the tap if it lands a pixel outside
+          its hit box. The gap went from 2px (icons were nearly touching,
+          easy to fat-finger the wrong one) to 6px with real padding, so
+          each emoji has a properly sized, separated touch target. */}
       <div style={{
-        flex: 1, overflowY: "auto", padding: 8, display: "grid",
-        gridTemplateColumns: "repeat(7, 1fr)", gap: 2,
+        flex: 1, overflowY: "auto", overscrollBehavior: "contain", padding: 8, display: "grid",
+        gridTemplateColumns: "repeat(7, 1fr)", gap: 6,
       }}>
         {filtered.map(([emoji, name]) => (
-          <div key={emoji} onClick={() => onPick(emoji)} title={name} style={{
-            fontSize: 22, textAlign: "center", padding: "4px 0", cursor: "pointer", borderRadius: 8,
-          }}>{emoji}</div>
+          <button key={emoji} type="button" onClick={() => onPick(emoji)} title={name} style={{
+            fontSize: 22, textAlign: "center", padding: "6px 0", cursor: "pointer", borderRadius: 8,
+            background: "none", border: "none", lineHeight: 1.3,
+          }}>{emoji}</button>
         ))}
         {filtered.length === 0 && (
           <div style={{ gridColumn: "1 / -1", fontSize: 12.5, color: G.muted, textAlign: "center", padding: 16 }}>
@@ -3732,7 +3755,9 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
         <Av av={chat.avatar_letter} color={chat.color} size={52} photoId={chat.avatar_attachment_id}/>
         <div>
-          <div style={{ fontSize: 16, fontWeight: 700 }}>{chat.name || "Direct message"}</div>
+          <div style={{ fontSize: 16, fontWeight: 700, display: "flex", alignItems: "center", gap: 5 }}>
+            {chat.name || "Direct message"} {chat.peer_blue_tick && I.blueTick(14)}
+          </div>
           {isDm && peerProfile?.phone
             ? <div style={{ fontSize: 12.5, color: G.muted }}>{peerProfile.phone}</div>
             : <div style={{ fontSize: 12.5, color: G.muted, textTransform: "capitalize" }}>{chat.type}</div>}
@@ -4402,13 +4427,23 @@ export function LockSheet({ chatId, mode, onClose, onDone, toast }) {
 
 function AddMembersSheet({ chatId, existingIds, onClose, onAdded }) {
   const [people, setPeople] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [query, setQuery] = useState("");
+  const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState([]);
   const [busy, setBusy] = useState(false);
 
+  // GET /users no longer hands back the whole directory for an empty/1-char
+  // query (see list_users in main.py) — it's a real name/username search
+  // now, not a dump, so this needs a search box the same way Discover's
+  // people tab does, rather than fetching once on mount.
   useEffect(() => {
-    Users.list().then(setPeople).catch(() => {}).finally(() => setLoading(false));
-  }, []);
+    if (query.trim().length < 2) { setPeople([]); return; }
+    let cancelled = false;
+    setLoading(true);
+    Users.list(query).then((result) => { if (!cancelled) setPeople(result); })
+      .catch(() => {}).finally(() => !cancelled && setLoading(false));
+    return () => { cancelled = true; };
+  }, [query]);
 
   const candidates = people.filter((person) => !existingIds.includes(person.id));
 
@@ -4430,9 +4465,14 @@ function AddMembersSheet({ chatId, existingIds, onClose, onAdded }) {
 
   return (
     <Sheet title="Add members" onClose={onClose}>
+      <Field value={query} onChange={(event) => setQuery(event.target.value)}
+             placeholder="Search by name or username…" style={{ marginBottom: 12 }} autoFocus/>
       {loading ? <Spinner small/> : (
         <div style={{ maxHeight: 320, overflowY: "auto", marginBottom: 14 }}>
-          {candidates.length === 0 && (
+          {!query.trim() && (
+            <div style={{ fontSize: 13, color: G.muted }}>Search for people to add.</div>
+          )}
+          {query.trim() && candidates.length === 0 && (
             <div style={{ fontSize: 13, color: G.muted }}>Everyone found is already in this chat.</div>
           )}
           {candidates.map((person) => (

@@ -134,6 +134,18 @@ export default function Discover({ onOpenChat, onChanged, toast }) {
         </div>
       )}
 
+      {!loading && tab === "people" && !query.trim() && (
+        <div style={{ padding: 30, textAlign: "center", color: G.muted, fontSize: 13.5 }}>
+          Search by name or username to find people on TalkEx.
+        </div>
+      )}
+
+      {!loading && tab === "people" && query.trim().length === 1 && (
+        <div style={{ padding: 30, textAlign: "center", color: G.muted, fontSize: 13.5 }}>
+          Keep typing…
+        </div>
+      )}
+
       {!loading && tab === "people" && people.map((person) => (
         <div key={person.id} onClick={() => startDm(person)}
           style={{
@@ -142,7 +154,9 @@ export default function Discover({ onOpenChat, onChanged, toast }) {
           }}>
           <Av av={person.avatar_letter} color={person.color} size={44} online={person.online} photoId={person.avatar_attachment_id}/>
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 15, fontWeight: 600 }}>{person.name}</div>
+            <div style={{ fontSize: 15, fontWeight: 600, display: "flex", alignItems: "center", gap: 5 }}>
+              {person.name} {person.blue_tick && I.blueTick(13)}
+            </div>
             <div style={{ fontSize: 12.5, color: G.muted }}>
               @{person.username}{person.bio ? ` · ${person.bio}` : ""}
             </div>

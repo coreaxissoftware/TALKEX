@@ -237,6 +237,10 @@ def public_user(row, viewer_id: str | None = None) -> dict:
     user.pop("two_step_pin_hash", None)
     user.pop("two_step_recovery_codes", None)
     user["online"] = hub.is_online(user["id"])
+    # A badge, not a credential — shown to every viewer the same way
+    # is_verified already is on a chat, so it's exposed as a plain bool here
+    # rather than only surfacing on GET /me the way quality_flagged_at does.
+    user["blue_tick"] = bool(user.pop("blue_tick_awarded_at", None))
     if not user.get("show_last_seen"):
         user["last_seen"] = None
     if viewer_id is not None and viewer_id != user["id"] and not user.get("show_phone_number", 1):
@@ -400,6 +404,15 @@ BUSINESS_WINDOW_SECONDS = 24 * 3600
 # moderator to notice the /report queue before real damage is done.
 REPUTATION_WINDOW_SECONDS = 7 * 24 * 3600
 ABUSE_SIGNAL_THRESHOLD = 5
+
+# Activity-earned blue tick: send at least one message in this many distinct
+# DMs and the badge is awarded automatically, no admin involved — unlike
+# is_business (admin-granted) or a chat's own is_verified. Deliberately
+# "distinct DMs I've sent INTO", not "distinct DMs I'm a member of" — a DM
+# that only ever received messages from the other side shouldn't count
+# toward "chatted with", and it's not group members either, so mass-adding
+# someone to groups can't farm it.
+BLUE_TICK_TARGET = 10
 
 # Keyed by reporter — reporting is a rare, deliberate action; this only
 # exists to stop a script from flooding the queue, not to limit a genuine
@@ -1631,6 +1644,49 @@ def refresh_quality_flag(target_id: str) -> None:
                    (time.time(), target_id))
 
 
+def distinct_dm_partners_messaged(user_id: str) -> int:
+    """
+    How many different people `user_id` has sent at least one DM message to.
+    Counts distinct chat_id, not distinct peer id, but for a 'dm' chat those
+    are equivalent — TalkEx gives every pair of users exactly one
+    deterministic dm_<low>_<high> chat id (see fan_out_broadcast, create_dm),
+    so there is no way for the same peer to have two DM chats to double-count,
+    and no way for one DM chat to have more than one peer to undercount.
+    """
+    return db.query_one(
+        """
+        SELECT COUNT(DISTINCT m.chat_id) AS n
+        FROM messages AS m
+        JOIN chats AS c ON c.id = m.chat_id
+        WHERE m.sender_id = ? AND c.type = 'dm'
+        """,
+        (user_id,),
+    )["n"]
+
+
+def maybe_award_blue_tick(user_id: str) -> bool:
+    """
+    Called after every DM send. Cheap to call on the hot path even though it
+    re-aggregates messages each time (unlike refresh_quality_flag, which is
+    only called from the rarer block/report actions): once
+    blue_tick_awarded_at is set this returns false immediately without
+    touching the messages table at all, so the aggregate query only ever
+    runs for accounts still working toward the badge — and BLUE_TICK_TARGET
+    is small enough that even that query is a non-issue.
+
+    Returns True the moment the badge is newly awarded (not on later calls,
+    and not if it was already earned before this call) — the one signal the
+    caller needs to push a celebratory realtime event.
+    """
+    row = db.query_one("SELECT blue_tick_awarded_at FROM users WHERE id = ?", (user_id,))
+    if row is None or row["blue_tick_awarded_at"]:
+        return False
+    if distinct_dm_partners_messaged(user_id) < BLUE_TICK_TARGET:
+        return False
+    db.execute("UPDATE users SET blue_tick_awarded_at = ? WHERE id = ?", (time.time(), user_id))
+    return True
+
+
 def has_business_optin(sender_id: str, recipient_id: str) -> bool:
     """Whether the recipient has an on-file opt-in for this specific sender —
     see the business_optins table comment in db.py for the full mechanic."""
@@ -1747,6 +1803,24 @@ async def bulk_send_message(request: BulkSendRequest, sender: dict = Depends(req
 @app.get("/me")
 def get_me(user: dict = Depends(current_user)):
     return public_user(user)
+
+
+@app.get("/me/blue-tick-progress")
+def blue_tick_progress(user: dict = Depends(current_user)):
+    """
+    Powers the "chat with N people to earn the blue tick" nudge the client
+    shows on every app open until the badge is earned. `earned` mirrors
+    public_user's blue_tick field (same underlying column) so the client can
+    trust this one response instead of cross-referencing GET /me too.
+    """
+    if user.get("blue_tick_awarded_at"):
+        return {"chatted_with": BLUE_TICK_TARGET, "target": BLUE_TICK_TARGET, "earned": True}
+    chatted_with = distinct_dm_partners_messaged(user["id"])
+    return {
+        "chatted_with": min(chatted_with, BLUE_TICK_TARGET),
+        "target": BLUE_TICK_TARGET,
+        "earned": chatted_with >= BLUE_TICK_TARGET,
+    }
 
 
 @app.patch("/me")
@@ -1951,7 +2025,18 @@ def list_users(q: str = Query(default="", max_length=64),
                offset: int = Query(default=0, ge=0),
                user: dict = Depends(current_user)):
     """Directory search. Excludes yourself, anyone who has blocked you, and
-    anyone who has deactivated their account."""
+    anyone who has deactivated their account.
+
+    A blank (or single-character) q used to mean "match everything" — LIKE
+    '%%' — so opening New Chat with nothing typed yet handed back the
+    entire user base of the app, not just the people this account actually
+    knows. Every other directory-style surface here (Contacts) is scoped to
+    what the account chose to add; this is the one place that wasn't. Two
+    characters is the same floor ChatSearchBar already uses for in-chat
+    search, so the UX is consistent app-wide, not a new number invented here.
+    """
+    if len(q.strip()) < 2:
+        return []
     like = f"%{q.lower()}%"
     rows = db.query_all(
         """
@@ -2384,7 +2469,7 @@ def list_chats(user: dict = Depends(current_user),
         for row in db.query_all(
             f"""
             SELECT cm.chat_id, u.id AS peer_id, u.name, u.color, u.avatar_letter,
-                   u.avatar_attachment_id, u.last_seen, u.show_last_seen
+                   u.avatar_attachment_id, u.last_seen, u.show_last_seen, u.blue_tick_awarded_at
             FROM chat_members AS cm
             JOIN chats AS c ON c.id = cm.chat_id AND c.type = 'dm'
             JOIN users AS u ON u.id = cm.user_id
@@ -2415,6 +2500,7 @@ def list_chats(user: dict = Depends(current_user),
             chat["avatar_attachment_id"] = peer["avatar_attachment_id"]
             chat["peer_id"] = peer["peer_id"]
             chat["peer_online"] = hub.is_online(peer["peer_id"])
+            chat["peer_blue_tick"] = bool(peer["blue_tick_awarded_at"])
             # Same privacy gate public_user() already applies elsewhere —
             # withholding the timestamp for someone who turned last-seen
             # off has to actually happen here too, not just when their
@@ -2458,6 +2544,7 @@ def get_chat(chat_id: str, user: dict = Depends(current_user)):
             chat["avatar_attachment_id"] = peer["avatar_attachment_id"]
             chat["peer_id"] = peer_id
             chat["peer_online"] = hub.is_online(peer_id)
+            chat["peer_blue_tick"] = bool(peer["blue_tick_awarded_at"])
 
     return chat
 
@@ -3457,6 +3544,15 @@ async def send_message(
 
         if chat["type"] == "dm":
             await maybe_send_away_reply(background_tasks, request.chat_id, user["id"])
+            # Checked on every DM send rather than only at account
+            # milestones — see maybe_award_blue_tick's own docstring for why
+            # that's cheap. A realtime push (not just "the client will
+            # notice next time it refetches /me") is what lets the app show
+            # the congratulations moment right as it happens, the same way a
+            # reaction or a typing indicator arrives live rather than on
+            # next reload.
+            if maybe_award_blue_tick(user["id"]):
+                await hub.send_to_user(user["id"], {"type": "blue_tick_awarded"})
 
         if chat["type"] == "broadcast":
             await fan_out_broadcast(chat, user, request.text, request.kind, payload)
