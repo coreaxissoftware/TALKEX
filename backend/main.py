@@ -121,7 +121,15 @@ app = FastAPI(title="TalkEx API", version="2.0.0", lifespan=lifespan)
 # Browsers reject that combination outright, and where it is honoured it lets
 # any site on the internet call the API with the user's credentials. Origins are
 # now listed explicitly.
-DEFAULT_DEV_ORIGINS = "http://localhost:3000,http://localhost:3020,http://127.0.0.1:3020"
+# https://localhost / capacitor://localhost are the origins the Android app
+# (Capacitor's androidScheme: "https") sends its requests from — without them
+# the packaged app's fetch() calls are rejected by CORS while the same code
+# works fine from a real browser tab.
+DEFAULT_DEV_ORIGINS = (
+    "http://localhost:3000,http://localhost:3020,http://127.0.0.1:3020,"
+    "https://talkex.coreaxis.cloud,"
+    "https://localhost,capacitor://localhost,http://localhost"
+)
 
 ALLOWED_ORIGINS = [
     origin.strip()
