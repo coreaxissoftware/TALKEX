@@ -824,6 +824,7 @@ function ChatRow({ chat, typing, onOpen, onPin, onArchive, onClear, onDelete, on
               fontSize: 14, fontWeight: 600, whiteSpace: "nowrap",
               overflow: "hidden", textOverflow: "ellipsis",
             }}>{displayName(chat)}</div>
+            {chat.peer_blue_tick ? <span style={{ flexShrink: 0, lineHeight: 0 }}>{I.blueTick(14)}</span> : null}
             {chat.is_verified ? I.verified() : null}
             {chat.is_locked ? I.lock() : null}
             {chat.disappear_secs ? I.timer(G.yellow, 13) : null}

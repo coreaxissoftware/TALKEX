@@ -1012,12 +1012,17 @@ COLUMNS_ADDED_LATER = [
     # Recorded (not just computed on the fly) so it survives past the
     # reputation window and shows up for a moderator, same as `disabled_at`.
     ("users", "quality_flagged_at", "REAL"),
-    # TalkEx's activity-earned blue tick: NULL until this account has sent at
-    # least one message in BLUE_TICK_TARGET distinct DMs, set once by
-    # maybe_award_blue_tick() (see main.py) and never cleared again — same
-    # "recorded, not recomputed on every read" shape as quality_flagged_at
-    # above, so the badge doesn't flicker off if a DM is later deleted.
+    # TalkEx's invite-earned blue tick: NULL until this account has referred
+    # BLUE_TICK_TARGET *new* signups (people who registered via this user's
+    # invite link), set once by maybe_award_blue_tick() (see main.py) and never
+    # cleared again — same "recorded, not recomputed on every read" shape as
+    # quality_flagged_at above, so the badge doesn't flicker off later.
     ("users", "blue_tick_awarded_at", "REAL"),
+    # The user id of whoever's invite link this account signed up through, set
+    # once at registration and never changed. Powers the invite-based blue
+    # tick: a referrer earns the badge once BLUE_TICK_TARGET rows point back at
+    # them. NULL for accounts that signed up without a referral.
+    ("users", "referred_by", "TEXT"),
 ]
 
 
@@ -1037,6 +1042,9 @@ def _add_missing_columns(conn: sqlite3.Connection):
         # Same again for `avatar_of_user_id`.
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_attachments_avatar ON attachments (avatar_of_user_id)")
+        # Counts a referrer's signups for the invite-based blue tick — added
+        # after `referred_by`, so it lives here for the same reason the others do.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_referred_by ON users (referred_by)")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_attachments_orphans ON attachments (created_at) "
             "WHERE message_id IS NULL AND story_id IS NULL AND avatar_of_user_id IS NULL"

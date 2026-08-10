@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Auth, setToken } from "../api.js";
+import { Auth, setToken, clearStoredReferral } from "../api.js";
 import { Button, Field, G, I, ParticleNetwork, Screen, Spinner, useIsDesktop } from "../ui.jsx";
 import { COUNTRY_CODES, flagFor, samplePlaceholder } from "../countryCodes.js";
 
@@ -23,6 +23,10 @@ export default function Login({ onAuthenticated }) {
   function completeAuth(result) {
     setToken(result.token);
     localStorage.setItem("ht_user", JSON.stringify(result.user));
+    // A pending invite referral has now done its job (the register call that
+    // just completed carried it) — drop it so it can never be reused to credit
+    // a different account signing in later on this same device.
+    clearStoredReferral();
     onAuthenticated(result.user, Boolean(result.account_disabled));
   }
 

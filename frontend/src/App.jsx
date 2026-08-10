@@ -839,7 +839,16 @@ export default function App() {
       )}
       {blueTickNudge && (
         <BlueTickNudge progress={blueTickNudge} onClose={() => setBlueTickNudge(null)}
-                       onStartChat={() => { setBlueTickNudge(null); setDiscoverOpen(true); }}/>
+                       onInvite={() => {
+                         setBlueTickNudge(null);
+                         // Trigger the Web Share invite with the user's referral link
+                         const url = `${window.location.origin}/?ref=${me?.username || ""}`;
+                         if (navigator.share) {
+                           navigator.share({ title: "Join me on TalkEx", text: "Hey! Try TalkEx — it's free, fast, and secure messaging. Join here:", url }).catch(() => {});
+                         } else {
+                           navigator.clipboard?.writeText(url).then(() => toast("Invite link copied!")).catch(() => {});
+                         }
+                       }}/>
       )}
       {blueTickCelebrate && (
         <BlueTickCelebrate onClose={() => setBlueTickCelebrate(false)}/>
@@ -855,9 +864,10 @@ export default function App() {
  * with a tap outside or "Maybe later", because this is a nudge toward a
  * badge, not something that should ever stop someone from reading a chat.
  */
-function BlueTickNudge({ progress, onClose, onStartChat }) {
-  const remaining = Math.max(0, progress.target - progress.chatted_with);
-  const pct = Math.min(100, Math.round((progress.chatted_with / progress.target) * 100));
+function BlueTickNudge({ progress, onClose, onInvite }) {
+  const invited = progress.invited ?? progress.chatted_with ?? 0;
+  const remaining = Math.max(0, progress.target - invited);
+  const pct = Math.min(100, Math.round((invited / progress.target) * 100));
 
   return (
     <div onClick={onClose} style={{
@@ -877,9 +887,9 @@ function BlueTickNudge({ progress, onClose, onStartChat }) {
         </div>
         <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 6 }}>Get the TalkEx Blue Tick</div>
         <div style={{ fontSize: 13.5, color: G.sub, marginBottom: 18, lineHeight: 1.5 }}>
-          Chat with {progress.target} different people on TalkEx and a blue tick badge
+          Invite {progress.target} friends to join TalkEx and a blue tick badge
           is added to your profile automatically — {remaining > 0
-            ? `just ${remaining} more to go.`
+            ? `just ${remaining} more to go!`
             : "almost there!"}
         </div>
 
@@ -892,11 +902,11 @@ function BlueTickNudge({ progress, onClose, onStartChat }) {
           }}/>
         </div>
         <div style={{ fontSize: 12, color: G.muted, marginBottom: 20 }}>
-          {progress.chatted_with} of {progress.target} people
+          {invited} of {progress.target} friends joined
         </div>
 
-        <Button onClick={onStartChat} style={{ width: "100%", marginBottom: 8 }}>
-          Start a new chat
+        <Button onClick={onInvite} style={{ width: "100%", marginBottom: 8 }}>
+          Invite a friend
         </Button>
         <Button variant="ghost" onClick={onClose} style={{ width: "100%" }}>
           Maybe later

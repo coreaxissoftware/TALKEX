@@ -97,7 +97,7 @@ const RING_TIMEOUT_MS = 30000;
 
 const CALL_EVENT_TYPES = new Set([
   "call_invite", "call_answer", "call_ice", "call_reject", "call_end", "call_busy", "call_error",
-  "call_upgrade_offer", "call_upgrade_answer", "call_ringing",
+  "call_upgrade_offer", "call_upgrade_answer", "call_ringing", "call_media_state",
 ]);
 
 /**
@@ -340,13 +340,28 @@ export function useCall(events, send, toast) {
     setCall(null);
   }, [logOutcome, teardown]);
 
+  // Tells the peer our current mic/camera state so their UI can show a
+  // "muted" pill / camera-off placeholder on our tile (WhatsApp's in-call
+  // indicators). Pure status ping — no SDP/ICE — relayed like any other call
+  // signal. Best-effort: a dropped one just means their indicator lags by one
+  // toggle until the next.
+  const sendMediaState = useCallback((muted, cameraOff) => {
+    const current = callRef.current;
+    if (!current) return;
+    sendRef.current({
+      type: "call_media_state", to: current.peerId, chat_id: current.chatId,
+      muted, camera_off: cameraOff,
+    });
+  }, []);
+
   const toggleMute = useCallback(() => {
     const current = callRef.current;
     if (!current?.localStream) return;
     const nowMuted = !current.muted;
     current.localStream.getAudioTracks().forEach((track) => { track.enabled = !nowMuted; });
     setCall((c) => (c ? { ...c, muted: nowMuted } : c));
-  }, []);
+    sendMediaState(nowMuted, current.cameraOff);
+  }, [sendMediaState]);
 
   const toggleCamera = useCallback(async () => {
     const current = callRef.current;
@@ -358,6 +373,7 @@ export function useCall(events, send, toast) {
       const nowOff = !current.cameraOff;
       existingTrack.enabled = !nowOff;
       setCall((c) => (c ? { ...c, cameraOff: nowOff } : c));
+      sendMediaState(current.muted, nowOff);
       return;
     }
 
@@ -383,7 +399,8 @@ export function useCall(events, send, toast) {
       type: "call_upgrade_offer", to: current.peerId, chat_id: current.chatId, sdp: offer,
     });
     setCall((c) => (c ? { ...c, callKind: "video", cameraOff: false, facingMode: "user" } : c));
-  }, []);
+    sendMediaState(current.muted, false);
+  }, [sendMediaState]);
 
   // Flips between front/back camera — a fresh getUserMedia with the
   // opposite facingMode, swapped in via the same no-renegotiation
@@ -409,11 +426,21 @@ export function useCall(events, send, toast) {
     const sender = pc.getSenders().find((s) => s.track?.kind === "video");
     await sender?.replaceTrack(newTrack);
 
-    current.localStream.removeTrack(existingTrack);
+    // Rebuild the local stream as a BRAND-NEW MediaStream (carrying over the
+    // existing audio track) rather than mutating the current one in place.
+    // Mutating tracks on the stream that's already a <video>'s srcObject does
+    // NOT reliably repaint the preview on mobile WebViews (Capacitor/Android
+    // in particular) — it freezes on the old, now-stopped track, so the flip
+    // looked completely dead even though the peer was already receiving the
+    // other camera. Handing VideoTag a fresh stream object forces its
+    // srcObject effect to re-run and the mirror to actually update.
+    const newLocal = new MediaStream();
+    current.localStream.getAudioTracks().forEach((t) => newLocal.addTrack(t));
+    newLocal.addTrack(newTrack);
     existingTrack.stop();
-    current.localStream.addTrack(newTrack);
+    localStreamRef.current = newLocal;
 
-    setCall((c) => (c ? { ...c, facingMode: nextFacing } : c));
+    setCall((c) => (c ? { ...c, localStream: newLocal, facingMode: nextFacing } : c));
   }, []);
 
   // Swaps the outgoing video track for a screen-capture track via
@@ -545,6 +572,9 @@ export function useCall(events, send, toast) {
         setCall((c) => (c ? { ...c, callKind: "video" } : c));
       } else if (event.type === "call_upgrade_answer") {
         pcRef.current?.setRemoteDescription(event.sdp).catch(() => {});
+      } else if (event.type === "call_media_state") {
+        // Peer toggled their mic/camera — reflect it on their tile.
+        setCall((c) => (c ? { ...c, remoteMuted: Boolean(event.muted), remoteCameraOff: Boolean(event.camera_off) } : c));
       } else if (event.type === "call_reject") {
         if (current.isCaller) logOutcome(current, "declined");
         teardown();

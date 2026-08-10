@@ -7,6 +7,7 @@ import * as offlineDb from "../offlineDb.js";
 import {
   Av, Button, ChatBackdrop, ContextMenu, EMOJIS, EMOJI_GROUPS, Field, G, I, SRow, Spinner, Toggle,
   clockTime, countdown, durationLabel, lastSeenLabel, localInputToUnix, whenLabel, useEnterToSend,
+  useIsDesktop,
 } from "../ui.jsx";
 import { useVoiceRecorder } from "../useVoiceRecorder.js";
 import { canvasesToPdfBlob } from "../imageToPdf.js";
@@ -3009,8 +3010,13 @@ function IconButton({ onClick, label, disabled, children, style }) {
   );
 }
 
-function Sheet({ title, children, onClose }) {
+function Sheet({ title, children, onClose, side = "bottom" }) {
   const panelRef = useRef(null);
+  const isDesktop = useIsDesktop();
+  // A right-side panel (WhatsApp-Web-style contact/chat info) only makes sense
+  // where there's horizontal room to spare — on a phone it stays the same
+  // bottom sheet every other sheet uses, so the behaviour is desktop-only.
+  const asRightPanel = side === "right" && isDesktop;
 
   // A modal that only closes on a backdrop click traps a keyboard user
   // inside it — Escape is the standard way out of any native dialog, and
@@ -3027,13 +3033,22 @@ function Sheet({ title, children, onClose }) {
 
   return (
     <div onClick={onClose} style={{
-      position: "fixed", inset: 0, background: "#000000aa", zIndex: 50,
-      display: "flex", alignItems: "flex-end", justifyContent: "center",
+      position: "fixed", inset: 0, background: "#00000066", zIndex: 50,
+      display: "flex",
+      alignItems: asRightPanel ? "stretch" : "flex-end",
+      justifyContent: asRightPanel ? "flex-end" : "center",
     }}>
+      <style>{"@keyframes talkexSlideInRight{from{transform:translateX(100%)}to{transform:translateX(0)}}"}</style>
       <div ref={panelRef} onClick={(event) => event.stopPropagation()}
            role="dialog" aria-modal="true" aria-label={typeof title === "string" ? title : undefined}
            tabIndex={-1}
-           style={{
+           style={asRightPanel ? {
+        // Right-anchored, full-height slide-in panel — the WhatsApp Web
+        // "Contact info" column. Slides in from the right edge.
+        width: 400, maxWidth: "90vw", height: "100%", background: G.surface, padding: 20,
+        borderLeft: `1px solid ${G.border}`, overflowY: "auto", outline: "none",
+        animation: "talkexSlideInRight .22s ease",
+      } : {
         width: "100%", maxWidth: 430, background: G.surface, padding: 20,
         borderTopLeftRadius: 22, borderTopRightRadius: 22,
         border: `1px solid ${G.border}`, maxHeight: "80vh", overflowY: "auto",
@@ -4424,7 +4439,7 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
   }
 
   return (
-    <Sheet title={chat.name || "Chat info"} onClose={onClose}>
+    <Sheet title={chat.name || "Chat info"} onClose={onClose} side="right">
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
         <Av av={chat.avatar_letter} color={chat.color} size={52} photoId={chat.avatar_attachment_id}/>
         <div>

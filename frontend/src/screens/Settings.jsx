@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Auth, Me, Messages, Templates, Users, clearToken, forgetAccount, getToken,
+  Auth, Contacts, Me, Messages, Templates, Users, clearToken, forgetAccount, getToken,
   listSavedAccounts, rememberAccount, switchToAccount,
 } from "../api.js";
 import { ACCENTS, Av, Button, Field, G, I, SRow, Spinner, Toggle, clockTime, whenLabel,
-         getStoredEnterToSend, saveEnterToSend } from "../ui.jsx";
+         getStoredEnterToSend, saveEnterToSend, useInstallPrompt } from "../ui.jsx";
 import QrView from "../QrView.jsx";
 import { disablePush, enablePush, getPushSubscription, isPushSupported } from "../push.js";
 import { getAutoDownload, setAutoDownload } from "../mediaPrefs.js";
@@ -27,6 +27,7 @@ import { COUNTRY_CODES, flagFor, samplePlaceholder, splitPhone } from "../countr
 export default function Settings({ me, onUpdated, onSignedOut, toast,
                                     theme, onThemeChange, accent, onAccentChange }) {
   const [editing, setEditing] = useState(false);
+  const { canInstall, promptInstall } = useInstallPrompt();
   const [enterToSend, setEnterToSend] = useState(getStoredEnterToSend);
   const [form, setForm] = useState({
     name: me.name, bio: me.bio || "",
@@ -407,6 +408,28 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
         </>
       )}
 
+      {canInstall && (
+        <div style={{ padding: "0 16px", marginBottom: 4 }}>
+          <button onClick={async () => {
+            const ok = await promptInstall();
+            if (ok) toast("Installing TalkEx…");
+          }} style={{
+            display: "flex", alignItems: "center", gap: 12, width: "100%",
+            padding: "14px 16px", borderRadius: 14, cursor: "pointer",
+            background: `${G.accent}12`, border: `1px solid ${G.accent}33`, color: G.text,
+            fontSize: 14.5, fontWeight: 600, textAlign: "left",
+          }}>
+            <span style={{ display: "flex", flexShrink: 0 }}>{I.download(G.accent, 20)}</span>
+            <span style={{ flex: 1 }}>
+              Install TalkEx app
+              <div style={{ fontSize: 12, fontWeight: 400, color: G.muted, marginTop: 2 }}>
+                Add to your home screen — opens like a native app, works offline
+              </div>
+            </span>
+          </button>
+        </div>
+      )}
+
       <Section id="myqr" icon={I.search(G.accent, 20)} title="My QR code"
                sub="Let people scan to add you"
                activeSection={activeSection} onOpen={setActiveSection}
@@ -432,25 +455,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
                sub="Share TalkEx with your contacts"
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
-        <div style={{ padding: "8px 20px 18px" }}>
-          <div style={{ fontSize: 13, color: G.muted, marginBottom: 14 }}>
-            Send friends a link to join you on TalkEx — chat, calls and meetings, all in one place.
-          </div>
-          <Button style={{ width: "100%", marginBottom: 10 }} onClick={async () => {
-            const url = window.location.origin;
-            const text = `Join me on TalkEx — chat, calls and meetings. ${url}`;
-            if (navigator.share) {
-              try { await navigator.share({ title: "TalkEx", text, url }); } catch { /* cancelled */ }
-            } else {
-              navigator.clipboard?.writeText(text);
-              toast("Invite message copied");
-            }
-          }}>Share invite link</Button>
-          <Button variant="ghost" style={{ width: "100%" }} onClick={() => {
-            navigator.clipboard?.writeText(window.location.origin);
-            toast("Link copied");
-          }}>Copy link</Button>
-        </div>
+        <InviteFriend me={me} toast={toast}/>
       </Section>
 
       <Section id="appearance" icon={I.palette(G.accent, 20)} title="Appearance" sub="Theme and color"
@@ -2034,6 +2039,161 @@ function TwoStepSheet({ enabled, onClose, onChanged, toast }) {
         </div>
         {body}
       </div>
+    </div>
+  );
+}
+
+
+// ── Invite a friend (WhatsApp-style) ────────────────────────────────────────
+
+const HAS_DEVICE_CONTACTS = typeof navigator !== "undefined"
+  && "contacts" in navigator && "ContactsManager" in window;
+
+function InviteFriend({ me, toast }) {
+  const inviteUrl = `${window.location.origin}/?ref=${me?.username || ""}`;
+  const inviteText = `Hey! Join me on TalkEx — it's free, fast, and secure messaging & calling.\n${inviteUrl}`;
+
+  // Saved TalkEx contacts — used to show "already on TalkEx" vs "invite"
+  const [contacts, setContacts] = useState(null);
+  const [query, setQuery] = useState("");
+  const [deviceContacts, setDeviceContacts] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    Contacts.list().then(setContacts).catch(() => {});
+  }, []);
+
+  // Load device contacts (phones), match against backend, merge in saved
+  async function loadDeviceContacts() {
+    if (!HAS_DEVICE_CONTACTS) return;
+    setLoading(true);
+    try {
+      const picked = await navigator.contacts.select(["name", "tel"], { multiple: true });
+      const entries = [];
+      for (const contact of picked) {
+        const name = contact.name?.[0] || "";
+        for (const tel of (contact.tel || [])) {
+          entries.push({ name, phone: tel.replace(/[^+\d]/g, "") });
+        }
+      }
+      if (entries.length === 0) { setLoading(false); return; }
+      // Ask backend which of these phones are TalkEx users
+      const phones = entries.map((entry) => entry.phone);
+      let matched = [];
+      try {
+        matched = await Users.matchContacts(phones);
+      } catch { /* fallback: show all as non-TalkEx */ }
+      const matchedSet = new Set(matched.map((m) => m.phone));
+      const merged = entries.map((entry) => ({
+        ...entry,
+        onTalkEx: matchedSet.has(entry.phone),
+        user: matched.find((m) => m.phone === entry.phone) || null,
+      }));
+      // Sort: non-TalkEx users first (the ones you'd want to invite)
+      merged.sort((a, b) => (a.onTalkEx === b.onTalkEx ? 0 : a.onTalkEx ? 1 : -1));
+      setDeviceContacts(merged);
+    } catch (problem) {
+      if (problem.name !== "AbortError") toast("Could not read contacts");
+    }
+    setLoading(false);
+  }
+
+  const allContacts = deviceContacts || [];
+  const filtered = query.trim()
+    ? allContacts.filter((c) => c.name.toLowerCase().includes(query.trim().toLowerCase())
+        || c.phone.includes(query.trim()))
+    : allContacts;
+
+  function sendSmsInvite(phone) {
+    // Open the native SMS composer with the invite message pre-filled.
+    // `sms:` URI is the standard way to do this — works on Android (Chrome),
+    // iOS Safari, and Capacitor WebView. The `?body=` or `&body=` form varies
+    // by platform, but `?&body=` covers both Android (needs &) and iOS (needs ?).
+    const encoded = encodeURIComponent(inviteText);
+    window.open(`sms:${phone}?&body=${encoded}`, "_self");
+  }
+
+  return (
+    <div style={{ padding: "4px 0 18px" }}>
+      {/* Share invite link */}
+      <div style={{ padding: "0 20px", marginBottom: 14 }}>
+        <div style={{ fontSize: 13, color: G.muted, marginBottom: 12 }}>
+          Invite friends to join TalkEx. When {me?.blue_tick ? "" : "10 friends sign up through your link, you earn the "}
+          {!me?.blue_tick && <span style={{ display: "inline-flex", verticalAlign: "middle" }}>{I.blueTick(13)}</span>}
+          {me?.blue_tick ? "Share TalkEx with your friends." : " blue tick!"}
+        </div>
+        <Button style={{ width: "100%", marginBottom: 8 }} onClick={async () => {
+          if (navigator.share) {
+            try { await navigator.share({ title: "TalkEx", text: inviteText, url: inviteUrl }); } catch { /* cancelled */ }
+          } else {
+            navigator.clipboard?.writeText(inviteText);
+            toast("Invite link copied");
+          }
+        }}>{I.share("#fff", 15)} Share invite link</Button>
+        <Button variant="ghost" style={{ width: "100%", marginBottom: 8 }} onClick={() => {
+          navigator.clipboard?.writeText(inviteUrl);
+          toast("Link copied");
+        }}>Copy link</Button>
+      </div>
+
+      {/* Device contacts */}
+      {HAS_DEVICE_CONTACTS && !deviceContacts && (
+        <div style={{ padding: "0 20px", marginBottom: 14 }}>
+          <Button variant="ghost" style={{ width: "100%" }} onClick={loadDeviceContacts}>
+            {loading ? "Loading…" : "📇 Load phone contacts"}
+          </Button>
+        </div>
+      )}
+
+      {deviceContacts && (
+        <>
+          <div style={{ padding: "0 20px 10px" }}>
+            <input value={query} onChange={(e) => setQuery(e.target.value)}
+                   placeholder="Search" style={{
+              width: "100%", padding: "8px 12px", borderRadius: 10,
+              background: G.dim, border: `1px solid ${G.border}`, color: G.text,
+              fontSize: 13.5, outline: "none", boxSizing: "border-box",
+            }}/>
+          </div>
+          <div style={{ maxHeight: 350, overflowY: "auto" }}>
+            {filtered.map((contact, idx) => (
+              <div key={contact.phone + idx} style={{
+                display: "flex", alignItems: "center", gap: 12,
+                padding: "10px 20px", borderBottom: `1px solid ${G.border}`,
+              }}>
+                <div style={{
+                  width: 40, height: 40, borderRadius: "50%",
+                  background: contact.onTalkEx ? G.accent + "22" : G.dim,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 16, fontWeight: 600, color: contact.onTalkEx ? G.accent : G.sub,
+                  flexShrink: 0,
+                }}>{contact.name[0]?.toUpperCase() || "?"}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 600,
+                    whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {contact.name}
+                  </div>
+                  <div style={{ fontSize: 12, color: contact.onTalkEx ? G.accent : G.muted }}>
+                    {contact.onTalkEx ? "On TalkEx ✓" : contact.phone}
+                  </div>
+                </div>
+                {!contact.onTalkEx && (
+                  <button onClick={() => sendSmsInvite(contact.phone)} style={{
+                    padding: "6px 14px", borderRadius: 8, border: `1px solid ${G.accent}`,
+                    background: "transparent", color: G.accent, fontSize: 12.5,
+                    fontWeight: 600, cursor: "pointer", flexShrink: 0,
+                  }}>Invite</button>
+                )}
+              </div>
+            ))}
+            {filtered.length === 0 && (
+              <div style={{ fontSize: 13, color: G.muted, textAlign: "center", padding: 20 }}>
+                {query ? "No matches" : "No contacts loaded"}
+              </div>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }

@@ -37,6 +37,35 @@ export const clearToken = () => {
 
 export const getToken = () => token;
 
+// ── Invite referral (?ref=<username>) ─────────────────────────────────────────
+//
+// Someone opening an invite link lands here logged-out and then walks through
+// register/OTP — by the time they submit, the URL has usually been cleaned up
+// (see the ?ref handler in App.jsx). So we capture the referrer's username ONCE
+// at load, before anything touches the URL, and stash it. It's read back into
+// the registration payload and cleared the moment an account is created, so it
+// only ever credits the very first signup on this device — never a later one.
+const REF_KEY = "talkex_ref";
+(function captureReferral() {
+  try {
+    const url = new URL(window.location.href);
+    const ref = url.searchParams.get("ref");
+    if (!ref) return;
+    localStorage.setItem(REF_KEY, ref.slice(0, 32));
+    // Tidy the address bar the same way App.jsx's other one-shot query params
+    // (?invite=, ?meeting=, ?user=) get stripped after being read — the value
+    // is already safely stashed above.
+    url.searchParams.delete("ref");
+    window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+  } catch { /* no URL / storage — nothing to capture */ }
+})();
+export const storedReferral = () => {
+  try { return localStorage.getItem(REF_KEY) || undefined; } catch { return undefined; }
+};
+export const clearStoredReferral = () => {
+  try { localStorage.removeItem(REF_KEY); } catch { /* ignore */ }
+};
+
 // ── Saved accounts (quick account switching) ──────────────────────────────────
 // A directory of accounts this browser has signed into before, alongside
 // (not instead of) the single active `ht_token` above — switching just swaps
@@ -141,7 +170,7 @@ export function guessDeviceLabel() {
 }
 
 export const Auth = {
-  register: (details) => post("/auth/register", { ...details, device_label: guessDeviceLabel() }),
+  register: (details) => post("/auth/register", { ...details, ref: storedReferral(), device_label: guessDeviceLabel() }),
   // Returns either {token, user} directly, or {requires_pin: true, pending_token}
   // when the account has two-step verification on — the caller has to check
   // which shape came back before treating this as a completed sign-in.
@@ -166,7 +195,7 @@ export const Auth = {
   // account — the server decides which based on whether the number's seen.
   requestPhoneOtp: (phone) => post("/auth/phone/request-otp", { phone }),
   verifyPhoneOtp: (phone, code, name) =>
-    post("/auth/phone/verify-otp", { phone, code, name, device_label: guessDeviceLabel() }),
+    post("/auth/phone/verify-otp", { phone, code, name, ref: storedReferral(), device_label: guessDeviceLabel() }),
 
   // A one-time, ~30-second ticket for opening the WebSocket. The socket
   // handshake can't send a custom Authorization header, so without this the

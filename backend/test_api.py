@@ -114,6 +114,55 @@ def test_unauthenticated_requests_are_refused(client):
     assert client.get("/me").status_code == 401
 
 
+def _register_with_ref(client, ref):
+    """Register a fresh account through `ref`'s invite link."""
+    username = f"u{uuid.uuid4().hex[:10]}"
+    r = client.post("/auth/register", json={
+        "name": "Invitee", "username": username,
+        "password": "correct horse battery", "phone": "", "bio": "", "ref": ref,
+    }, headers={"X-Forwarded-For": fake_client_ip()})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_blue_tick_is_earned_by_referring_ten_signups(client):
+    referrer, _, referrer_username = make_user(client, "Referrer")
+
+    # Nine invited signups: still short of the target, no badge yet.
+    for _ in range(9):
+        _register_with_ref(client, referrer_username)
+    progress = client.get("/me/blue-tick-progress", headers=referrer).json()
+    assert progress == {"invited": 9, "chatted_with": 9, "target": 10, "earned": False}
+    assert client.get("/me", headers=referrer).json()["blue_tick"] is False
+
+    # The tenth invited signup crosses the line — badge awarded.
+    _register_with_ref(client, referrer_username)
+    progress = client.get("/me/blue-tick-progress", headers=referrer).json()
+    assert progress["earned"] is True
+    assert progress["invited"] == 10
+    assert client.get("/me", headers=referrer).json()["blue_tick"] is True
+
+
+def test_blue_tick_ignores_chatting_and_bad_referrals(client):
+    # Chatting with lots of people no longer earns the badge on its own.
+    alice, _, _ = make_user(client, "Alice")
+    for _ in range(10):
+        _, peer_id, _ = make_user(client, "Peer")
+        chat_id = client.post(f"/chats/dm/{peer_id}", headers=alice).json()["id"]
+        client.post(f"/chats/{chat_id}/messages", headers=alice,
+                    json={"kind": "text", "text": "hi"})
+    assert client.get("/me", headers=alice).json()["blue_tick"] is False
+
+    # A self-referral and an unknown ref are both silently ignored — they must
+    # never block a signup, and never count toward anyone's badge.
+    unknown = client.post("/auth/register", json={
+        "name": "Solo", "username": f"u{uuid.uuid4().hex[:10]}",
+        "password": "correct horse battery", "phone": "", "bio": "",
+        "ref": "nobody_with_this_name",
+    }, headers={"X-Forwarded-For": fake_client_ip()})
+    assert unknown.status_code == 200, unknown.text
+
+
 # ── Access control ────────────────────────────────────────────────────────────
 
 def test_outsider_cannot_read_a_chat(client):

@@ -315,6 +315,10 @@ def register(request: RegisterRequest, http_request: Request):
     # Everyone gets a private notes chat, the way Telegram's Saved Messages works.
     create_saved_messages_chat(user_id)
 
+    # If they arrived via someone's invite link, credit that referrer (and
+    # maybe hand them their blue tick) — see apply_referral.
+    apply_referral(user_id, request.ref)
+
     token = start_session(user_id, request.device_label)
     user = db.query_one("SELECT * FROM users WHERE id = ?", (user_id,))
     return {"token": token, "user": public_user(user)}
@@ -621,6 +625,7 @@ def verify_phone_otp(request: VerifyOtpRequest):
         ),
     )
     create_saved_messages_chat(user_id)
+    apply_referral(user_id, request.ref)
     token = start_session(user_id, request.device_label)
     user = db.query_one("SELECT * FROM users WHERE id = ?", (user_id,))
     return {"token": token, "user": public_user(user), "created": True}
@@ -1646,44 +1651,58 @@ def refresh_quality_flag(target_id: str) -> None:
                    (time.time(), target_id))
 
 
-def distinct_dm_partners_messaged(user_id: str) -> int:
+def count_referred_signups(user_id: str) -> int:
     """
-    How many different people `user_id` has sent at least one DM message to.
-    Counts distinct chat_id, not distinct peer id, but for a 'dm' chat those
-    are equivalent — TalkEx gives every pair of users exactly one
-    deterministic dm_<low>_<high> chat id (see fan_out_broadcast, create_dm),
-    so there is no way for the same peer to have two DM chats to double-count,
-    and no way for one DM chat to have more than one peer to undercount.
+    How many *new* accounts signed up through `user_id`'s invite link — the
+    single number the invite-based blue tick is earned on. Backed by the
+    idx_users_referred_by index, so this stays a cheap point lookup even as
+    the users table grows.
     """
     return db.query_one(
-        """
-        SELECT COUNT(DISTINCT m.chat_id) AS n
-        FROM messages AS m
-        JOIN chats AS c ON c.id = m.chat_id
-        WHERE m.sender_id = ? AND c.type = 'dm'
-        """,
+        "SELECT COUNT(*) AS n FROM users WHERE referred_by = ?",
         (user_id,),
     )["n"]
 
 
+def apply_referral(new_user_id: str, ref: str | None) -> None:
+    """
+    Records that `new_user_id` signed up through the invite link of the account
+    whose username is `ref`, then re-checks that referrer's blue-tick progress.
+
+    Called from the (synchronous) registration endpoints, so there's no live
+    event loop to push a celebratory "blue_tick_awarded" event to the referrer
+    from here — the badge is simply set in the DB and the referrer picks it up
+    on their next /me refetch or app open (blue_tick_progress). Silently does
+    nothing if `ref` is blank, unknown, or points at the new account itself, so
+    a bad ?ref= in a link never blocks a signup.
+    """
+    if not ref:
+        return
+    referrer = db.query_one("SELECT id FROM users WHERE lower(username) = ?", (ref.lower(),))
+    if referrer is None or referrer["id"] == new_user_id:
+        return
+    db.execute("UPDATE users SET referred_by = ? WHERE id = ?", (referrer["id"], new_user_id))
+    maybe_award_blue_tick(referrer["id"])
+
+
 def maybe_award_blue_tick(user_id: str) -> bool:
     """
-    Called after every DM send. Cheap to call on the hot path even though it
-    re-aggregates messages each time (unlike refresh_quality_flag, which is
-    only called from the rarer block/report actions): once
-    blue_tick_awarded_at is set this returns false immediately without
-    touching the messages table at all, so the aggregate query only ever
-    runs for accounts still working toward the badge — and BLUE_TICK_TARGET
-    is small enough that even that query is a non-issue.
+    Called when a new account signs up through `user_id`'s invite link. Once
+    blue_tick_awarded_at is set this returns false immediately without running
+    the count at all, so the aggregate only ever runs for referrers still
+    working toward the badge.
 
-    Returns True the moment the badge is newly awarded (not on later calls,
-    and not if it was already earned before this call) — the one signal the
-    caller needs to push a celebratory realtime event.
+    The badge is earned by referring BLUE_TICK_TARGET new signups (people who
+    registered via this user's invite link) — not by chatting with N people,
+    which an account could rack up on its own. Returns True the moment the
+    badge is newly awarded (not on later calls, and not if it was already
+    earned before this call) — the one signal the caller needs to push a
+    celebratory realtime event.
     """
     row = db.query_one("SELECT blue_tick_awarded_at FROM users WHERE id = ?", (user_id,))
     if row is None or row["blue_tick_awarded_at"]:
         return False
-    if distinct_dm_partners_messaged(user_id) < BLUE_TICK_TARGET:
+    if count_referred_signups(user_id) < BLUE_TICK_TARGET:
         return False
     db.execute("UPDATE users SET blue_tick_awarded_at = ? WHERE id = ?", (time.time(), user_id))
     return True
@@ -1810,18 +1829,25 @@ def get_me(user: dict = Depends(current_user)):
 @app.get("/me/blue-tick-progress")
 def blue_tick_progress(user: dict = Depends(current_user)):
     """
-    Powers the "chat with N people to earn the blue tick" nudge the client
-    shows on every app open until the badge is earned. `earned` mirrors
-    public_user's blue_tick field (same underlying column) so the client can
-    trust this one response instead of cross-referencing GET /me too.
+    Powers the "invite N friends to earn the blue tick" nudge the client shows
+    on every app open until the badge is earned. `earned` mirrors public_user's
+    blue_tick field (same underlying column) so the client can trust this one
+    response instead of cross-referencing GET /me too. `invited` is how many
+    new signups have come in through this user's invite link so far.
+
+    `chatted_with` is kept as an alias of `invited` for backward compatibility
+    with any client build still reading the old field name.
     """
     if user.get("blue_tick_awarded_at"):
-        return {"chatted_with": BLUE_TICK_TARGET, "target": BLUE_TICK_TARGET, "earned": True}
-    chatted_with = distinct_dm_partners_messaged(user["id"])
+        return {"invited": BLUE_TICK_TARGET, "chatted_with": BLUE_TICK_TARGET,
+                "target": BLUE_TICK_TARGET, "earned": True}
+    invited = count_referred_signups(user["id"])
+    capped = min(invited, BLUE_TICK_TARGET)
     return {
-        "chatted_with": min(chatted_with, BLUE_TICK_TARGET),
+        "invited": capped,
+        "chatted_with": capped,
         "target": BLUE_TICK_TARGET,
-        "earned": chatted_with >= BLUE_TICK_TARGET,
+        "earned": invited >= BLUE_TICK_TARGET,
     }
 
 
@@ -3750,15 +3776,6 @@ async def send_message(
 
         if chat["type"] == "dm":
             await maybe_send_away_reply(background_tasks, request.chat_id, user["id"])
-            # Checked on every DM send rather than only at account
-            # milestones — see maybe_award_blue_tick's own docstring for why
-            # that's cheap. A realtime push (not just "the client will
-            # notice next time it refetches /me") is what lets the app show
-            # the congratulations moment right as it happens, the same way a
-            # reaction or a typing indicator arrives live rather than on
-            # next reload.
-            if maybe_award_blue_tick(user["id"]):
-                await hub.send_to_user(user["id"], {"type": "blue_tick_awarded"})
 
         if chat["type"] == "broadcast":
             await fan_out_broadcast(chat, user, request.text, request.kind, payload)
@@ -5575,6 +5592,10 @@ CALL_SIGNAL_TYPES = {
     # negotiated a video m-line, so this is a full second offer/answer round
     # trip on the same connection, not just another ICE candidate.
     "call_upgrade_offer", "call_upgrade_answer",
+    # A lightweight status ping so the other side can show "muted" / camera-off
+    # on your tile — WhatsApp's in-call indicators. Carries no SDP/ICE, just
+    # two booleans; it's a pure relay like the rest, gated the same way.
+    "call_media_state",
 }
 
 # One-to-many relay types for a mesh group call: each new joiner connects
@@ -5988,6 +6009,9 @@ async def websocket_endpoint(
                     relay["candidate"] = payload.get("candidate")
                 elif kind in ("call_upgrade_offer", "call_upgrade_answer"):
                     relay["sdp"] = payload.get("sdp")
+                elif kind == "call_media_state":
+                    relay["muted"] = bool(payload.get("muted"))
+                    relay["camera_off"] = bool(payload.get("camera_off"))
                 # call_reject, call_end and call_busy carry nothing beyond
                 # chat_id and who sent it — that is all the receiving end needs
                 # to tear its own call state down.

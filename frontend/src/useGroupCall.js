@@ -311,11 +311,19 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
       .filter(Boolean);
     await Promise.all(senders.map((sender) => sender.replaceTrack(newTrack)));
 
-    current.localStream.removeTrack(existingTrack);
+    // Fresh MediaStream (carrying the existing audio track) rather than an
+    // in-place mutation — see useCall.js's switchCamera for why: mutating the
+    // stream that's already a <video>'s srcObject doesn't repaint the preview
+    // on mobile WebViews, so the flip looked dead. A new object forces
+    // SelfTile's VideoTag to re-run its srcObject effect. localStreamRef is
+    // also updated so a peer joining mid-call builds from the current camera.
+    const newLocal = new MediaStream();
+    current.localStream.getAudioTracks().forEach((t) => newLocal.addTrack(t));
+    newLocal.addTrack(newTrack);
     existingTrack.stop();
-    current.localStream.addTrack(newTrack);
+    localStreamRef.current = newLocal;
 
-    setCall((c) => (c ? { ...c, facingMode: nextFacing } : c));
+    setCall((c) => (c ? { ...c, localStream: newLocal, facingMode: nextFacing } : c));
   }, []);
 
   // Same replaceTrack idea as useCall.js's version, but across every peer in

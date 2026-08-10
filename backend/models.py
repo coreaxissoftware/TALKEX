@@ -21,6 +21,10 @@ class RegisterRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
     bio: str = Field(default="", max_length=200)
     device_label: str = Field(default="Unknown device", max_length=80)
+    # Username of whoever's invite link brought this person in, if any. Drives
+    # the invite-based blue tick (see maybe_award_blue_tick). Ignored if it
+    # doesn't resolve to a real, different account.
+    ref: Optional[str] = Field(default=None, max_length=32)
 
 
 class LoginRequest(BaseModel):
@@ -81,6 +85,9 @@ class VerifyOtpRequest(BaseModel):
     # (and not required) for an existing account signing back in.
     name: Optional[str] = Field(default=None, min_length=1, max_length=64)
     device_label: str = Field(default="Unknown device", max_length=80)
+    # Same invite-referral field as RegisterRequest — only ever used the moment
+    # a brand new phone number first creates an account.
+    ref: Optional[str] = Field(default=None, max_length=32)
 
 
 # ── Email connect (WhatsApp-style two-step recovery address) ────────────────

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Uploads } from "./api.js";
 import {
   TEXTURES, getWallpaper, getWallpaperBlur, onWallpaperBlurChange, onWallpaperChange,
@@ -84,6 +84,50 @@ export function useIsDesktop() {
     };
   }, []);
   return isDesktop;
+}
+
+/**
+ * Add-to-home-screen / install support for the PWA.
+ *
+ * Chromium fires `beforeinstallprompt` when the app meets the installability
+ * bar (valid manifest, served over https, a registered service worker) and is
+ * not already installed — we stash that event so our own UI can trigger the
+ * native install dialog on demand (the browser's own mini-infobar is
+ * suppressed by preventDefault, so without capturing it there'd be no way in).
+ * `appinstalled` clears the affordance once it's done. Browsers that don't
+ * implement this (Safari/Firefox) simply never set canInstall, so any UI
+ * gated on it stays hidden — on iOS the install path is the Share-sheet's
+ * "Add to Home Screen", which isn't scriptable and so isn't offered here.
+ */
+export function useInstallPrompt() {
+  const [deferred, setDeferred] = useState(null);
+  const [installed, setInstalled] = useState(
+    () => typeof window !== "undefined"
+      && window.matchMedia?.("(display-mode: standalone)").matches
+  );
+
+  useEffect(() => {
+    const onBefore = (event) => { event.preventDefault(); setDeferred(event); };
+    const onInstalled = () => { setDeferred(null); setInstalled(true); };
+    window.addEventListener("beforeinstallprompt", onBefore);
+    window.addEventListener("appinstalled", onInstalled);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", onBefore);
+      window.removeEventListener("appinstalled", onInstalled);
+    };
+  }, []);
+
+  const promptInstall = useCallback(async () => {
+    if (!deferred) return false;
+    deferred.prompt();
+    const { outcome } = await deferred.userChoice;
+    // A dismissed prompt can't be re-shown with the same event — drop it
+    // either way; a fresh beforeinstallprompt fires if they're still eligible.
+    setDeferred(null);
+    return outcome === "accepted";
+  }, [deferred]);
+
+  return { canInstall: Boolean(deferred) && !installed, installed, promptInstall };
 }
 
 /**

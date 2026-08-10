@@ -289,9 +289,27 @@ export default function CallOverlay({
   call, onAccept, onReject, onEnd, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen,
 }) {
   const [sinkId, setSinkId] = useState(undefined);
+  const [minimized, setMinimized] = useState(false);
   const { expanded, toggle, isDesktop, isLandscape } = useCallLayout();
 
+  // An incoming/outgoing call can never start minimized — you have to see it
+  // to answer or hang up. Only an active, connected call collapses to the
+  // floating window, and it snaps back to full screen the moment it ends.
+  useEffect(() => {
+    if (!call || call.phase !== "active") setMinimized(false);
+  }, [call?.phase, call?.chatId]);
+
   if (!call) return null;
+
+  // Minimized: a small floating window over the app (WhatsApp's picture-in-
+  // picture call bubble). The rest of the app behind it stays fully usable —
+  // this is also what the in-call "chat" button lands you on, since the chat
+  // is right there underneath once the call shrinks out of the way.
+  if (minimized && call.phase === "active") {
+    return (
+      <MinimizedCall call={call} onEnd={onEnd} onExpand={() => setMinimized(false)}/>
+    );
+  }
 
   return (
     <div style={{
@@ -305,6 +323,17 @@ export default function CallOverlay({
       background: "#0b1220", color: "#fff",
       display: "flex", flexDirection: "column",
     }}>
+      {/* Minimize to the floating window — available on every active call,
+          the top-left "collapse" affordance from the WhatsApp call screen. */}
+      {call.phase === "active" && (
+        <div onClick={() => setMinimized(true)} title="Minimize" style={{
+          position: "absolute", top: 14, left: 14, zIndex: 2,
+          width: 34, height: 34, borderRadius: "50%", cursor: "pointer",
+          background: "#ffffff1a", display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          {I.chevronDown("#fff", 20)}
+        </div>
+      )}
       {isDesktop && (
         <div onClick={toggle} title={expanded ? "Exit full screen" : "Full screen"} style={{
           position: "absolute", top: 14, right: 14, zIndex: 1,
@@ -318,9 +347,91 @@ export default function CallOverlay({
       {call.phase === "outgoing" && <OutgoingCall call={call} onEnd={onEnd}/>}
       {call.phase === "active" && (
         <ActiveCall call={call} onEnd={onEnd} onToggleMute={onToggleMute} onToggleCamera={onToggleCamera}
-                    onSwitchCamera={onSwitchCamera}
+                    onSwitchCamera={onSwitchCamera} onMinimize={() => setMinimized(true)}
                     onShareScreen={onShareScreen} sinkId={sinkId} onSinkId={setSinkId}
                     isLandscape={isLandscape}/>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The minimized floating call — a small draggable window that keeps the call
+ * alive while the rest of the app is usable behind it. Tapping it (anywhere
+ * but the end button) restores the full-screen call.
+ */
+function MinimizedCall({ call, onEnd, onExpand }) {
+  const [pos, setPos] = useState({ x: null, y: null }); // null → default bottom-right via CSS
+  const dragRef = useRef(null);
+  const movedRef = useRef(false);
+  const isVideo = call.callKind === "video" && call.remoteStream
+    && call.remoteStream.getVideoTracks().length > 0 && !call.remoteCameraOff;
+
+  const W = isVideo ? 120 : 200;
+  const H = isVideo ? 170 : 68;
+
+  function onPointerDown(event) {
+    movedRef.current = false;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const rect = event.currentTarget.getBoundingClientRect();
+    dragRef.current = { startX, startY, baseX: rect.left, baseY: rect.top };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+  function onPointerMove(event) {
+    if (!dragRef.current) return;
+    const dx = event.clientX - dragRef.current.startX;
+    const dy = event.clientY - dragRef.current.startY;
+    if (Math.abs(dx) > 4 || Math.abs(dy) > 4) movedRef.current = true;
+    const nx = Math.max(6, Math.min(window.innerWidth - W - 6, dragRef.current.baseX + dx));
+    const ny = Math.max(6, Math.min(window.innerHeight - H - 6, dragRef.current.baseY + dy));
+    setPos({ x: nx, y: ny });
+  }
+  function onPointerUp() { dragRef.current = null; }
+
+  const anchored = pos.x == null
+    ? { right: 14, bottom: 90 }
+    : { left: pos.x, top: pos.y };
+
+  return (
+    <div
+      onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}
+      onClick={() => { if (!movedRef.current) onExpand(); }}
+      style={{
+        position: "fixed", ...anchored, zIndex: 1200, width: W, height: H,
+        borderRadius: 14, overflow: "hidden", cursor: "pointer",
+        background: "#0b1220", border: "1px solid #ffffff33",
+        boxShadow: "0 8px 30px #00000066", color: "#fff",
+        display: "flex", flexDirection: isVideo ? "column" : "row", alignItems: "center",
+        touchAction: "none",
+      }}>
+      {isVideo ? (
+        <>
+          <VideoTag stream={call.remoteStream} zoomable={false}
+                    style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
+          <div style={{ position: "absolute", top: 6, left: 6, fontSize: 10.5,
+            padding: "1px 6px", borderRadius: 6, background: "#00000066" }}>{mmss(call.duration)}</div>
+          {/* End-call — stopPropagation so hanging up never counts as tap-to-expand */}
+          <div onClick={(e) => { e.stopPropagation(); onEnd(); }} title="End call" style={{
+            position: "absolute", bottom: 6, right: 6, width: 30, height: 30, borderRadius: "50%",
+            background: "#ef4444", display: "flex", alignItems: "center", justifyContent: "center",
+          }}>{I.callEnd("#fff", 15)}</div>
+        </>
+      ) : (
+        <>
+          <div style={{ padding: "0 10px", flexShrink: 0 }}>
+            <Av av={call.peerAvatar} color={call.peerColor} size={44}/>
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600, whiteSpace: "nowrap",
+              overflow: "hidden", textOverflow: "ellipsis" }}>{call.peerName}</div>
+            <div style={{ fontSize: 11.5, color: "#ffffffaa" }}>{mmss(call.duration)}</div>
+          </div>
+          <div onClick={(e) => { e.stopPropagation(); onEnd(); }} title="End call" style={{
+            width: 34, height: 34, borderRadius: "50%", margin: "0 12px", flexShrink: 0,
+            background: "#ef4444", display: "flex", alignItems: "center", justifyContent: "center",
+          }}>{I.callEnd("#fff", 16)}</div>
+        </>
       )}
     </div>
   );
@@ -387,12 +498,23 @@ function OutgoingCall({ call, onEnd }) {
   );
 }
 
-function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen, sinkId, onSinkId, isLandscape }) {
+function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen, onMinimize, sinkId, onSinkId, isLandscape }) {
   const [showSpeakerPicker, setShowSpeakerPicker] = useState(false);
   const [showMore, setShowMore] = useState(false);
-  // The remote peer's OWN video state, not mine — turning my camera off
-  // must not also blank out video they're still sending.
-  const hasRemoteVideo = call.remoteStream?.getVideoTracks().length > 0;
+  // Tap the small self/peer tile to swap which feed is the big one — the
+  // WhatsApp "tap to make my camera the main view" gesture. Pure local UI.
+  const [swapped, setSwapped] = useState(false);
+
+  // The remote peer's OWN media state, not mine — turning my camera off must
+  // not blank out video they're still sending. remoteCameraOff arrives via the
+  // call_media_state ping (useCall.js), so their tile shows their identity the
+  // instant they cover their camera, not a frozen last frame.
+  const hasRemoteVideo = call.remoteStream?.getVideoTracks().length > 0 && !call.remoteCameraOff;
+  const hasLocalVideo = call.callKind === "video" && !call.cameraOff && call.localStream;
+
+  // Which stream is on the main stage vs. in the little corner tile.
+  const mainIsLocal = swapped && hasLocalVideo;
+  const showMainVideo = mainIsLocal ? hasLocalVideo : hasRemoteVideo;
 
   // Landscape on a phone means very little vertical room — the 60px bottom
   // safe-area padding that portrait needs (iPhone notch bar) would eat half
@@ -400,6 +522,7 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
   // preview PiP flips from portrait (tall) to landscape (wide) orientation.
   const pipW = isLandscape ? 120 : 100;
   const pipH = isLandscape ? 80 : 140;
+  const canSwap = hasRemoteVideo && hasLocalVideo;
 
   return (
     <>
@@ -410,17 +533,25 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
           it's actually got, it gets clipped here instead of pushing the
           Mute/Camera/End call bar below it clean off the screen. */}
       <div style={{ flex: 1, position: "relative", overflow: "hidden", minHeight: 0 }}>
-        {/* Always mounted, regardless of whether there's a video track, so
-            remote audio actually plays on a voice-only call — hidden
-            visually rather than left unmounted when there's nothing to
-            show. This is also the element setSinkId() routes through. */}
-        <VideoTag stream={call.remoteStream} sinkId={sinkId} style={hasRemoteVideo ? {
-          width: "100%", height: "100%", objectFit: "cover",
-        } : { display: "none" }}/>
+        {/* Remote video always mounted (even when hidden) so remote audio
+            plays on a voice-only call and setSinkId has an element to route
+            through. When swapped, the remote feed rides in the corner tile
+            instead, so here it only fills the stage when it IS the main. */}
+        <VideoTag stream={call.remoteStream} sinkId={sinkId}
+                  style={(showMainVideo && !mainIsLocal) ? {
+                    width: "100%", height: "100%", objectFit: "cover",
+                  } : { display: "none" }}/>
 
-        {!hasRemoteVideo && <PeerIdentity call={call} subtitle={mmss(call.duration)}/>}
+        {/* Local feed on the main stage (only when swapped in) */}
+        {mainIsLocal && (
+          <VideoTag stream={call.localStream} muted zoomable={false} style={{
+            width: "100%", height: "100%", objectFit: "cover",
+          }}/>
+        )}
 
-        {hasRemoteVideo && (
+        {!showMainVideo && <PeerIdentity call={call} subtitle={mmss(call.duration)}/>}
+
+        {showMainVideo && (
           <div style={{
             position: "absolute", top: isLandscape ? 8 : 16, left: 0, right: 0,
             textAlign: "center", fontSize: 13, color: "#ffffffcc",
@@ -429,14 +560,37 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
           </div>
         )}
 
-        {call.callKind === "video" && !call.cameraOff && call.localStream && (
+        {/* Peer's "muted" indicator — the little pill from the WhatsApp call
+            screen, shown whenever they've turned their mic off. */}
+        {call.remoteMuted && (
+          <div style={{
+            position: "absolute", top: isLandscape ? 30 : 44, left: 0, right: 0,
+            display: "flex", justifyContent: "center",
+          }}>
+            <div style={{
+              display: "flex", alignItems: "center", gap: 6, padding: "5px 12px",
+              borderRadius: 16, background: "#00000066", fontSize: 12.5, color: "#fff",
+            }}>{I.micOff("#fff", 13)} {call.peerName?.split(" ")[0] || "They"} muted</div>
+          </div>
+        )}
+
+        {/* Corner tile: shows whichever feed is NOT on the main stage. Tapping
+            it swaps the two. Camera-flip lives here when it's the self feed. */}
+        {(hasLocalVideo || (mainIsLocal && hasRemoteVideo)) && (
           <div style={{ position: "absolute", bottom: isLandscape ? 8 : 16, right: isLandscape ? 8 : 16 }}>
-            <VideoTag stream={call.localStream} muted zoomable={false} style={{
-              width: pipW, height: pipH, borderRadius: 12, objectFit: "cover",
-              border: "2px solid #ffffff33",
-            }}/>
-            {onSwitchCamera && (
-              <div onClick={onSwitchCamera} title="Switch camera" style={{
+            <div onClick={canSwap ? () => setSwapped((s) => !s) : undefined}
+                 title={canSwap ? "Swap views" : undefined}
+                 style={{ cursor: canSwap ? "pointer" : "default" }}>
+              <VideoTag stream={mainIsLocal ? call.remoteStream : call.localStream}
+                        muted={!mainIsLocal} zoomable={false} style={{
+                width: pipW, height: pipH, borderRadius: 12, objectFit: "cover",
+                border: "2px solid #ffffff33",
+              }}/>
+            </div>
+            {/* Camera flip acts on MY camera — show it on whichever tile is
+                currently showing my feed (the corner, unless swapped). */}
+            {onSwitchCamera && !mainIsLocal && (
+              <div onClick={(e) => { e.stopPropagation(); onSwitchCamera(); }} title="Switch camera" style={{
                 position: "absolute", top: 6, right: 6, width: 28, height: 28, borderRadius: "50%",
                 background: "#00000099", display: "flex", alignItems: "center", justifyContent: "center",
                 cursor: "pointer",
@@ -484,6 +638,14 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
       )}
       {showMore && (
         <MoreMenu onClose={() => setShowMore(false)} items={[
+          {
+            // Minimize back to the conversation — WhatsApp's in-call "chat"
+            // button: the call shrinks to the floating window and the chat
+            // it belongs to is right there underneath.
+            label: "Chat / minimize",
+            icon: I.chat("#fff", 18),
+            onClick: () => { setShowMore(false); onMinimize?.(); },
+          },
           {
             label: call.sharingScreen ? "Stop sharing screen" : "Share screen",
             sub: call.callKind !== "video" ? "Turn your camera on first" : undefined,
