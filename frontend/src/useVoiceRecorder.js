@@ -18,6 +18,11 @@ export function useVoiceRecorder(onFinished) {
   const chunks = useRef([]);
   const stream = useRef(null);
   const timer = useRef(null);
+  // Set by cancel() so onstop knows to discard. A plain "clear chunks before
+  // stop()" is NOT enough: stop() flushes one last ondataavailable BEFORE
+  // onstop fires, which repopulates the buffer — that final chunk is exactly
+  // why a cancelled recording used to still get sent.
+  const cancelled = useRef(false);
   const onFinishedRef = useRef(onFinished);
   onFinishedRef.current = onFinished;
 
@@ -41,22 +46,25 @@ export function useVoiceRecorder(onFinished) {
 
       const instance = new MediaRecorder(media);
       instance.ondataavailable = (event) => {
+        if (cancelled.current) return;                 // dropping this recording
         if (event.data.size > 0) chunks.current.push(event.data);
       };
       instance.onstop = () => {
         releaseStream();
-        // A cancel clears chunks before stopping, so an empty buffer here
-        // means "throw it away," not "send a silent recording."
-        if (chunks.current.length > 0) {
+        // Only hand the blob to the caller when this wasn't a cancel — the
+        // flag is the source of truth, not the buffer length (see cancelled).
+        if (!cancelled.current && chunks.current.length > 0) {
           const blob = new Blob(chunks.current, { type: instance.mimeType || "audio/webm" });
           onFinishedRef.current?.(blob);
         }
         chunks.current = [];
+        cancelled.current = false;
         setState("idle");
         setSeconds(0);
       };
 
       recorder.current = instance;
+      cancelled.current = false;
       instance.start();
       setState("recording");
       setSeconds(0);
@@ -77,7 +85,8 @@ export function useVoiceRecorder(onFinished) {
   }, []);
 
   const cancel = useCallback(() => {
-    chunks.current = [];       // onstop sees an empty buffer and discards
+    cancelled.current = true;  // onstop discards regardless of the final chunk
+    chunks.current = [];
     if (recorder.current?.state === "recording") recorder.current.stop();
     else { releaseStream(); setState("idle"); setSeconds(0); }
   }, [releaseStream]);
