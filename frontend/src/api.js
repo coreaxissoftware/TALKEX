@@ -290,6 +290,10 @@ export const Me = {
 export const Users = {
   list: (query = "") => get(`/users?q=${encodeURIComponent(query)}`),
   get: (userId) => get(`/users/${userId}`),
+
+  // Given phone numbers from the device, return the ones already on TalkEx —
+  // WhatsApp's "contacts who are on here" suggestion list.
+  matchContacts: (phones) => post(`/users/match-contacts`, { phones }),
   block: (userId) => post(`/users/${userId}/block`),
   unblock: (userId) => remove(`/users/${userId}/block`),
   blocked: () => get("/blocks"),
@@ -381,14 +385,37 @@ export const Chats = {
   setDisappearing: (chatId, seconds) => put(`/chats/${chatId}/disappearing`, { seconds }),
   setSlowMode: (chatId, seconds) => put(`/chats/${chatId}/slow-mode?seconds=${seconds}`),
 
+  // Admin toggle: whether messages/posts in this channel or group can be reacted to.
+  setReactionsPolicy: (chatId, enabled) => put(`/chats/${chatId}/reactions-policy?enabled=${enabled}`),
+
+  // A channel's public @handle. Empty string clears it (makes it private).
+  setChannelUsername: (chatId, username) =>
+    put(`/chats/${chatId}/username?username=${encodeURIComponent(username)}`),
+  getChannelByUsername: (username) =>
+    get(`/chats/by-username/${encodeURIComponent(username.replace(/^@/, ""))}`),
+
+  // Join approval (admin-gated). Joining an approval-gated chat returns
+  // { joined:false, requested:true } instead of adding the member.
+  setJoinApproval: (chatId, enabled) => put(`/chats/${chatId}/approval?enabled=${enabled}`),
+  setChannelSignature: (chatId, enabled) => put(`/chats/${chatId}/signature?enabled=${enabled}`),
+  joinRequests: (chatId) => get(`/chats/${chatId}/join-requests`),
+  approveJoinRequest: (chatId, userId) => post(`/chats/${chatId}/join-requests/${userId}/approve`),
+  denyJoinRequest: (chatId, userId) => post(`/chats/${chatId}/join-requests/${userId}/deny`),
+
   lock: (chatId, pin) => post(`/chats/${chatId}/lock`, { pin }),
   unlock: (chatId, pin) => post(`/chats/${chatId}/unlock`, { pin }),
   removeLock: (chatId, pin) => remove(`/chats/${chatId}/lock`, { pin }),
 
   markRead: (chatId, seq) => post(`/chats/${chatId}/read`, { seq }),
 
-  // Who has read up to where. Members with read receipts switched off are
-  // simply absent from the list, same as the server never announcing them.
+  // Acknowledge a message was RECEIVED (delivered) up to `seq` — turns the
+  // sender's single tick into a double. Fire-and-forget; unlike read, there's
+  // no privacy setting to withhold it.
+  markDelivered: (chatId, seq) => post(`/chats/${chatId}/delivered`, { seq }),
+
+  // How far every other member has read AND received. Each row now carries
+  // last_delivered_seq (always) and last_read_seq (null when that member has
+  // read receipts off) so the client can draw single/double/blue ticks.
   readState: (chatId) => get(`/chats/${chatId}/read-state`),
 
   // Owner/admin membership management, separate from the self-serve join/leave.
@@ -1138,7 +1165,7 @@ export function newClientMessageId() {
 // it was queued for later — the caller shows it optimistically either way.
 export async function sendReliably({ chatId, text, kind = "text", payload = null,
                                      replyToId = null, disappearSecs = null,
-                                     clientMsgId = null, viewOnce = false }) {
+                                     clientMsgId = null, viewOnce = false, silent = false }) {
   const message = {
     chat_id: chatId,
     text,
@@ -1147,6 +1174,7 @@ export async function sendReliably({ chatId, text, kind = "text", payload = null
     reply_to_id: replyToId,
     disappear_secs: disappearSecs,
     view_once: viewOnce,
+    silent,
     // The caller passes this in when it has already drawn the message
     // optimistically, so the copy on screen and the copy that comes back over
     // the socket can be recognised as the same thing.

@@ -36,6 +36,12 @@ class SetUsernameRequest(BaseModel):
     username: str = Field(min_length=3, max_length=32, pattern=r"^[a-zA-Z0-9_]+$")
 
 
+class MatchContactsRequest(BaseModel):
+    # Phone numbers pulled from the device address book, to be matched against
+    # existing TalkEx accounts (see /users/match-contacts).
+    phones: list[str] = Field(default_factory=list, max_length=2000)
+
+
 class SetPasswordRequest(BaseModel):
     """
     No current_password field, unlike a typical "change password" form —

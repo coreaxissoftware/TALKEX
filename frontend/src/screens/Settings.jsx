@@ -5,6 +5,7 @@ import {
 } from "../api.js";
 import { ACCENTS, Av, Button, Field, G, I, SRow, Spinner, Toggle, clockTime, whenLabel,
          getStoredEnterToSend, saveEnterToSend } from "../ui.jsx";
+import QrView from "../QrView.jsx";
 import { disablePush, enablePush, getPushSubscription, isPushSupported } from "../push.js";
 import { getAutoDownload, setAutoDownload } from "../mediaPrefs.js";
 import {
@@ -406,6 +407,52 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
         </>
       )}
 
+      <Section id="myqr" icon={I.search(G.accent, 20)} title="My QR code"
+               sub="Let people scan to add you"
+               activeSection={activeSection} onOpen={setActiveSection}
+               onBack={() => setActiveSection(null)}>
+        <div style={{ padding: "12px 20px 20px", textAlign: "center" }}>
+          <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
+            <QrView value={`${window.location.origin}/?user=${me.username}`} size={220}/>
+          </div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: G.text }}>{me.name}</div>
+          <div style={{ fontSize: 13, color: G.muted, marginBottom: 16 }}>@{me.username}</div>
+          <Button style={{ width: "100%", marginBottom: 8 }} onClick={async () => {
+            const url = `${window.location.origin}/?user=${me.username}`;
+            if (navigator.share) { try { await navigator.share({ title: me.name, url }); } catch { /* cancelled */ } }
+            else { navigator.clipboard?.writeText(url); toast("Profile link copied"); }
+          }}>Share my code</Button>
+          <div style={{ fontSize: 11.5, color: G.muted }}>
+            Scanning this opens a chat with you.
+          </div>
+        </div>
+      </Section>
+
+      <Section id="invite" icon={I.share(G.accent, 20)} title="Invite a friend"
+               sub="Share TalkEx with your contacts"
+               activeSection={activeSection} onOpen={setActiveSection}
+               onBack={() => setActiveSection(null)}>
+        <div style={{ padding: "8px 20px 18px" }}>
+          <div style={{ fontSize: 13, color: G.muted, marginBottom: 14 }}>
+            Send friends a link to join you on TalkEx — chat, calls and meetings, all in one place.
+          </div>
+          <Button style={{ width: "100%", marginBottom: 10 }} onClick={async () => {
+            const url = window.location.origin;
+            const text = `Join me on TalkEx — chat, calls and meetings. ${url}`;
+            if (navigator.share) {
+              try { await navigator.share({ title: "TalkEx", text, url }); } catch { /* cancelled */ }
+            } else {
+              navigator.clipboard?.writeText(text);
+              toast("Invite message copied");
+            }
+          }}>Share invite link</Button>
+          <Button variant="ghost" style={{ width: "100%" }} onClick={() => {
+            navigator.clipboard?.writeText(window.location.origin);
+            toast("Link copied");
+          }}>Copy link</Button>
+        </div>
+      </Section>
+
       <Section id="appearance" icon={I.palette(G.accent, 20)} title="Appearance" sub="Theme and color"
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
@@ -785,6 +832,26 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
                           }}>Unblock</Button>
                 }/>
         ))}
+      </Section>
+
+      <Section id="help" icon={I.info(G.accent, 20)} title="Help and feedback"
+               sub="Contact support, app info"
+               activeSection={activeSection} onOpen={setActiveSection}
+               onBack={() => setActiveSection(null)}>
+        <div style={{ padding: "8px 20px 18px" }}>
+          <SRow icon={I.mail(G.accent, 18)} label="Contact support"
+                sub="Questions, bugs or feedback"
+                onClick={() => {
+                  const subject = encodeURIComponent("TalkEx feedback");
+                  window.location.href = `mailto:support@coreaxis.cloud?subject=${subject}`;
+                }}/>
+          <SRow icon={I.shield(G.accent, 18)} label="Terms and privacy"
+                sub="How TalkEx handles your data"
+                onClick={() => window.open(`${window.location.origin}/privacy`, "_blank")}/>
+          <div style={{ fontSize: 12, color: G.muted, textAlign: "center", marginTop: 16 }}>
+            TalkEx — Made from Bihar, connecting the world 💙💚
+          </div>
+        </div>
       </Section>
 
       <Section id="account" icon={I.logOut(G.accent, 20)} title="Account" sub={me.phone || "Sign out, deactivate or delete"}

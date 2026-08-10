@@ -16,6 +16,7 @@ import CameraCapture from "../CameraCapture.jsx";
 import { COUNTRY_CODES, flagFor, samplePlaceholder, splitPhone } from "../countryCodes.js";
 import LocationMap from "../LocationMap.jsx";
 import PhotoEditor from "../PhotoEditor.jsx";
+import QrView from "../QrView.jsx";
 // pdf.js is heavy; load the viewer/editor only when a PDF is actually opened.
 const PdfDoc = lazy(() => import("../PdfDoc.jsx"));
 
@@ -54,12 +55,14 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   // the composer's eye-toggle, cleared again the moment a send actually
   // goes out so it never silently stays on for the next message.
   const [viewOnceText, setViewOnceText] = useState(false);
+  const [silentSend, setSilentSend] = useState(false);
   const [replyTo, setReplyTo] = useState(null);
   const [editing, setEditing] = useState(null);
   const [menuFor, setMenuFor] = useState(null);
   const [infoFor, setInfoFor] = useState(null); // message currently showing the "Message info" sheet
   const [bgMenu, setBgMenu] = useState(null); // { x, y } for right-click/long-press on empty chat background
   const [forwarding, setForwarding] = useState(null);
+  const [lightboxIndex, setLightboxIndex] = useState(null); // index into mediaMessages, or null
   const [selectMode, setSelectMode] = useState(false);
   const [selectedMsgIds, setSelectedMsgIds] = useState(new Set());
   const [pins, setPins] = useState([]);
@@ -70,6 +73,18 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   // these once per messages/pins change and doing O(1) lookups per row
   // fixes the complexity without changing what's rendered.
   const messagesById = useMemo(() => new Map(messages.map((m) => [m.id, m])), [messages]);
+
+  // All the chat's photos/videos, in order — the lightbox pages through this
+  // whole list (WhatsApp-style) rather than the single tapped image.
+  const mediaMessages = useMemo(
+    () => messages.filter((m) => (m.kind === "photo" || m.kind === "video")
+      && !m.deleted_at && m.payload?.attachment_id && !m.view_once),
+    [messages]
+  );
+  const openMedia = useCallback((message) => {
+    const idx = mediaMessages.findIndex((m) => m.id === message.id);
+    setLightboxIndex(idx >= 0 ? idx : 0);
+  }, [mediaMessages]);
   const pinnedIds = useMemo(() => new Set(pins.map((p) => p.id)), [pins]);
   const [starredIds, setStarredIds] = useState(() => new Set());
   const [showPins, setShowPins] = useState(false);
@@ -177,14 +192,23 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
 
   useEffect(() => {
     if (events.some((event) => event._n > lastReadEvent.current && event.chat_id === chat.id
-                               && event.type === "read")) {
+                               && (event.type === "read" || event.type === "delivered"))) {
       lastReadEvent.current = events[events.length - 1]._n;
       reloadReadState();
     }
   }, [events, chat.id, reloadReadState]);
 
-  const readUpToSeq = readState.length
-    ? Math.min(...readState.map((row) => row.last_read_seq))
+  // Read watermark: the lowest last_read_seq among members who actually report
+  // it (receipt-off members come through with last_read_seq === null and are
+  // skipped, so they never hold back — or grant — a blue tick).
+  const readRows = readState.filter((row) => row.last_read_seq != null);
+  const readUpToSeq = readRows.length
+    ? Math.min(...readRows.map((row) => row.last_read_seq))
+    : null;
+  // Delivery watermark: the lowest last_delivered_seq across ALL other members
+  // (delivery is never withheld). A message at or below this shows two ticks.
+  const deliveredUpToSeq = readState.length
+    ? Math.min(...readState.map((row) => row.last_delivered_seq ?? 0))
     : null;
 
   // A pin from anyone in the chat has to update everyone's view of the pinned
@@ -308,7 +332,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
     try {
       const stored = await sendReliably({
         chatId: chat.id, text, replyToId: temporary.reply_to_id, clientMsgId,
-        viewOnce: sendingViewOnce,
+        viewOnce: sendingViewOnce, silent: silentSend,
       });
       setMessages((current) =>
         stored
@@ -1122,6 +1146,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
                       meetingUpdates={meetingUpdates}
                       isPinned={pinnedIds.has(message.id)}
                       isRead={readUpToSeq !== null && message.seq <= readUpToSeq}
+                      isDelivered={deliveredUpToSeq !== null && message.seq <= deliveredUpToSeq}
                       onLongPress={() => {
                         // Nothing sitting in the send queue has a real
                         // server id yet ("pending_..." is a local stand-in)
@@ -1140,6 +1165,10 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
                       }}
                       onVote={(index) => vote(message, index)}
                       onForward={() => setForwarding(message)}
+                      onOpenMedia={openMedia}
+                      signature={chat.signature_enabled && chat.type === "channel"
+                        ? (members.find((m) => m.id === message.sender_id)?.name || "")
+                        : ""}
                       onCallAgain={(kind) => onStartCall(kind)} onJoinMeeting={joinMeeting} toast={toast}/>
             </div>
           </div>
@@ -1174,6 +1203,9 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         toast={toast}
         viewOnce={viewOnceText}
         onToggleViewOnce={() => setViewOnceText((v) => !v)}
+        canSilent={["channel", "community", "broadcast"].includes(chat.type)}
+        silent={silentSend}
+        onToggleSilent={() => setSilentSend((v) => !v)}
         onFile={sendFile}
         onLocation={() => setSheet("location")}
         onContact={() => setSheet("contact")}
@@ -1189,6 +1221,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         <MessageMenu
           message={menuFor} me={me}
           isModerator={chat.role === "owner" || chat.role === "admin"}
+          reactionsEnabled={chat.reactions_enabled !== 0}
           isPinned={pins.some((p) => p.id === menuFor.id)}
           isStarred={starredIds.has(menuFor.id)}
           onClose={() => setMenuFor(null)}
@@ -1223,6 +1256,14 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
       {forwarding && (
         <ForwardSheet message={forwarding} onClose={() => setForwarding(null)}
                       onForward={(toChatIds) => forwardTo(forwarding, toChatIds)}/>
+      )}
+
+      {lightboxIndex != null && mediaMessages[lightboxIndex] && (
+        <ChatMediaLightbox items={mediaMessages} index={lightboxIndex}
+                           onIndexChange={setLightboxIndex} onClose={() => setLightboxIndex(null)}
+                           me={me} members={members}
+                           onForward={(m) => { setLightboxIndex(null); setForwarding(m); }}
+                           toast={toast}/>
       )}
 
       {bgMenu && (
@@ -1369,6 +1410,7 @@ function Header({ chat, typing, onBack, onTimer, onMeeting, onInfo, onVoiceCall,
                    pinCount, onTogglePins, onSearch, onMenu }) {
   const isGroup = chat.type !== "dm";
   const label = typingLabel(typing, isGroup);
+  const [callMenu, setCallMenu] = useState(null); // {x,y} for the voice/video dropdown
   return (
     <div style={{
       display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", paddingBottom: 18,
@@ -1417,15 +1459,19 @@ function Header({ chat, typing, onBack, onTimer, onMeeting, onInfo, onVoiceCall,
           {I.pin(G.accentText, 18)}
         </div>
       )}
-      {chat.type === "dm" && (
-        <div onClick={onVoiceCall} style={{ cursor: "pointer" }} title="Voice call">
-          {I.phone(G.sub, 20)}
+      {(chat.type === "dm" || chat.type === "group") && (
+        <div onClick={(event) => setCallMenu({ x: event.clientX, y: event.clientY })}
+             style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 1 }}
+             title="Call">
+          {chat.type === "dm" ? I.phone(G.sub, 20) : I.video(G.sub, 21)}
+          {I.chevronDown(G.sub, 14)}
         </div>
       )}
-      {chat.type === "group" && (
-        <div onClick={onVideoCall} style={{ cursor: "pointer" }} title="Video call">
-          {I.video(G.sub, 21)}
-        </div>
+      {callMenu && (
+        <ContextMenu x={callMenu.x} y={callMenu.y} onClose={() => setCallMenu(null)} items={[
+          { label: "Voice call", icon: I.phone(G.sub, 16), onClick: onVoiceCall },
+          { label: "Video call", icon: I.video(G.sub, 16), onClick: onVideoCall },
+        ]}/>
       )}
       <div onClick={onMenu} style={{ cursor: "pointer" }} title="More options">
         {I.moreVertical(G.sub, 20)}
@@ -1729,8 +1775,8 @@ function LinkPreview({ text, mine }) {
   );
 }
 
-function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead,
-                  onLongPress, onVote, onForward, onCallAgain, onJoinMeeting, toast }) {
+function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead, isDelivered, signature,
+                  onLongPress, onVote, onForward, onOpenMedia, onCallAgain, onJoinMeeting, toast }) {
   const mine = message.sender_id === me.id;
   const gone = message.deleted_at || message.expired;
 
@@ -1764,8 +1810,15 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead,
   function handlePointerUp(event) {
     clearPressTimer();
     // The long-press timer above already fired onLongPress for touch; this
-    // is only for the mouse, which has no separate long-press path.
-    if (event.pointerType !== "touch" && !longPressFired.current) onLongPress();
+    // is only for the mouse, which has no separate long-press path. A click
+    // that lands on interactive media (a photo/video opening full-screen, a
+    // Download/Forward button) must NOT also pop the message menu — that's
+    // the [data-media] guard. Long-press on touch still reaches the menu via
+    // the timer, unaffected by this mouse-only branch.
+    if (event.pointerType !== "touch" && !longPressFired.current
+        && !event.target.closest?.("[data-media]")) {
+      onLongPress();
+    }
     longPressFired.current = false;
   }
   const pressHandlers = {
@@ -1832,6 +1885,11 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead,
             Forwarded from {message.forwarded_from}
           </div>
         )}
+        {signature && !message.deleted_at && (
+          <div style={{ fontSize: 11.5, fontWeight: 600, color: mine ? "#fff" : G.accentText, marginBottom: 3 }}>
+            {signature}
+          </div>
+        )}
 
         {message.payload?.via_broadcast && (
           <div style={{ fontSize: 11, color: mine ? "#ffffffaa" : G.muted, marginBottom: 3 }}>
@@ -1864,7 +1922,7 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead,
               // out, same as any other pending attachment until it actually
               // reaches the server.
               ? <ViewOnceAttachment message={message} mine={mine}/>
-              : <Attachment message={message} mine={mine} onForward={onForward} toast={toast}/>}
+              : <Attachment message={message} mine={mine} onForward={onForward} onOpenMedia={onOpenMedia} toast={toast}/>}
             {message.text && (
               <div style={{ fontSize: 14, lineHeight: 1.4, whiteSpace: "pre-wrap", marginTop: 6 }}>
                 {renderWithMentions(message.text, mine)}
@@ -1923,10 +1981,12 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead,
           </span>
           {mine && (
             message.pending || message.queued
-              ? I.clock("#ffffff99", 11)                    // still going out
+              ? I.clock("#ffffff99", 11)                    // still going out (clock)
               : isRead
-                ? I.checkDouble("#38bdf8", 13)                // seen — bright, stands out from plain white
-                : I.checkDouble("#ffffffaa", 13)              // delivered, not yet seen
+                ? I.checkDouble("#38bdf8", 13)                // seen — blue double tick
+                : isDelivered
+                  ? I.checkDouble("#ffffffaa", 13)            // delivered — grey double tick
+                  : I.check("#ffffffaa", 13)                  // sent, not yet delivered — single tick
           )}
         </div>
 
@@ -2238,7 +2298,7 @@ function ViewOnceAttachment({ message, mine }) {
  * cannot carry an Authorization header, only cookies, which this app does not
  * use for auth.
  */
-function Attachment({ message, mine, onForward, toast }) {
+function Attachment({ message, mine, onForward, onOpenMedia, toast }) {
   const [blobUrl, setBlobUrl] = useState(null);
   const [error, setError] = useState(false);
   // Tapping a photo/video opens it full-screen, the way WhatsApp does —
@@ -2356,8 +2416,8 @@ function Attachment({ message, mine, onForward, toast }) {
   if (message.kind === "photo") {
     return (
       <>
-        <img src={effectiveUrl} alt={fileName}
-             onClick={(event) => { event.stopPropagation(); setFullscreen(true); }}
+        <img src={effectiveUrl} alt={fileName} data-media="1"
+             onClick={(event) => { event.stopPropagation(); onOpenMedia ? onOpenMedia(message) : setFullscreen(true); }}
              style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 10, display: "block", cursor: "pointer" }}/>
         {fullscreen && (
           <FullscreenMedia kind="photo" src={effectiveUrl} alt={fileName}
@@ -2374,14 +2434,14 @@ function Attachment({ message, mine, onForward, toast }) {
   if (message.kind === "video") {
     return (
       <div>
-        <div style={{ position: "relative" }}>
+        <div style={{ position: "relative" }} data-media="1">
           <video controls src={effectiveUrl}
                  style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 10, display: "block" }}/>
           {/* An explicit expand button — tapping the video body itself is
               reserved for play/pause via the native controls, so the way into
               full-screen is this corner control rather than a tap anywhere. */}
-          <div onClick={(event) => { event.stopPropagation(); setFullscreen(true); }}
-               title="Full screen" style={{
+          <div onClick={(event) => { event.stopPropagation(); onOpenMedia ? onOpenMedia(message) : setFullscreen(true); }}
+               title="Full screen" data-media="1" style={{
                  position: "absolute", top: 6, right: 6, width: 30, height: 30, borderRadius: "50%",
                  background: "#00000099", display: "flex", alignItems: "center", justifyContent: "center",
                  cursor: "pointer",
@@ -2446,7 +2506,7 @@ function Attachment({ message, mine, onForward, toast }) {
 function AttachmentAction({ label, icon, mine, onClick }) {
   const fg = mine ? "#fff" : G.accentText;
   return (
-    <button onClick={(e) => { e.stopPropagation(); onClick(); }} style={{
+    <button data-media="1" onClick={(e) => { e.stopPropagation(); onClick(); }} style={{
       display: "flex", alignItems: "center", gap: 6, padding: "5px 12px", borderRadius: 16,
       cursor: "pointer", fontSize: 12.5, fontWeight: 600, color: fg,
       background: mine ? "#ffffff26" : G.accentSoft, border: "none",
@@ -2672,6 +2732,7 @@ const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
 function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
                     disappearSecs, editing, members, toast, viewOnce, onToggleViewOnce,
+                    canSilent, silent, onToggleSilent,
                     onFile, onLocation, onContact, onPoll, onSticker, onScanCaptured, onFilesPicked }) {
   const voice = useVoiceRecorder((blob) => onVoice(blob));
   const enterToSend = useEnterToSend();
@@ -2871,6 +2932,13 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
           {I.eye(viewOnce ? G.accent : G.sub, 20)}
         </IconButton>
       )}
+      {!editing && canSilent && (
+        <IconButton onClick={onToggleSilent}
+                    label={silent ? "Silent: won't notify subscribers" : "Post silently (no notification)"}
+                    style={{ borderRadius: "50%", background: silent ? G.accentSoft : "transparent" }}>
+          {(silent ? I.bellOff : I.bell)(silent ? G.accent : G.sub, 20)}
+        </IconButton>
+      )}
       <IconButton onClick={toggleEmoji} label={emojiOpen ? "Keyboard" : "Emoji"} style={{ fontSize: 19 }}>
         {emojiOpen ? I.keyboard(G.sub, 20) : "🙂"}
       </IconButton>
@@ -3004,7 +3072,7 @@ function MenuRow({ icon, label, danger, onClick }) {
  * stacked every action as a giant button and overflowed the screen. Tapping
  * the "+" on the reaction bar expands it to the full emoji set.
  */
-function MessageMenu({ message, me, isModerator, isPinned, isStarred, onClose, onReact, onReply,
+function MessageMenu({ message, me, isModerator, reactionsEnabled = true, isPinned, isStarred, onClose, onReact, onReply,
                       onEdit, onUnsend, onDeleteForEveryone, onHide, onPin, onStar, onForward, onShare,
                       onCopy, onSelect, onDownload, onInfo }) {
   const mine = message.sender_id === me.id;
@@ -3050,27 +3118,30 @@ function MessageMenu({ message, me, isModerator, isPinned, isStarred, onClose, o
       <div onClick={(e) => e.stopPropagation()} style={{
         display: "flex", flexDirection: "column", gap: 10, width: "100%", maxWidth: 300,
       }}>
-        {/* Reaction bar */}
-        <div style={{
-          display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
-          flexWrap: showAllEmojis ? "wrap" : "nowrap",
-          background: G.surface, border: `1px solid ${G.border}`,
-          borderRadius: 26, padding: showAllEmojis ? "10px 12px" : "7px 10px",
-          maxHeight: showAllEmojis ? "40vh" : "none", overflowY: showAllEmojis ? "auto" : "visible",
-        }}>
-          {(showAllEmojis ? EMOJIS : quickEmojis).map((emoji) => (
-            <button key={emoji} onClick={() => onReact(emoji)} style={{
-              fontSize: 25, lineHeight: 1, padding: 4, borderRadius: "50%", cursor: "pointer",
-              background: "transparent", border: "none",
-            }}>{emoji}</button>
-          ))}
-          {!showAllEmojis && (
-            <button onClick={() => setShowAllEmojis(true)} title="More" style={{
-              width: 34, height: 34, borderRadius: "50%", cursor: "pointer", flexShrink: 0,
-              background: G.dim, border: "none", display: "flex", alignItems: "center", justifyContent: "center",
-            }}>{I.plus(G.sub, 18)}</button>
-          )}
-        </div>
+        {/* Reaction bar — hidden entirely when an admin has turned reactions
+            off for this channel/group. */}
+        {reactionsEnabled && !message.deleted_at && (
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
+            flexWrap: showAllEmojis ? "wrap" : "nowrap",
+            background: G.surface, border: `1px solid ${G.border}`,
+            borderRadius: 26, padding: showAllEmojis ? "10px 12px" : "7px 10px",
+            maxHeight: showAllEmojis ? "40vh" : "none", overflowY: showAllEmojis ? "auto" : "visible",
+          }}>
+            {(showAllEmojis ? EMOJIS : quickEmojis).map((emoji) => (
+              <button key={emoji} onClick={() => onReact(emoji)} style={{
+                fontSize: 25, lineHeight: 1, padding: 4, borderRadius: "50%", cursor: "pointer",
+                background: "transparent", border: "none",
+              }}>{emoji}</button>
+            ))}
+            {!showAllEmojis && (
+              <button onClick={() => setShowAllEmojis(true)} title="More" style={{
+                width: 34, height: 34, borderRadius: "50%", cursor: "pointer", flexShrink: 0,
+                background: G.dim, border: "none", display: "flex", alignItems: "center", justifyContent: "center",
+              }}>{I.plus(G.sub, 18)}</button>
+            )}
+          </div>
+        )}
 
         {/* Action list */}
         <div style={{
@@ -3104,8 +3175,12 @@ function MessageInfoSheet({ message, chat, members, readState, onClose }) {
 
   const statusFor = (userId) => {
     const row = readState.find((r) => r.user_id === userId);
-    if (!row) return null; // receipts off for this person, or not a member of readState at all
-    return row.last_read_seq >= message.seq ? "read" : "delivered";
+    if (!row) return null;
+    // last_read_seq is null when that member hides read receipts — they can
+    // still be "delivered", just never "read".
+    if (row.last_read_seq != null && row.last_read_seq >= message.seq) return "read";
+    if ((row.last_delivered_seq ?? 0) >= message.seq) return "delivered";
+    return "sent";
   };
 
   const read = others.filter((person) => statusFor(person.id) === "read");
@@ -4169,6 +4244,12 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
   const [mutedUntil, setMutedUntil] = useState(chat.muted_until || 0);
   const [memberQuery, setMemberQuery] = useState("");
   const [slowModeSecs, setSlowModeSecs] = useState(chat.slow_mode_secs || 0);
+  const [reactionsOn, setReactionsOn] = useState(chat.reactions_enabled !== 0);
+  const [handle, setHandle] = useState(chat.public_username || "");
+  const [handleSaving, setHandleSaving] = useState(false);
+  const [approvalOn, setApprovalOn] = useState(Boolean(chat.require_approval));
+  const [signatureOn, setSignatureOn] = useState(Boolean(chat.signature_enabled));
+  const [pendingReqs, setPendingReqs] = useState([]);
   const lastMemberEvent = useRef(0);
 
   // DM-only: the other person's profile plus whether they're already a
@@ -4270,6 +4351,16 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
 
   const myRole = full?.my_role;
   const canManage = myRole === "owner" || myRole === "admin";
+
+  // Admins load pending join requests (and refresh them when one arrives).
+  const reloadRequests = useCallback(() => {
+    if (!canManage || !["group", "channel", "community"].includes(chat.type)) return;
+    Chats.joinRequests(chat.id).then(setPendingReqs).catch(() => {});
+  }, [canManage, chat.id, chat.type]);
+  useEffect(reloadRequests, [reloadRequests]);
+  useEffect(() => {
+    if (events.some((e) => e.type === "join_request" && e.chat_id === chat.id)) reloadRequests();
+  }, [events, chat.id, reloadRequests]);
 
   async function removeMember(userId) {
     try {
@@ -4518,6 +4609,133 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
         </div>
       )}
 
+      {["group", "channel", "community"].includes(chat.type) && canManage && (
+        <div style={{
+          padding: "14px 4px", borderTop: `1px solid ${G.border}`,
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+        }}>
+          <div>
+            <div style={{ fontSize: 13.5 }}>Reactions</div>
+            <div style={{ fontSize: 11.5, color: G.muted }}>
+              Let members react to messages with emoji
+            </div>
+          </div>
+          <Toggle on={reactionsOn} onChange={async (value) => {
+            setReactionsOn(value);
+            try {
+              await Chats.setReactionsPolicy(chat.id, value);
+              onChanged?.();
+            } catch (problem) {
+              setReactionsOn(!value);
+              toast(problem.message || "Could not update reactions");
+            }
+          }}/>
+        </div>
+      )}
+
+      {chat.type === "channel" && canManage && (
+        <div style={{ padding: "14px 4px", borderTop: `1px solid ${G.border}` }}>
+          <div style={{ fontSize: 13.5, marginBottom: 4 }}>Public link</div>
+          <div style={{ fontSize: 11.5, color: G.muted, marginBottom: 8 }}>
+            Give the channel a @username so anyone can find and join it.
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <div style={{
+              display: "flex", alignItems: "center", flex: 1, background: G.dim,
+              border: `1px solid ${G.border}`, borderRadius: 10, padding: "0 10px",
+            }}>
+              <span style={{ color: G.muted, fontSize: 14 }}>@</span>
+              <input value={handle}
+                     onChange={(e) => setHandle(e.target.value.replace(/[^a-zA-Z0-9_]/g, "").toLowerCase())}
+                     placeholder="channelname" maxLength={32}
+                     style={{ flex: 1, border: "none", outline: "none", background: "transparent",
+                              color: G.text, fontSize: 14, padding: "9px 6px" }}/>
+            </div>
+            <Button disabled={handleSaving} onClick={async () => {
+              setHandleSaving(true);
+              try {
+                const res = await Chats.setChannelUsername(chat.id, handle);
+                setHandle(res.public_username || "");
+                toast(res.public_username ? "Public link updated" : "Public link removed");
+                onChanged?.();
+              } catch (problem) {
+                toast(problem.message || "Could not update the username");
+              } finally { setHandleSaving(false); }
+            }} style={{ padding: "9px 16px" }}>Save</Button>
+          </div>
+          {chat.public_username && (
+            <div onClick={() => { navigator.clipboard?.writeText(`@${chat.public_username}`); toast("Copied"); }}
+                 style={{ fontSize: 12, color: G.accentText, marginTop: 8, cursor: "pointer" }}>
+              Share: @{chat.public_username} (tap to copy)
+            </div>
+          )}
+
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 16 }}>
+            <div>
+              <div style={{ fontSize: 13.5 }}>Sign posts</div>
+              <div style={{ fontSize: 11.5, color: G.muted }}>Show the admin's name on each post</div>
+            </div>
+            <Toggle on={signatureOn} onChange={async (value) => {
+              setSignatureOn(value);
+              try { await Chats.setChannelSignature(chat.id, value); onChanged?.(); }
+              catch (problem) { setSignatureOn(!value); toast(problem.message || "Could not update"); }
+            }}/>
+          </div>
+        </div>
+      )}
+
+      {["group", "channel", "community"].includes(chat.type) && canManage && (
+        <div style={{ padding: "14px 4px", borderTop: `1px solid ${G.border}` }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+            <div>
+              <div style={{ fontSize: 13.5 }}>Approve new members</div>
+              <div style={{ fontSize: 11.5, color: G.muted }}>
+                People must be approved before they can join
+              </div>
+            </div>
+            <Toggle on={approvalOn} onChange={async (value) => {
+              setApprovalOn(value);
+              try { await Chats.setJoinApproval(chat.id, value); onChanged?.(); }
+              catch (problem) { setApprovalOn(!value); toast(problem.message || "Could not update"); }
+            }}/>
+          </div>
+
+          {pendingReqs.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 12, color: G.sub, marginBottom: 6 }}>
+                Requests ({pendingReqs.length})
+              </div>
+              {pendingReqs.map((person) => (
+                <div key={person.id} style={{
+                  display: "flex", alignItems: "center", gap: 10, padding: "7px 4px",
+                  borderBottom: `1px solid ${G.border}`,
+                }}>
+                  <Av av={person.avatar_letter} color={person.color} size={30}
+                      photoId={person.avatar_attachment_id}/>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13.5 }}>{person.name}</div>
+                    <div style={{ fontSize: 11, color: G.muted }}>@{person.username}</div>
+                  </div>
+                  <Button style={{ padding: "5px 12px", fontSize: 11 }} onClick={async () => {
+                    try {
+                      await Chats.approveJoinRequest(chat.id, person.id);
+                      setPendingReqs((cur) => cur.filter((r) => r.id !== person.id));
+                      reloadFull();
+                    } catch (problem) { toast(problem.message || "Could not approve"); }
+                  }}>Approve</Button>
+                  <Button variant="ghost" style={{ padding: "5px 10px", fontSize: 11 }} onClick={async () => {
+                    try {
+                      await Chats.denyJoinRequest(chat.id, person.id);
+                      setPendingReqs((cur) => cur.filter((r) => r.id !== person.id));
+                    } catch (problem) { toast(problem.message || "Could not deny"); }
+                  }}>Deny</Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {managed && (
         <div style={{ padding: "12px 4px" }}>
           <div style={{
@@ -4525,7 +4743,7 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
             marginBottom: 8,
           }}>
             <div style={{ fontSize: 12, color: G.sub }}>
-              Members {full ? `(${full.members.length})` : ""}
+              {chat.type === "channel" ? "Subscribers" : "Members"} {full ? `(${full.members.length})` : ""}
             </div>
             {canManage && (
               <div onClick={() => setShowAddMembers(true)} style={{ cursor: "pointer" }} title="Add members">
@@ -4830,6 +5048,226 @@ function MediaLightbox({ items, index, onIndexChange, onClose }) {
   );
 }
 
+// A round icon button for the lightbox top bar.
+function LbIconBtn({ onClick, title, children }) {
+  return (
+    <div onClick={onClick} title={title} style={{
+      width: 38, height: 38, borderRadius: "50%", cursor: "pointer",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      background: "#ffffff14", color: "#fff", fontSize: 20, lineHeight: 1, userSelect: "none",
+    }}
+      onMouseEnter={(e) => { e.currentTarget.style.background = "#ffffff2a"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.background = "#ffffff14"; }}>
+      {children}
+    </div>
+  );
+}
+
+// One thumbnail in the lightbox's bottom strip. Fetches its own (cached) blob
+// so the strip fills in progressively rather than blocking on all of them.
+function LightboxThumb({ item, active, onClick }) {
+  const [url, setUrl] = useState(null);
+  const attachmentId = item?.payload?.attachment_id;
+  useEffect(() => {
+    if (!attachmentId) return;
+    let cancelled = false;
+    let objectUrl = null;
+    Uploads.fetchBlobUrl(attachmentId, { cache: true })
+      .then((u) => { if (cancelled) { URL.revokeObjectURL(u); return; } objectUrl = u; setUrl(u); })
+      .catch(() => {});
+    return () => { cancelled = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [attachmentId]);
+  return (
+    <div onClick={onClick} style={{
+      width: 52, height: 52, flexShrink: 0, borderRadius: 8, overflow: "hidden", cursor: "pointer",
+      border: `2px solid ${active ? G.accent : "transparent"}`, background: "#222", position: "relative",
+    }}>
+      {url && <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }}/>}
+      {item.kind === "video" && (
+        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "#0004" }}>
+          {I.play("#fff", 16)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * WhatsApp-style full-screen media viewer for a whole chat's photos/videos:
+ * a top bar (sender + time + zoom / edit / forward / download / close),
+ * prev/next navigation, wheel- and button-zoom with drag-to-pan, and a bottom
+ * thumbnail strip of every image/video in the conversation. Opened from a
+ * bubble tap (ChatView lifts the media list up so navigation spans the whole
+ * chat, not just the one photo).
+ */
+function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, onForward, toast }) {
+  const current = items[index];
+  const [blobUrl, setBlobUrl] = useState(null);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [editing, setEditing] = useState(false);
+  const [editFile, setEditFile] = useState(null);
+  const dragRef = useRef(null);
+  const attachmentId = current?.payload?.attachment_id;
+  const isVideo = current?.kind === "video";
+
+  useEffect(() => {
+    setBlobUrl(null);
+    if (!attachmentId) return;
+    let cancelled = false;
+    let objectUrl = null;
+    Uploads.fetchBlobUrl(attachmentId, { cache: true })
+      .then((u) => { if (cancelled) { URL.revokeObjectURL(u); return; } objectUrl = u; setBlobUrl(u); })
+      .catch(() => {});
+    return () => { cancelled = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [attachmentId]);
+
+  useEffect(() => { setZoom(1); setPan({ x: 0, y: 0 }); }, [index]);
+
+  useEffect(() => {
+    function onKey(event) {
+      if (event.key === "Escape") onClose();
+      if (event.key === "ArrowLeft" && index > 0) onIndexChange(index - 1);
+      if (event.key === "ArrowRight" && index < items.length - 1) onIndexChange(index + 1);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [index, items.length, onIndexChange, onClose]);
+
+  const senderName = !current ? "" : current.sender_id === me.id
+    ? "You"
+    : (members.find((m) => m.id === current.sender_id)?.name || current.sender_name || "");
+
+  function download() {
+    if (!blobUrl) return;
+    const link = document.createElement("a");
+    link.href = blobUrl;
+    link.download = current.payload?.file_name || (isVideo ? "video.mp4" : "photo.jpg");
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+
+  async function openEditor() {
+    if (!blobUrl) return;
+    try {
+      const blob = await (await fetch(blobUrl)).blob();
+      setEditFile(new File([blob], current.payload?.file_name || "photo.jpg", { type: blob.type || "image/jpeg" }));
+      setEditing(true);
+    } catch { toast && toast("Could not open the editor"); }
+  }
+
+  function saveEdited(edited) {
+    setEditing(false);
+    const url = URL.createObjectURL(edited);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = edited.name || "edited.jpg";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    toast && toast("Saved edited photo");
+  }
+
+  function onWheel(event) {
+    if (isVideo) return;
+    const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
+    setZoom((z) => Math.min(6, Math.max(1, z * factor)));
+  }
+  function onImgPointerDown(event) {
+    if (zoom <= 1) return;
+    dragRef.current = { x: event.clientX, y: event.clientY, pan };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+  function onImgPointerMove(event) {
+    if (!dragRef.current) return;
+    setPan({ x: dragRef.current.pan.x + (event.clientX - dragRef.current.x), y: dragRef.current.pan.y + (event.clientY - dragRef.current.y) });
+  }
+  function onImgPointerUp() { dragRef.current = null; }
+
+  if (editing && editFile) {
+    return <PhotoEditor file={editFile} onCancel={() => setEditing(false)} onDone={saveEdited}/>;
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "#0b0b0b", zIndex: 1250, display: "flex", flexDirection: "column" }}>
+      {/* Top bar */}
+      <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 16px", flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, color: "#fff" }}>
+          {current && (
+            <Av av={(senderName || "?")[0]} color={current.sender_color || G.accent} size={36}
+                photoId={current.sender_avatar_attachment_id}/>
+          )}
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {senderName || "Media"}
+            </div>
+            <div style={{ fontSize: 12, color: "#ffffff99" }}>{current ? whenLabel(current.created_at) : ""}</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {!isVideo && <LbIconBtn onClick={() => setZoom((z) => Math.max(1, +(z - 0.5).toFixed(2)))} title="Zoom out">−</LbIconBtn>}
+          {!isVideo && <LbIconBtn onClick={() => setZoom((z) => Math.min(6, +(z + 0.5).toFixed(2)))} title="Zoom in">+</LbIconBtn>}
+          {!isVideo && <LbIconBtn onClick={openEditor} title="Edit">{I.edit("#fff", 18)}</LbIconBtn>}
+          {onForward && current && <LbIconBtn onClick={() => { onForward(current); onClose(); }} title="Forward">{I.fwd("#fff", 18)}</LbIconBtn>}
+          <LbIconBtn onClick={download} title="Download">{I.download("#fff", 18)}</LbIconBtn>
+          <LbIconBtn onClick={onClose} title="Close">×</LbIconBtn>
+        </div>
+      </div>
+
+      {/* Stage */}
+      <div onWheel={onWheel} style={{
+        flex: 1, minHeight: 0, position: "relative", display: "flex",
+        alignItems: "center", justifyContent: "center", overflow: "hidden",
+      }}>
+        {index > 0 && (
+          <div onClick={() => onIndexChange(index - 1)} style={{
+            position: "absolute", left: 10, zIndex: 2, cursor: "pointer", color: "#fff",
+            width: 44, height: 44, borderRadius: "50%", background: "#ffffff1a",
+            display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26, userSelect: "none",
+          }}>‹</div>
+        )}
+        {index < items.length - 1 && (
+          <div onClick={() => onIndexChange(index + 1)} style={{
+            position: "absolute", right: 10, zIndex: 2, cursor: "pointer", color: "#fff",
+            width: 44, height: 44, borderRadius: "50%", background: "#ffffff1a",
+            display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26, userSelect: "none",
+          }}>›</div>
+        )}
+
+        {!blobUrl ? (
+          <Spinner/>
+        ) : isVideo ? (
+          <video src={blobUrl} controls autoPlay style={{ maxWidth: "94vw", maxHeight: "100%" }}/>
+        ) : (
+          <img src={blobUrl} alt={current.text || "Photo"} draggable={false}
+               onPointerDown={onImgPointerDown} onPointerMove={onImgPointerMove}
+               onPointerUp={onImgPointerUp} onPointerCancel={onImgPointerUp}
+               style={{
+                 maxWidth: "96vw", maxHeight: "100%", objectFit: "contain",
+                 transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+                 transition: dragRef.current ? "none" : "transform 0.12s ease-out",
+                 cursor: zoom > 1 ? "grab" : "default", touchAction: "none",
+               }}/>
+        )}
+      </div>
+
+      {/* Thumbnail strip */}
+      {items.length > 1 && (
+        <div style={{
+          display: "flex", gap: 6, padding: "10px 12px", overflowX: "auto", flexShrink: 0,
+          justifyContent: items.length > 6 ? "flex-start" : "center", background: "#000",
+        }}>
+          {items.map((it, i) => (
+            <LightboxThumb key={it.id || i} item={it} active={i === index} onClick={() => onIndexChange(i)}/>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function InviteLinkSheet({ chat, onClose, toast }) {
   const [code, setCode] = useState(chat.invite_code || null);
   const [busy, setBusy] = useState(false);
@@ -4857,27 +5295,40 @@ function InviteLinkSheet({ chat, onClose, toast }) {
     }
   }
 
+  // A full shareable URL (App.jsx auto-joins on ?invite=<code>), not just the
+  // bare code — this is what the link button and the QR both point at.
+  const link = code ? `${window.location.origin}/?invite=${code}` : "";
+
   function copy() {
-    navigator.clipboard?.writeText(code);
-    toast("Copied");
+    navigator.clipboard?.writeText(link);
+    toast("Link copied");
+  }
+
+  async function share() {
+    if (navigator.share) {
+      try { await navigator.share({ title: chat.name || "Join on TalkEx", url: link }); } catch { /* cancelled */ }
+    } else { copy(); }
   }
 
   return (
     <Sheet title="Invite link" onClose={onClose}>
       {code ? (
         <>
+          <div style={{ display: "flex", justifyContent: "center", marginBottom: 14 }}>
+            <QrView value={link} size={190}/>
+          </div>
           <div style={{
             padding: "12px 14px", borderRadius: 12, background: G.dim,
-            border: `1px solid ${G.border}`, fontFamily: "monospace", fontSize: 13,
-            wordBreak: "break-all", marginBottom: 14,
-          }}>{code}</div>
+            border: `1px solid ${G.border}`, fontSize: 12.5,
+            wordBreak: "break-all", marginBottom: 12, color: G.text,
+          }}>{link}</div>
           <div style={{ fontSize: 12, color: G.muted, marginBottom: 14 }}>
-            Anyone with this code can join from + → Join via code — no
-            invitation needed.
+            Anyone who opens this link (or scans the QR) can join — no invitation needed.
           </div>
           <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
-            <Button variant="ghost" onClick={copy} style={{ flex: 1 }}>Copy code</Button>
-            <Button onClick={generate} disabled={busy} style={{ flex: 1 }}>Rotate</Button>
+            <Button onClick={share} style={{ flex: 1 }}>Share link</Button>
+            <Button variant="ghost" onClick={copy} style={{ flex: 1 }}>Copy</Button>
+            <Button variant="ghost" onClick={generate} disabled={busy} style={{ flex: 1 }}>Rotate</Button>
           </div>
           <Button variant="danger" onClick={revoke} disabled={busy} style={{ width: "100%" }}>
             Revoke link

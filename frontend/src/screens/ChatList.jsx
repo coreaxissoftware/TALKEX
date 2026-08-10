@@ -786,6 +786,13 @@ function ChatRow({ chat, typing, onOpen, onPin, onArchive, onClear, onDelete, on
 
         {!selectMode && (
           <div ref={chevronRef}
+               // Keep the row's own pointer handlers (which call
+               // setPointerCapture and would otherwise swallow this click,
+               // opening the chat instead) from ever engaging for a press that
+               // starts on the chevron — so a plain left-click here opens the
+               // options menu, exactly like a right-click anywhere on the row.
+               onPointerDown={(event) => event.stopPropagation()}
+               onPointerUp={(event) => event.stopPropagation()}
                onClick={(event) => { event.stopPropagation(); onMenu(event.clientX, event.clientY); }}
                title="More options"
                style={{

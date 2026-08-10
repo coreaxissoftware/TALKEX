@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ApiError, Auth, Calls, Chats, E2EE, Me, Meetings, Messages, Scheduled, Search,
+  ApiError, Auth, Calls, Chats, E2EE, Me, Meetings, Messages, Scheduled, Search, Users,
   clearToken, flushEverything, getToken, rememberAccount,
 } from "./api.js";
 import { initE2EE, clearE2EEKeys } from "./e2ee.js";
@@ -245,6 +245,24 @@ export default function App() {
       .catch((problem) => toast(problem.message || "That meeting link is invalid or you don't have access"));
   }, [me]);
 
+  // A scanned "add me" QR / profile link lands here as ?user=<username> —
+  // resolve it to that account and open a DM, so scanning someone's code
+  // starts a chat straight away (WhatsApp's my-QR flow).
+  useEffect(() => {
+    if (!me) return;
+    const username = new URLSearchParams(window.location.search).get("user");
+    if (!username) return;
+    window.history.replaceState(null, "", window.location.pathname);
+    Users.list(username)
+      .then((matches) => {
+        const person = (matches || []).find((u) => u.username?.toLowerCase() === username.toLowerCase());
+        if (!person) throw new Error("No account with that username");
+        return Chats.dm(person.id);
+      })
+      .then((chat) => { reloadChats(); setOpenChat(chat); })
+      .catch((problem) => toast(problem.message || "That profile link is invalid"));
+  }, [me]);
+
   // Just a count for the tab badge — Planner itself fetches the real lists.
   // "What have I got waiting" mirrors Planner's own framing of the screen:
   // upcoming meetings plus messages still queued to send.
@@ -417,6 +435,15 @@ export default function App() {
     // you happened to reopen that conversation once more while online.
     if (event.type === "message" && event.message?.chat_id) {
       offlineDb.saveMessages(event.message.chat_id, [event.message]).catch(() => {});
+    }
+
+    // Acknowledge delivery of any message received from someone else — whether
+    // or not its chat is open — so the sender's single tick flips to a double
+    // while we're connected. (Messages that arrived while we were offline get
+    // backfilled server-side the moment the socket reconnects.)
+    if (event.type === "message" && event.message && event.message.sender_id !== me?.id
+        && event.message.seq && event.message.chat_id) {
+      Chats.markDelivered(event.message.chat_id, event.message.seq).catch(() => {});
     }
 
     // A call log entry for a call placed TO this user — refresh the missed

@@ -38,6 +38,7 @@ const TABS = [
     { key: "crop", label: "Crop" },
     { key: "rotate", label: "Rotate" },
     { key: "flip", label: "Flip" },
+    { key: "tune", label: "Tune" },
   ]},
   { key: "filter", label: "Filter", tools: [] },
   { key: "annotate", label: "Draw", tools: [
@@ -111,6 +112,15 @@ function FlipIcon({ color = "#fff", size = 20 }) {
     </svg>
   );
 }
+function TuneIcon({ color = "#fff", size = 20 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <line x1="4" y1="7" x2="20" y2="7"/><circle cx="9" cy="7" r="2.4" fill={color} stroke="none"/>
+      <line x1="4" y1="12" x2="20" y2="12"/><circle cx="15" cy="12" r="2.4" fill={color} stroke="none"/>
+      <line x1="4" y1="17" x2="20" y2="17"/><circle cx="11" cy="17" r="2.4" fill={color} stroke="none"/>
+    </svg>
+  );
+}
 function PenIcon({ color = "#fff", size = 20 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
@@ -163,7 +173,7 @@ function ShapeIcon({ color = "#fff", size = 20 }) {
 }
 
 const TOOL_ICON_MAP = {
-  crop: CropIcon, rotate: RotateIcon, flip: FlipIcon,
+  crop: CropIcon, rotate: RotateIcon, flip: FlipIcon, tune: TuneIcon,
   draw: PenIcon, highlighter: MarkerIcon, eraser: EraserIcon,
   text: TextIcon, sticker: StickerIcon, shape: ShapeIcon,
 };
@@ -284,6 +294,25 @@ export default function PhotoEditor({ file, onCancel, onDone }) {
 
   useEffect(() => { setPan((p) => clampPan(p)); }, [clampPan]);
   useEffect(() => { setMarks([]); }, [aspect]);
+
+  // Web: mouse wheel zooms the editing area — scroll up to zoom in, down to
+  // zoom out (touch already pinch-zooms via onTouchMove). Attached natively
+  // with { passive: false } so preventDefault actually stops the page/panel
+  // from scrolling underneath; React's onWheel can be passive and would just
+  // warn instead. Disabled while the crop overlay is up so it doesn't fight
+  // the crop-frame interaction.
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    function handleWheel(event) {
+      if (cropActive) return;
+      event.preventDefault();
+      const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
+      setZoom((z) => Math.min(5, Math.max(1, z * factor)));
+    }
+    el.addEventListener("wheel", handleWheel, { passive: false });
+    return () => el.removeEventListener("wheel", handleWheel);
+  }, [cropActive]);
 
   // Reset crop when aspect changes
   useEffect(() => {
@@ -936,6 +965,10 @@ export default function PhotoEditor({ file, onCancel, onDone }) {
         {/* ADJUST tab — Aspect pills + Brightness/Contrast/Saturation */}
         {activeTab === "adjust" && (
           <div style={{ padding: "8px 16px" }}>
+            {/* Crop tool → aspect ratio pills + fine-rotation dial. Nothing in
+                this panel shows until a tool is picked from the bottom bar, so
+                the sliders no longer sit here permanently. */}
+            {tool === "crop" && (<>
             {/* Aspect ratio pills */}
             <div style={{ display: "flex", gap: 8, marginBottom: 10, overflowX: "auto" }}>
               {ASPECTS.map((option) => (
@@ -994,8 +1027,12 @@ export default function PhotoEditor({ file, onCancel, onDone }) {
                 }}>Reset</div>
               )}
             </div>
+            </>)}
 
-            {/* Brightness / Contrast / Saturation */}
+            {/* Tune tool → Brightness / Contrast / Saturation (shown only when
+                the Tune tool is active, not permanently). */}
+            {tool === "tune" && (
+            <div>
             {[
               { label: "Brightness", value: brightness, set: setBrightness },
               { label: "Contrast", value: contrast, set: setContrast },
@@ -1010,6 +1047,8 @@ export default function PhotoEditor({ file, onCancel, onDone }) {
                 <span style={{ fontSize: 11, color: "#ffffff88", width: 28, textAlign: "right" }}>{value}</span>
               </div>
             ))}
+            </div>
+            )}
           </div>
         )}
 

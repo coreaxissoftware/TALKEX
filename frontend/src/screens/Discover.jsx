@@ -22,6 +22,8 @@ export default function Discover({ onOpenChat, onChanged, toast }) {
   const [creatingBroadcast, setCreatingBroadcast] = useState(false);
   const [joiningViaCode, setJoiningViaCode] = useState(false);
   const [addingContact, setAddingContact] = useState(false);
+  const [onTalkEx, setOnTalkEx] = useState(null); // device contacts that have a TalkEx account
+  const [findingContacts, setFindingContacts] = useState(false);
 
   useEffect(() => {
     // Every keystroke fires a new request set with no debounce and — until
@@ -80,6 +82,28 @@ export default function Discover({ onOpenChat, onChanged, toast }) {
     }
   }
 
+  // WhatsApp's "who from your contacts is on here": read the device address
+  // book (same one-shot picker as import), then ask the server which of those
+  // numbers already have a TalkEx account and surface them to start a chat.
+  async function findContactsOnTalkEx() {
+    setFindingContacts(true);
+    try {
+      const picked = await navigator.contacts.select(["name", "tel"], { multiple: true });
+      const phones = [];
+      for (const person of picked) {
+        for (const tel of (person.tel || [])) if (tel) phones.push(tel);
+      }
+      if (phones.length === 0) { setOnTalkEx([]); return; }
+      const matched = await Users.matchContacts(phones);
+      setOnTalkEx(matched);
+      toast(matched.length ? `${matched.length} contact${matched.length === 1 ? "" : "s"} on TalkEx` : "No contacts on TalkEx yet");
+    } catch (problem) {
+      if (problem.name !== "AbortError") toast("Could not read contacts");
+    } finally {
+      setFindingContacts(false);
+    }
+  }
+
   async function startDm(user) {
     const chat = await Chats.dm(user.id);
     onChanged();
@@ -135,9 +159,43 @@ export default function Discover({ onOpenChat, onChanged, toast }) {
       )}
 
       {!loading && tab === "people" && !query.trim() && (
-        <div style={{ padding: 30, textAlign: "center", color: G.muted, fontSize: 13.5 }}>
-          Search by name or username to find people on TalkEx.
-        </div>
+        <>
+          {"contacts" in navigator && "ContactsManager" in window && (
+            <div style={{ padding: "0 16px 12px" }}>
+              <Button variant="ghost" style={{ width: "100%" }}
+                      onClick={findContactsOnTalkEx} disabled={findingContacts}>
+                {findingContacts ? "Checking…" : "📇 Find contacts on TalkEx"}
+              </Button>
+            </div>
+          )}
+          {onTalkEx && onTalkEx.length > 0 && (
+            <>
+              <div style={{ padding: "4px 16px 6px", fontSize: 12, color: G.sub }}>
+                Contacts on TalkEx ({onTalkEx.length})
+              </div>
+              {onTalkEx.map((person) => (
+                <div key={person.id} onClick={() => startDm(person)} style={{
+                  display: "flex", alignItems: "center", gap: 12, padding: "12px 16px",
+                  borderBottom: `1px solid ${G.border}`, cursor: "pointer",
+                }}>
+                  <Av av={person.avatar_letter} color={person.color} size={44}
+                      online={person.online} photoId={person.avatar_attachment_id}/>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 15, fontWeight: 600, display: "flex", alignItems: "center", gap: 5 }}>
+                      {person.name} {person.blue_tick && I.blueTick(13)}
+                    </div>
+                    <div style={{ fontSize: 12.5, color: G.muted }}>@{person.username}</div>
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+          {(!onTalkEx || onTalkEx.length === 0) && (
+            <div style={{ padding: 30, textAlign: "center", color: G.muted, fontSize: 13.5 }}>
+              Search by name, username or phone number to find people on TalkEx.
+            </div>
+          )}
+        </>
       )}
 
       {!loading && tab === "people" && query.trim().length === 1 && (

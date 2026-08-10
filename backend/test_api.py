@@ -2351,15 +2351,19 @@ def test_read_state_reflects_the_peers_last_read_seq(client):
     client.post("/messages", headers=alice, json={"chat_id": chat_id, "text": "hi"})
 
     state = client.get(f"/chats/{chat_id}/read-state", headers=alice).json()
-    assert state == [{"user_id": bob_id, "last_read_seq": 0}]
+    assert state == [{"user_id": bob_id, "last_delivered_seq": 0, "last_read_seq": 0}]
 
     client.post(f"/chats/{chat_id}/read", headers=bob, json={"seq": 1})
 
+    # Reading bumps both watermarks (read implies delivered).
     state = client.get(f"/chats/{chat_id}/read-state", headers=alice).json()
-    assert state == [{"user_id": bob_id, "last_read_seq": 1}]
+    assert state == [{"user_id": bob_id, "last_delivered_seq": 1, "last_read_seq": 1}]
 
 
-def test_read_state_omits_a_member_who_turned_off_read_receipts(client):
+def test_read_state_nulls_read_for_a_member_who_turned_off_read_receipts(client):
+    # Receipts off hides the READ watermark (last_read_seq comes back null so no
+    # blue tick) but delivery is still reported — matching WhatsApp, where the
+    # sender still sees two grey ticks even when the other side hid "seen".
     alice, _, _ = make_user(client, "Alice")
     bob, bob_id, _ = make_user(client, "Bob")
     chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
@@ -2367,7 +2371,77 @@ def test_read_state_omits_a_member_who_turned_off_read_receipts(client):
     client.patch("/me", headers=bob, json={"show_read_receipts": False})
 
     state = client.get(f"/chats/{chat_id}/read-state", headers=alice).json()
-    assert state == []
+    assert state == [{"user_id": bob_id, "last_delivered_seq": 0, "last_read_seq": None}]
+
+    # Bob reads — delivery advances, but the read watermark stays hidden.
+    client.post("/messages", headers=alice, json={"chat_id": chat_id, "text": "hi"})
+    client.post(f"/chats/{chat_id}/read", headers=bob, json={"seq": 1})
+    state = client.get(f"/chats/{chat_id}/read-state", headers=alice).json()
+    assert state == [{"user_id": bob_id, "last_delivered_seq": 1, "last_read_seq": None}]
+
+
+def test_mark_delivered_reports_delivery_without_read(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+    client.post("/messages", headers=alice, json={"chat_id": chat_id, "text": "hi"})
+
+    client.post(f"/chats/{chat_id}/delivered", headers=bob, json={"seq": 1})
+
+    state = client.get(f"/chats/{chat_id}/read-state", headers=alice).json()
+    assert state == [{"user_id": bob_id, "last_delivered_seq": 1, "last_read_seq": 0}]
+
+
+def test_admin_can_disable_reactions_and_reacting_is_then_blocked(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    group_id = client.post("/chats/group", headers=alice,
+                           json={"name": "Team", "member_ids": [bob_id]}).json()["id"]
+    msg = client.post("/messages", headers=alice,
+                      json={"chat_id": group_id, "text": "hi"}).json()
+
+    # Reactions on by default.
+    assert client.post(f"/messages/{msg['id']}/reactions", headers=bob,
+                       json={"emoji": "👍"}).status_code == 200
+
+    # A non-admin cannot change the policy.
+    assert client.put(f"/chats/{group_id}/reactions-policy?enabled=false",
+                      headers=bob).status_code == 403
+
+    # The owner turns reactions off; further reactions are rejected.
+    assert client.put(f"/chats/{group_id}/reactions-policy?enabled=false",
+                      headers=alice).status_code == 200
+    assert client.post(f"/messages/{msg['id']}/reactions", headers=bob,
+                       json={"emoji": "🔥"}).status_code == 403
+
+
+def test_silent_message_is_accepted_and_stored(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+    resp = client.post("/messages", headers=alice,
+                       json={"chat_id": chat_id, "text": "quietly", "silent": True})
+    assert resp.status_code == 200
+    msgs = client.get(f"/chats/{chat_id}/messages", headers=bob).json()
+    assert any(m["text"] == "quietly" for m in msgs)
+
+
+def test_forwarding_a_channel_post_attributes_to_the_channel(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    channel = client.post("/chats/channel", headers=alice, json={"name": "Announcements"}).json()
+    post = client.post("/messages", headers=alice,
+                       json={"chat_id": channel["id"], "text": "hello world"}).json()
+    dm_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    sent = client.post("/messages/forward", headers=alice,
+                       json={"message_id": post["id"], "to_chat_ids": [dm_id]}).json()
+    assert sent[0]["forwarded_from"] == "Announcements"
+
+    # Re-forwarding keeps the original channel attribution, not the re-forwarder.
+    resent = client.post("/messages/forward", headers=alice,
+                         json={"message_id": sent[0]["id"], "to_chat_ids": [dm_id]}).json()
+    assert resent[0]["forwarded_from"] == "Announcements"
 
 
 # ── Message rate limiting ─────────────────────────────────────────────────────
@@ -5097,3 +5171,96 @@ def test_a_blank_saved_integration_setting_falls_back_to_the_env_var(monkeypatch
     import sms
     auth_key, _template_id, _var_name = sms._config()
     assert auth_key == "env-authkey"
+
+
+def test_channel_public_username_set_and_resolve(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, _, _ = make_user(client, "Bob")
+    channel = client.post("/chats/channel", headers=alice, json={"name": "News"}).json()
+    client.post(f"/chats/{channel['id']}/join", headers=bob)  # bob becomes a subscriber
+
+    # A subscriber (non-admin) cannot set it.
+    assert client.put(f"/chats/{channel['id']}/username?username=daily",
+                      headers=bob).status_code == 403
+    # Owner sets a valid handle.
+    assert client.put(f"/chats/{channel['id']}/username?username=DailyNews",
+                      headers=alice).json()["public_username"] == "dailynews"
+    # Anyone can resolve it.
+    resolved = client.get("/chats/by-username/@dailynews", headers=bob).json()
+    assert resolved["id"] == channel["id"]
+    assert resolved["public_username"] == "dailynews"
+    assert resolved["is_member"] is True  # bob subscribed above
+    # Bad format is rejected; duplicates are rejected.
+    assert client.put(f"/chats/{channel['id']}/username?username=ab",
+                      headers=alice).status_code == 400
+    other = client.post("/chats/channel", headers=alice, json={"name": "Other"}).json()
+    assert client.put(f"/chats/{other['id']}/username?username=dailynews",
+                      headers=alice).status_code == 409
+
+
+def test_join_request_approval_flow(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    channel = client.post("/chats/channel", headers=alice, json={"name": "Gated"}).json()
+
+    # Owner turns approval on.
+    assert client.put(f"/chats/{channel['id']}/approval?enabled=true",
+                      headers=alice).status_code == 200
+
+    # Bob's join becomes a pending request, not a membership.
+    resp = client.post(f"/chats/{channel['id']}/join", headers=bob).json()
+    assert resp == {"joined": False, "requested": True}
+    reqs = client.get(f"/chats/{channel['id']}/join-requests", headers=alice).json()
+    assert [r["id"] for r in reqs] == [bob_id]
+
+    # Bob is NOT yet a member (a non-member gets 404 on the chat).
+    assert client.get(f"/chats/{channel['id']}/messages", headers=bob).status_code == 404
+
+    # Owner approves → bob is in, request cleared.
+    assert client.post(f"/chats/{channel['id']}/join-requests/{bob_id}/approve",
+                       headers=alice).status_code == 200
+    assert client.get(f"/chats/{channel['id']}/messages", headers=bob).status_code == 200
+    assert client.get(f"/chats/{channel['id']}/join-requests", headers=alice).json() == []
+
+
+def _register_phone(client, name, phone):
+    r = client.post("/auth/register", json={"name": name, "username": "u"+uuid.uuid4().hex[:10],
+                                            "password": "correct horse battery", "phone": phone, "bio": ""},
+                    headers={"X-Forwarded-For": fake_client_ip()})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    return {"Authorization": f"Bearer {body['token']}"}, body["user"]["id"]
+
+
+def test_user_search_by_phone_number(client):
+    alice, _ = _register_phone(client, "Alice", "+919000000001")
+    _, bob_id = _register_phone(client, "Bob", "+919876543210")
+
+    found = client.get("/users?q=9876543210", headers=alice).json()
+    assert any(u["id"] == bob_id for u in found)
+
+
+def test_match_contacts_returns_only_registered_numbers(client):
+    alice, _ = _register_phone(client, "Alice", "+919000000002")
+    _, bob_id = _register_phone(client, "Bob", "+919876500011")
+
+    result = client.post("/users/match-contacts", headers=alice,
+                         json={"phones": ["09876500011", "+10000000000", "not-a-number"]})
+    assert result.status_code == 200
+    ids = [u["id"] for u in result.json()]
+    assert bob_id in ids
+    assert len(ids) == 1
+
+
+def test_channel_signature_toggle(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    channel = client.post("/chats/channel", headers=alice, json={"name": "News"}).json()
+    client.post(f"/chats/{channel['id']}/join", headers=bob)
+    # non-admin cannot toggle
+    assert client.put(f"/chats/{channel['id']}/signature?enabled=true", headers=bob).status_code == 403
+    # owner can
+    assert client.put(f"/chats/{channel['id']}/signature?enabled=true",
+                      headers=alice).json()["signature_enabled"] is True
+    got = client.get(f"/chats/{channel['id']}", headers=alice).json()
+    assert got["signature_enabled"] == 1

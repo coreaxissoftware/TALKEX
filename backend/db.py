@@ -389,6 +389,19 @@ CREATE TABLE IF NOT EXISTS broadcast_recipients (
 CREATE INDEX IF NOT EXISTS idx_broadcast_recipients_chat ON broadcast_recipients (chat_id);
 
 
+-- Pending "request to join" for a channel/group that requires approval.
+-- One row per (chat, would-be member); cleared when approved (they become a
+-- real chat_members row) or denied.
+CREATE TABLE IF NOT EXISTS join_requests (
+    chat_id    TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (chat_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_join_requests_chat ON join_requests (chat_id);
+
+
 CREATE TABLE IF NOT EXISTS chat_members (
     chat_id   TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
     user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -400,6 +413,12 @@ CREATE TABLE IF NOT EXISTS chat_members (
     -- The read receipt. One integer per member replaces a per-message read
     -- table: "read up to seq N" answers unread counts with a single comparison.
     last_read_seq INTEGER NOT NULL DEFAULT 0,
+
+    -- The DELIVERY receipt, same watermark idea one step earlier than read:
+    -- "this member's device has received messages up to seq N." Drives the
+    -- single-tick (sent, not yet delivered) vs double-tick (delivered)
+    -- distinction; last_read_seq turns the double tick blue on top of it.
+    last_delivered_seq INTEGER NOT NULL DEFAULT 0,
 
     -- Unix timestamp until which notifications are silenced. 0 means unmuted.
     muted_until REAL NOT NULL DEFAULT 0,
@@ -891,6 +910,19 @@ COLUMNS_ADDED_LATER = [
     ("stories", "font", "TEXT NOT NULL DEFAULT 'system'"),
     ("stories", "font_size", "TEXT NOT NULL DEFAULT 'medium'"),
     ("chats", "slow_mode_secs", "INTEGER NOT NULL DEFAULT 0"),
+    # Channel/group posts allow reactions by default; an admin can switch them
+    # off (see /chats/{id}/reactions-policy).
+    ("chats", "reactions_enabled", "INTEGER NOT NULL DEFAULT 1"),
+    # A channel's public @handle — lowercase, unique among channels. Empty for
+    # a private channel. Lets anyone find/join it by name (see
+    # /chats/by-username) without an invite code, Telegram-style.
+    ("chats", "public_username", "TEXT NOT NULL DEFAULT ''"),
+    # When on, joining goes through admin approval (a join_requests row) rather
+    # than adding the member immediately.
+    ("chats", "require_approval", "INTEGER NOT NULL DEFAULT 0"),
+    # When on, a channel's posts are signed with the posting admin's name
+    # (Telegram channel "sign messages"), otherwise posts are anonymous/branded.
+    ("chats", "signature_enabled", "INTEGER NOT NULL DEFAULT 0"),
     ("messages", "view_once", "INTEGER NOT NULL DEFAULT 0"),
     ("messages", "silent", "INTEGER NOT NULL DEFAULT 0"),
     ("messages", "view_once_opened_at", "REAL"),
@@ -947,6 +979,9 @@ COLUMNS_ADDED_LATER = [
     # this on per-story (not a standing account setting) to let whoever
     # views it re-share it too — see forward_story/_share checks in main.py.
     ("stories", "allow_share", "INTEGER NOT NULL DEFAULT 0"),
+    # Delivery watermark — the tick's "delivered but not yet read" state. Added
+    # after last_read_seq shipped, so existing member rows need it backfilled.
+    ("chat_members", "last_delivered_seq", "INTEGER NOT NULL DEFAULT 0"),
     # Off by default — a linked device stays signed in for the normal
     # SESSION_TTL_SECONDS (30 days), same as every session always has. When
     # a user turns this on for a specific device (Settings > Linked

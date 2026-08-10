@@ -28,6 +28,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import sqlite3
@@ -66,6 +67,7 @@ from models import (
     CreateMeetingRequest, CreateSubChannelRequest, CreateTemplateRequest, CreateWebhookRequest,
     CreateBreakoutRoomsRequest, DisappearingRequest, InstantMeetingRequest,
     EditMessageRequest, ForwardRequest, ForwardStoryRequest, LiveLocationUpdateRequest, LoginRequest,
+    MatchContactsRequest,
     PushSubscribeRequest, PushUnsubscribeRequest, ReactRequest, ReadRequest,
     RegisterRequest, RemoveTwoStepRequest, RequestEmailOtpRequest, RequestOtpRequest,
     ReportRequest, RescheduleRequest, RsvpRequest,
@@ -2038,18 +2040,59 @@ def list_users(q: str = Query(default="", max_length=64),
     if len(q.strip()) < 2:
         return []
     like = f"%{q.lower()}%"
+    # Also match by phone number so you can find a TalkEx account the WhatsApp
+    # way — type the number and there they are. Digits are compared with the
+    # separators stripped from BOTH sides, so "98765 43210" finds "+919876543210".
+    phone_digits = "".join(ch for ch in q if ch.isdigit())
+    phone_like = f"%{phone_digits}%" if len(phone_digits) >= 4 else None
     rows = db.query_all(
         """
         SELECT * FROM users
         WHERE id != ? AND disabled_at IS NULL
-          AND (lower(name) LIKE ? OR lower(username) LIKE ?)
+          AND (lower(name) LIKE ? OR lower(username) LIKE ?
+               OR (? IS NOT NULL AND replace(replace(replace(phone, ' ', ''), '-', ''), '+', '') LIKE ?))
           AND id NOT IN (SELECT blocker_id FROM blocks WHERE blocked_id = ?)
         ORDER BY name
         LIMIT ? OFFSET ?
         """,
-        (user["id"], like, like, user["id"], limit, offset),
+        (user["id"], like, like, phone_like, phone_like, user["id"], limit, offset),
     )
     return [public_user(row, viewer_id=user["id"]) for row in rows]
+
+
+@app.post("/users/match-contacts")
+def match_contacts(request: MatchContactsRequest, user: dict = Depends(current_user)):
+    """
+    Given phone numbers from the device's address book, return the ones that
+    already have a TalkEx account — WhatsApp's "who from your contacts is on
+    here" suggestion list. Numbers are matched on their digits only (so
+    formatting/country-code separators don't matter), and the caller is never
+    told about numbers that DON'T match, only about accounts that do.
+    """
+    wanted: dict[str, str] = {}  # normalized digits -> original as sent
+    for raw in (request.phones or [])[:2000]:
+        digits = "".join(ch for ch in (raw or "") if ch.isdigit())
+        if len(digits) >= 6:
+            wanted[digits] = raw
+    if not wanted:
+        return []
+    rows = db.query_all(
+        """
+        SELECT * FROM users
+        WHERE id != ? AND disabled_at IS NULL
+          AND id NOT IN (SELECT blocker_id FROM blocks WHERE blocked_id = ?)
+        """,
+        (user["id"], user["id"]),
+    )
+    matched = []
+    for row in rows:
+        digits = "".join(ch for ch in (row["phone"] or "") if ch.isdigit())
+        # Suffix match (last 10 digits) so a stored +91… lines up with a local
+        # number saved without the country code, and vice-versa.
+        if digits and (digits in wanted or digits[-10:] in wanted
+                       or any(k.endswith(digits[-10:]) or digits.endswith(k[-10:]) for k in wanted)):
+            matched.append(public_user(row, viewer_id=user["id"]))
+    return matched
 
 
 @app.get("/users/{user_id}")
@@ -2939,7 +2982,7 @@ def discover(limit: int = Query(default=50, ge=1, le=200), offset: int = Query(d
 
 
 @app.post("/chats/{chat_id}/join")
-def join_chat(chat_id: str, user: dict = Depends(current_user)):
+async def join_chat(chat_id: str, user: dict = Depends(current_user)):
     chat = db.query_one("SELECT * FROM chats WHERE id = ?", (chat_id,))
     if chat is None:
         raise HTTPException(404, "Chat not found")
@@ -2955,12 +2998,89 @@ def join_chat(chat_id: str, user: dict = Depends(current_user)):
         if not chat["parent_id"] or not chatstore.is_member(chat["parent_id"], user["id"]):
             raise HTTPException(403, "Join the community first")
 
+    # Approval-gated: record a pending request and tell the admins, rather than
+    # joining outright. Already-members short-circuit to a plain success.
+    needs_approval = "require_approval" in chat.keys() and chat["require_approval"]
+    if needs_approval and not chatstore.is_member(chat_id, user["id"]):
+        db.execute(
+            "INSERT OR IGNORE INTO join_requests (chat_id, user_id, created_at) VALUES (?, ?, ?)",
+            (chat_id, user["id"], time.time()),
+        )
+        await hub.send_to_chat(chat_id, {
+            "type": "join_request", "chat_id": chat_id, "user_id": user["id"],
+        })
+        return {"joined": False, "requested": True}
+
     role = "subscriber" if chat["type"] == "channel" else "member"
     db.execute(
         "INSERT OR IGNORE INTO chat_members (chat_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)",
         (chat_id, user["id"], role, time.time()),
     )
     return {"joined": True}
+
+
+@app.put("/chats/{chat_id}/approval")
+def set_join_approval(chat_id: str, enabled: bool = Query(...), user: dict = Depends(current_user)):
+    """Admin switch: require approval before someone joining actually becomes a member."""
+    chat = require_member(chat_id, user["id"])
+    if chat["type"] not in ("group", "channel", "community"):
+        raise HTTPException(400, "Approval applies to groups and channels")
+    require_manager(chat_id, user["id"])
+    db.execute("UPDATE chats SET require_approval = ? WHERE id = ?", (int(enabled), chat_id))
+    return {"require_approval": enabled}
+
+
+@app.put("/chats/{chat_id}/signature")
+def set_channel_signature(chat_id: str, enabled: bool = Query(...), user: dict = Depends(current_user)):
+    """Channel 'sign posts': when on, each post shows the posting admin's name."""
+    chat = require_member(chat_id, user["id"])
+    if chat["type"] not in ("channel", "community"):
+        raise HTTPException(400, "Post signature applies to channels")
+    require_manager(chat_id, user["id"])
+    db.execute("UPDATE chats SET signature_enabled = ? WHERE id = ?", (int(enabled), chat_id))
+    return {"signature_enabled": enabled}
+
+
+@app.get("/chats/{chat_id}/join-requests")
+def list_join_requests(chat_id: str, user: dict = Depends(current_user)):
+    """Pending requests to join, for admins to approve/deny."""
+    require_member(chat_id, user["id"])
+    require_manager(chat_id, user["id"])
+    rows = db.query_all(
+        """
+        SELECT u.*, j.created_at AS requested_at
+        FROM join_requests j JOIN users u ON u.id = j.user_id
+        WHERE j.chat_id = ? ORDER BY j.created_at
+        """,
+        (chat_id,),
+    )
+    return [{**public_user(row, viewer_id=user["id"]), "requested_at": row["requested_at"]} for row in rows]
+
+
+@app.post("/chats/{chat_id}/join-requests/{req_user_id}/approve")
+async def approve_join_request(chat_id: str, req_user_id: str, user: dict = Depends(current_user)):
+    chat = require_member(chat_id, user["id"])
+    require_manager(chat_id, user["id"])
+    pending = db.query_one(
+        "SELECT 1 FROM join_requests WHERE chat_id = ? AND user_id = ?", (chat_id, req_user_id))
+    if not pending:
+        raise HTTPException(404, "No such pending request")
+    role = "subscriber" if chat["type"] == "channel" else "member"
+    db.execute(
+        "INSERT OR IGNORE INTO chat_members (chat_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)",
+        (chat_id, req_user_id, role, time.time()),
+    )
+    db.execute("DELETE FROM join_requests WHERE chat_id = ? AND user_id = ?", (chat_id, req_user_id))
+    await hub.send_to_user(req_user_id, {"type": "join_approved", "chat_id": chat_id})
+    return {"approved": True}
+
+
+@app.post("/chats/{chat_id}/join-requests/{req_user_id}/deny")
+def deny_join_request(chat_id: str, req_user_id: str, user: dict = Depends(current_user)):
+    require_member(chat_id, user["id"])
+    require_manager(chat_id, user["id"])
+    db.execute("DELETE FROM join_requests WHERE chat_id = ? AND user_id = ?", (chat_id, req_user_id))
+    return {"denied": True}
 
 
 @app.post("/chats/{chat_id}/leave")
@@ -3221,6 +3341,61 @@ def set_slow_mode(chat_id: str, seconds: int = Query(ge=0, le=3600),
     return {"slow_mode_secs": seconds}
 
 
+@app.put("/chats/{chat_id}/reactions-policy")
+def set_reactions_policy(chat_id: str, enabled: bool = Query(...), user: dict = Depends(current_user)):
+    """Admin switch for whether posts/messages in a channel or group can be
+    reacted to at all (Telegram lets a channel disable reactions)."""
+    chat = require_member(chat_id, user["id"])
+    if chat["type"] not in ("channel", "community", "community_channel", "group"):
+        raise HTTPException(400, "Reactions policy applies to channels and groups")
+    if chatstore.member_role(chat_id, user["id"]) not in ("owner", "admin"):
+        raise HTTPException(403, "Only admins can change the reactions policy")
+    db.execute("UPDATE chats SET reactions_enabled = ? WHERE id = ?", (int(enabled), chat_id))
+    return {"reactions_enabled": enabled}
+
+
+@app.put("/chats/{chat_id}/username")
+def set_channel_username(chat_id: str, username: str = Query(default=""), user: dict = Depends(current_user)):
+    """Give a channel a public @handle so people can find and join it by name
+    (Telegram-style). Passing an empty username clears it (makes it private)."""
+    chat = require_member(chat_id, user["id"])
+    if chat["type"] not in ("channel", "community"):
+        raise HTTPException(400, "Only channels have a public username")
+    if chatstore.member_role(chat_id, user["id"]) not in ("owner", "admin"):
+        raise HTTPException(403, "Only admins can set the channel username")
+    handle = username.strip().lstrip("@").lower()
+    if handle == "":
+        db.execute("UPDATE chats SET public_username = '' WHERE id = ?", (chat_id,))
+        return {"public_username": ""}
+    if not re.fullmatch(r"[a-z0-9_]{3,32}", handle):
+        raise HTTPException(400, "Username must be 3-32 characters: letters, numbers or underscore")
+    taken = db.query_one(
+        "SELECT 1 FROM chats WHERE lower(public_username) = ? AND id != ?", (handle, chat_id))
+    if taken:
+        raise HTTPException(409, "That username is already taken")
+    db.execute("UPDATE chats SET public_username = ? WHERE id = ?", (handle, chat_id))
+    return {"public_username": handle}
+
+
+@app.get("/chats/by-username/{username}")
+def get_channel_by_username(username: str, user: dict = Depends(current_user)):
+    """Resolve a public @handle to a joinable channel preview."""
+    handle = username.strip().lstrip("@").lower()
+    chat = db.query_one("SELECT * FROM chats WHERE lower(public_username) = ?", (handle,))
+    if chat is None:
+        raise HTTPException(404, "No channel with that username")
+    member_count = db.query_one(
+        "SELECT COUNT(*) AS n FROM chat_members WHERE chat_id = ?", (chat["id"],))["n"]
+    return {
+        "id": chat["id"], "type": chat["type"], "name": chat["name"],
+        "description": chat["description"] if "description" in chat.keys() else "",
+        "avatar_letter": chat["avatar_letter"], "color": chat["color"],
+        "avatar_attachment_id": chat["avatar_attachment_id"] if "avatar_attachment_id" in chat.keys() else None,
+        "public_username": chat["public_username"], "member_count": member_count,
+        "is_member": chatstore.is_member(chat["id"], user["id"]),
+    }
+
+
 @app.put("/chats/{chat_id}/disappearing")
 async def set_disappearing(chat_id: str, request: DisappearingRequest,
                            user: dict = Depends(current_user)):
@@ -3324,6 +3499,10 @@ def consume_view_once_text_messages(chat_id: str, reader_id: str, up_to_seq: int
 async def mark_read(chat_id: str, request: ReadRequest, user: dict = Depends(current_user)):
     require_member(chat_id, user["id"])
     chatstore.set_last_read(chat_id, user["id"], request.seq)
+    # Reading a message necessarily means it was delivered — keep the delivery
+    # watermark at least as far along so a read tick never sits "behind" its
+    # own delivery.
+    chatstore.set_last_delivered(chat_id, user["id"], request.seq)
 
     # Fire before the read receipt: a message that's about to be reported as
     # read should already be blanked by the time anyone hears about it.
@@ -3347,24 +3526,48 @@ async def mark_read(chat_id: str, request: ReadRequest, user: dict = Depends(cur
     return {"chat_id": chat_id, "last_read_seq": request.seq}
 
 
+@app.post("/chats/{chat_id}/delivered")
+async def mark_delivered(chat_id: str, request: ReadRequest, user: dict = Depends(current_user)):
+    """
+    A recipient's client acknowledging it has RECEIVED messages up to `seq`
+    (one step before reading them). The client calls this whenever a live
+    message arrives for a chat, whether or not that chat is open — that's what
+    turns the sender's single tick into a double tick. Unlike read receipts,
+    delivery is never withheld: there's no privacy setting for "received."
+    """
+    require_member(chat_id, user["id"])
+    chatstore.set_last_delivered(chat_id, user["id"], request.seq)
+    await hub.send_to_chat(chat_id, {
+        "type": "delivered",
+        "chat_id": chat_id,
+        "user_id": user["id"],
+        "seq": request.seq,
+    }, exclude_user=user["id"])
+    return {"chat_id": chat_id, "last_delivered_seq": request.seq}
+
+
 @app.get("/chats/{chat_id}/read-state")
 def get_read_state(chat_id: str, user: dict = Depends(current_user)):
     """
-    How far every other member has read.
+    How far every other member has read AND received a message.
 
-    Used to draw a single vs double checkmark on your own messages: a message
-    is "read" once every other member's last_read_seq is at or past it. A
-    member who has switched read receipts off is left out entirely, the same
-    as their read event never being broadcast in the first place — turning
-    receipts off has to actually withhold the information, not just skip the
-    notification.
+    Drives the tick states on your own messages: single (sent) until every
+    other member's last_delivered_seq reaches it → double (delivered), then
+    blue once every receipt-enabled member's last_read_seq reaches it too.
+    Delivery is reported for everyone; the read watermark is null for a member
+    who has switched read receipts off, so turning receipts off withholds the
+    blue tick without also hiding that the message was delivered — matching
+    WhatsApp, where you still see two grey ticks.
     """
     require_member(chat_id, user["id"])
     rows = db.query_all(
         """
-        SELECT m.user_id, m.last_read_seq FROM chat_members m
+        SELECT m.user_id AS user_id,
+               m.last_delivered_seq AS last_delivered_seq,
+               CASE WHEN u.show_read_receipts = 1 THEN m.last_read_seq ELSE NULL END AS last_read_seq
+        FROM chat_members m
         JOIN users u ON u.id = m.user_id
-        WHERE m.chat_id = ? AND m.user_id != ? AND u.show_read_receipts = 1
+        WHERE m.chat_id = ? AND m.user_id != ?
         """,
         (chat_id, user["id"]),
     )
@@ -3535,10 +3738,13 @@ async def send_message(
             (request.chat_id, user["id"]),
         )
 
-        await notify_offline_members(
-            request.chat_id, user["id"], user["name"],
-            push_preview_text(request.kind, request.text, payload),
-        )
+        # A silent send skips the push entirely (Telegram's "send without
+        # sound" — the message still appears in-app, it just doesn't ping).
+        if not request.silent:
+            await notify_offline_members(
+                request.chat_id, user["id"], user["name"],
+                push_preview_text(request.kind, request.text, payload),
+            )
 
         await dispatch_webhooks(background_tasks, request.chat_id, user["id"], message)
 
@@ -3855,6 +4061,10 @@ async def add_reaction(message_id: str, request: ReactRequest,
     if message is None:
         raise HTTPException(404, "Message not found")
     require_member(message["chat_id"], user["id"])
+
+    policy = db.query_one("SELECT reactions_enabled FROM chats WHERE id = ?", (message["chat_id"],))
+    if policy and "reactions_enabled" in policy.keys() and not policy["reactions_enabled"]:
+        raise HTTPException(403, "Reactions are turned off in this chat")
 
     db.execute(
         "INSERT OR IGNORE INTO reactions (message_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?)",
@@ -4297,7 +4507,20 @@ async def forward_message(request: ForwardRequest, user: dict = Depends(current_
     require_member(original["chat_id"], user["id"])
 
     sender = db.query_one("SELECT name FROM users WHERE id = ?", (original["sender_id"],))
-    forwarded_from = sender["name"] if sender else ""
+    # Attribution rules, Telegram-style:
+    #  - a message that was ITSELF a forward keeps its original label (so the
+    #    trail points at the true origin, not whoever last passed it on);
+    #  - a channel/community post is attributed to the CHANNEL, not the admin
+    #    who happened to post it;
+    #  - everything else is attributed to the original sender.
+    if original["forwarded_from"]:
+        forwarded_from = original["forwarded_from"]
+    else:
+        src_chat = db.query_one("SELECT type, name FROM chats WHERE id = ?", (original["chat_id"],))
+        if src_chat and src_chat["type"] in ("channel", "community", "community_channel") and src_chat["name"]:
+            forwarded_from = src_chat["name"]
+        else:
+            forwarded_from = sender["name"] if sender else ""
     original_payload = json.loads(original["payload"]) if original["payload"] else None
     original_attachment_id = (original_payload or {}).get("attachment_id")
 
@@ -5649,6 +5872,18 @@ async def websocket_endpoint(
     # asyncio.to_thread.
     db.execute("UPDATE users SET last_seen = ? WHERE id = ?", (time.time(), user_id))
     await hub.broadcast_presence(user_id, online=True)
+
+    # Coming online delivers everything that piled up while this account was
+    # offline: advance its delivery watermark to the newest message in each of
+    # its chats, and tell just the chats that actually moved so the other
+    # side's single ticks flip to double without a manual refresh.
+    for delivered_chat_id, delivered_seq in chatstore.mark_all_delivered(user_id):
+        await hub.send_to_chat(delivered_chat_id, {
+            "type": "delivered",
+            "chat_id": delivered_chat_id,
+            "user_id": user_id,
+            "seq": delivered_seq,
+        }, exclude_user=user_id)
 
     try:
         while True:

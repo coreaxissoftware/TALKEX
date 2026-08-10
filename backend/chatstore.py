@@ -269,6 +269,51 @@ def set_last_read(chat_id: str, user_id: str, seq: int):
     )
 
 
+def set_last_delivered(chat_id: str, user_id: str, seq: int):
+    """Move a member's DELIVERY marker forward (never backwards), same rule as
+    the read marker one step earlier in a message's life."""
+    db.execute(
+        """
+        UPDATE chat_members
+        SET last_delivered_seq = ?
+        WHERE chat_id = ? AND user_id = ? AND last_delivered_seq < ?
+        """,
+        (seq, chat_id, user_id, seq),
+    )
+
+
+def mark_all_delivered(user_id: str) -> list[tuple[str, int]]:
+    """
+    Mark every chat this user is a member of as delivered up to its newest
+    message — called the moment they (re)connect a socket, so anything sent
+    while they were offline flips from a single to a double tick. Returns the
+    (chat_id, seq) pairs that actually advanced, so the caller can tell just
+    those chats' senders to refresh their ticks (and skips broadcasting for
+    chats that were already fully delivered).
+    """
+    behind = db.query_all(
+        """
+        SELECT m.chat_id AS chat_id, c.last_seq AS last_seq
+        FROM chat_members m
+        JOIN chats c ON c.id = m.chat_id
+        WHERE m.user_id = ? AND m.last_delivered_seq < c.last_seq
+        """,
+        (user_id,),
+    )
+    advanced: list[tuple[str, int]] = []
+    for row in behind:
+        db.execute(
+            """
+            UPDATE chat_members
+            SET last_delivered_seq = ?
+            WHERE chat_id = ? AND user_id = ? AND last_delivered_seq < ?
+            """,
+            (row["last_seq"], row["chat_id"], user_id, row["last_seq"]),
+        )
+        advanced.append((row["chat_id"], row["last_seq"]))
+    return advanced
+
+
 # ── Reading ───────────────────────────────────────────────────────────────────
 
 def serialise_message(row, viewer_id: str = "", reactions=None) -> dict:
