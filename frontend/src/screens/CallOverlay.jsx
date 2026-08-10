@@ -441,7 +441,7 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
                 background: "#00000099", display: "flex", alignItems: "center", justifyContent: "center",
                 cursor: "pointer",
               }}>
-                {I.rotateRight("#fff", 15)}
+                {I.cameraFlip("#fff", 16)}
               </div>
             )}
           </div>

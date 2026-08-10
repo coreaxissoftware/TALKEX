@@ -924,7 +924,7 @@ function SelfTile({ call, isHost, onSwitchCamera, zoomable = true }) {
           background: "#00000066", display: "flex", alignItems: "center", justifyContent: "center",
           cursor: "pointer",
         }}>
-          {I.rotateRight("#fff", 13)}
+          {I.cameraFlip("#fff", 14)}
         </div>
       )}
       <div style={{

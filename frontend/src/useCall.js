@@ -3,13 +3,28 @@ import { Messages, newClientMessageId } from "./api.js";
 
 // A free public STUN server is enough to discover a caller's own reflexive
 // address, which is all two peers on the same network (or with an
-// unrestrictive NAT) need to connect directly. There is no TURN server here —
-// a relay for peers that can't reach each other directly — so a call between
-// two people behind strict/symmetric NATs can still fail to connect. Running
-// a TURN relay is real infrastructure (bandwidth, a server, TLS certs) that
-// is out of scope for this pass; noted as a known limitation rather than
-// silently pretended away.
-const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+// unrestrictive NAT) need to connect directly. TURN — a media relay for
+// peers that CAN'T reach each other directly (strict/symmetric NATs, some
+// corporate networks) — is opt-in via env vars, so the app runs on STUN
+// alone by default and picks up TURN the moment you set:
+//
+//   VITE_TURN_URL="turn:turn.example.com:3478"
+//   VITE_TURN_USERNAME="…"
+//   VITE_TURN_CREDENTIAL="…"
+//
+// in .env.production (or your Hostinger/hosting build env). Recommended
+// providers: Twilio Network Traversal, Metered.ca (free tier), or a
+// self-hosted coturn instance.
+const ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  ...(import.meta.env.VITE_TURN_URL
+    ? [{
+        urls: import.meta.env.VITE_TURN_URL,
+        username: import.meta.env.VITE_TURN_USERNAME,
+        credential: import.meta.env.VITE_TURN_CREDENTIAL,
+      }]
+    : []),
+];
 
 // Every getUserMedia/getDisplayMedia call below used to ask for video with
 // no resolution/frame-rate constraints at all, which means "give me
@@ -23,12 +38,59 @@ const CAMERA_CONSTRAINTS = {
   width: { ideal: 1280, max: 1280 },
   height: { ideal: 720, max: 720 },
   frameRate: { ideal: 24, max: 30 },
+  // Plain-value facingMode (not an `exact` clause) is treated as a
+  // preference: Android picks the front camera to start a video call, a
+  // laptop with only one webcam still returns its only camera fine.
+  // Without this, phones would default to whatever the OS thought was
+  // "camera 0" — usually the rear one — while the state below below
+  // (facingMode: "user") assumed it was front, so switchCamera's
+  // front↔back toggle started out backwards on every video call.
+  facingMode: "user",
 };
 // Screen content is rarely motion-heavy (a slide, a code editor, a shared
 // doc) — capping the capture frame rate is the single biggest lever here,
 // since a display's native refresh rate (60Hz+) costs far more to encode
 // than anyone reading a shared screen actually benefits from.
 const SCREEN_SHARE_CONSTRAINTS = { frameRate: { ideal: 15, max: 24 } };
+
+// Getting a stream from the OTHER camera, reliably, on the widest range of
+// devices — this is what the front/back flip button actually calls.
+//
+// A plain `facingMode: "environment"` is only a *preference*: many Android
+// WebViews (and Capacitor's in particular) just hand back the same camera
+// that's already open, so the flip button looked completely dead. Asking
+// with `{ exact: … }` forces the browser to honour it or fail loudly, which
+// is what makes the switch actually switch. When even that fails (a device
+// that won't take an exact facingMode, or a laptop that reports its cameras
+// without facing info), we fall back to enumerating the video inputs and
+// explicitly opening one whose deviceId differs from the current track's.
+// Returns the new stream, or null if there genuinely is only one camera.
+async function openCameraFacing(nextFacing, currentTrack) {
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      video: { ...CAMERA_CONSTRAINTS, facingMode: { exact: nextFacing } },
+    });
+  } catch { /* fall through to the deviceId approach */ }
+
+  try {
+    const cameras = (await navigator.mediaDevices.enumerateDevices())
+      .filter((device) => device.kind === "videoinput");
+    if (cameras.length < 2) return null; // nothing to flip to
+    const currentId = currentTrack?.getSettings?.().deviceId;
+    const other = cameras.find((device) => device.deviceId && device.deviceId !== currentId) || cameras[0];
+    return await navigator.mediaDevices.getUserMedia({
+      // facingMode dropped here on purpose — deviceId is the exact,
+      // unambiguous selector, and pairing it with a facingMode constraint
+      // can over-constrain and fail on some devices.
+      video: {
+        width: CAMERA_CONSTRAINTS.width, height: CAMERA_CONSTRAINTS.height,
+        frameRate: CAMERA_CONSTRAINTS.frameRate, deviceId: { exact: other.deviceId },
+      },
+    });
+  } catch {
+    return null;
+  }
+}
 
 // How long an outgoing call rings before the caller gives up on it.
 const RING_TIMEOUT_MS = 30000;
@@ -145,8 +207,21 @@ export function useCall(events, send, toast) {
       ringConfirmed: false,
     });
 
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+    // Wraps every WebRTC negotiation step below — createOffer,
+    // setLocalDescription — because any of them can throw (peer
+    // connection in the wrong state, SDP parse error, hardware media
+    // stall) and used to leave the call state set with no cleanup, so
+    // "Calling…" spun forever with no way out.
+    let offer;
+    try {
+      offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+    } catch (problem) {
+      toastRef.current?.("Call could not start — please try again");
+      teardown();
+      setCall(null);
+      return;
+    }
     // send() returns false when the WebSocket is dead — this used to be
     // silently ignored (call_invite dropped on the floor, "Calling…"
     // spinning forever until the 30-second ring timeout eventually logged
@@ -199,14 +274,27 @@ export function useCall(events, send, toast) {
     pcRef.current = pc;
     localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
 
-    await pc.setRemoteDescription(pendingOfferRef.current);
-    for (const candidate of pendingCandidatesRef.current) {
-      await pc.addIceCandidate(candidate).catch(() => {});
-    }
-    pendingCandidatesRef.current = [];
+    // Same error-swallow story as startCall above: setRemote/createAnswer/
+    // setLocal all throw on bad SDPs or wrong-state peer connections, and
+    // used to be un-awaited-catch, so a failed accept left the incoming
+    // ring on screen with no path forward except closing the app.
+    let answer;
+    try {
+      await pc.setRemoteDescription(pendingOfferRef.current);
+      for (const candidate of pendingCandidatesRef.current) {
+        await pc.addIceCandidate(candidate).catch(() => {});
+      }
+      pendingCandidatesRef.current = [];
 
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
+      answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+    } catch (problem) {
+      toastRef.current?.("Could not accept the call");
+      sendRef.current({ type: "call_reject", to: current.peerId, chat_id: current.chatId });
+      teardown();
+      setCall(null);
+      return;
+    }
     sendRef.current({
       type: "call_answer", to: current.peerId, chat_id: current.chatId, sdp: answer,
     });
@@ -310,12 +398,8 @@ export function useCall(events, send, toast) {
     if (!existingTrack) return; // voice-only call — nothing to flip
 
     const nextFacing = current.facingMode === "environment" ? "user" : "environment";
-    let newStream;
-    try {
-      newStream = await navigator.mediaDevices.getUserMedia({
-        video: { ...CAMERA_CONSTRAINTS, facingMode: nextFacing },
-      });
-    } catch {
+    const newStream = await openCameraFacing(nextFacing, existingTrack);
+    if (!newStream) {
       toastRef.current?.("Could not switch camera");
       return;
     }
@@ -349,7 +433,15 @@ export function useCall(events, send, toast) {
     }
     let screenStream;
     try {
-      screenStream = await navigator.mediaDevices.getDisplayMedia({ video: SCREEN_SHARE_CONSTRAINTS });
+      // audio: true asks the browser to capture the shared tab/window's
+      // audio too — critical for sharing a video with sound, a music
+      // player, or a call/meeting recording. Non-tab surfaces (a whole
+      // display, an app window) commonly return video only anyway, so
+      // this is a best-effort ask, not a hard requirement.
+      screenStream = await navigator.mediaDevices.getDisplayMedia({
+        video: SCREEN_SHARE_CONSTRAINTS,
+        audio: true,
+      });
     } catch {
       return; // the person cancelled the OS share picker — not an error
     }

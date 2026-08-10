@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-// Same STUN-only, no-TURN tradeoff as useCall.js — see that file for why.
-const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+// Same STUN + optional TURN via env vars as useCall.js — see that file
+// for the full setup instructions.
+const ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  ...(import.meta.env.VITE_TURN_URL
+    ? [{
+        urls: import.meta.env.VITE_TURN_URL,
+        username: import.meta.env.VITE_TURN_USERNAME,
+        credential: import.meta.env.VITE_TURN_CREDENTIAL,
+      }]
+    : []),
+];
 
 // Same reasoning as useCall.js's identical constants — unconstrained video
 // asks for the camera's/display's native max resolution and frame rate,
@@ -13,8 +23,41 @@ const CAMERA_CONSTRAINTS = {
   width: { ideal: 1280, max: 1280 },
   height: { ideal: 720, max: 720 },
   frameRate: { ideal: 24, max: 30 },
+  // Same "start with the front camera on phones" fix as useCall.js — see
+  // the identical comment there for the full reasoning. Without it,
+  // Android joined a group video call on the rear camera by default and
+  // switchCamera's front↔back toggle started out backwards.
+  facingMode: "user",
 };
 const SCREEN_SHARE_CONSTRAINTS = { frameRate: { ideal: 15, max: 24 } };
+
+// Reliable front/back flip — see the identical helper in useCall.js for the
+// full reasoning. A plain `facingMode` preference is silently ignored by many
+// Android WebViews (the flip did nothing); `{ exact: … }` forces it, with a
+// deviceId-based fallback for devices that reject an exact facingMode.
+async function openCameraFacing(nextFacing, currentTrack) {
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      video: { ...CAMERA_CONSTRAINTS, facingMode: { exact: nextFacing } },
+    });
+  } catch { /* fall through to the deviceId approach */ }
+
+  try {
+    const cameras = (await navigator.mediaDevices.enumerateDevices())
+      .filter((device) => device.kind === "videoinput");
+    if (cameras.length < 2) return null;
+    const currentId = currentTrack?.getSettings?.().deviceId;
+    const other = cameras.find((device) => device.deviceId && device.deviceId !== currentId) || cameras[0];
+    return await navigator.mediaDevices.getUserMedia({
+      video: {
+        width: CAMERA_CONSTRAINTS.width, height: CAMERA_CONSTRAINTS.height,
+        frameRate: CAMERA_CONSTRAINTS.frameRate, deviceId: { exact: other.deviceId },
+      },
+    });
+  } catch {
+    return null;
+  }
+}
 
 const GROUP_CALL_EVENT_TYPES = new Set([
   "group_call_invite", "group_call_roster", "group_call_participant_joined",
@@ -255,12 +298,8 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
     if (!existingTrack) return;
 
     const nextFacing = current.facingMode === "environment" ? "user" : "environment";
-    let newStream;
-    try {
-      newStream = await navigator.mediaDevices.getUserMedia({
-        video: { ...CAMERA_CONSTRAINTS, facingMode: nextFacing },
-      });
-    } catch {
+    const newStream = await openCameraFacing(nextFacing, existingTrack);
+    if (!newStream) {
       toastRef.current?.("Could not switch camera");
       return;
     }
@@ -294,7 +333,13 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
 
     let screenStream;
     try {
-      screenStream = await navigator.mediaDevices.getDisplayMedia({ video: SCREEN_SHARE_CONSTRAINTS });
+      // audio: true asks for the shared tab/window's own audio (video
+      // playback, background music) — see useCall.js for the same fix
+      // rationale.
+      screenStream = await navigator.mediaDevices.getDisplayMedia({
+        video: SCREEN_SHARE_CONSTRAINTS,
+        audio: true,
+      });
     } catch {
       return;
     }

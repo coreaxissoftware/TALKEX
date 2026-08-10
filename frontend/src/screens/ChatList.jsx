@@ -19,6 +19,11 @@ const LONG_PRESS_MOVE_TOLERANCE = 8;
 const PIN_SWIPE_TRIGGER = 46;
 const ACTIONS_WIDTH = 168;
 const ACTIONS_OPEN_TRIGGER = 90;
+// Below this much horizontal travel a pointer gesture is treated as a tap
+// (open the chat), not a swipe — finger jitter of a few pixels during a tap
+// must never register as a drag, or the tap gets eaten and the chat needs a
+// second tap to open.
+const TAP_MAX_DRAG = 10;
 
 const CATEGORIES = [
   { key: "all", label: "All" },
@@ -678,12 +683,17 @@ function ChatRow({ chat, typing, onOpen, onPin, onArchive, onClear, onDelete, on
         || Math.abs(event.clientY - startY.current) > LONG_PRESS_MOVE_TOLERANCE)) {
       clearLongPressTimer();
     }
+    // Ignore sub-threshold travel so a tap with a few pixels of finger jitter
+    // stays a tap (dragX untouched at 0) rather than becoming a micro-swipe
+    // that then eats the tap. Once a real drag is under way (dragX already
+    // moved), keep following the finger.
+    if (dragX === 0 && Math.abs(delta) < TAP_MAX_DRAG) return;
     // Right swipe (positive) is a short one-shot pin gesture; left swipe
     // (negative) opens further to reveal three action icons.
     setDragX(Math.max(-ACTIONS_WIDTH, Math.min(PIN_SWIPE_TRIGGER + 20, delta)));
   }
 
-  function onPointerUpOrCancel() {
+  function onPointerUpOrCancel(event) {
     clearLongPressTimer();
     if (!dragging.current) return;
     dragging.current = false;
@@ -695,7 +705,18 @@ function ChatRow({ chat, typing, onOpen, onPin, onArchive, onClear, onDelete, on
     } else if (dragX <= -ACTIONS_OPEN_TRIGGER) {
       setDragX(-ACTIONS_WIDTH);
     } else {
+      // A tap, or a swipe too small to snap open — settle the row back.
+      const wasTap = Math.abs(dragX) < TAP_MAX_DRAG;
       setDragX(0);
+      // Open the chat right here on touch instead of waiting for the click
+      // event. On Android's WebView, setPointerCapture (used above for the
+      // swipe gesture) frequently SWALLOWS the follow-up click whenever the
+      // finger moved even a pixel — which is exactly why opening a chat kept
+      // taking two taps: the first tap's click was eaten, only a perfectly
+      // still second tap got through. Opening on pointerup removes that
+      // dependency entirely. A duplicate open from a click that does still
+      // fire is harmless (same chat object → a no-op setState).
+      if (event?.pointerType === "touch" && wasTap && !selectMode) onOpen();
     }
   }
 
@@ -704,9 +725,11 @@ function ChatRow({ chat, typing, onOpen, onPin, onArchive, onClear, onDelete, on
     // pointerup is immediately followed by a click for the same gesture.
     if (longPressFired.current) { longPressFired.current = false; return; }
     if (selectMode) { onToggleSelect(); return; }
-    // A drag that never actually moved is just a tap — open the chat. One
-    // that's still snapped open just closes instead of navigating away.
-    if (dragX !== 0) { setDragX(0); return; }
+    // A row still snapped open just closes instead of navigating away. Only a
+    // genuinely-open row (past the tap threshold) counts — tiny finger jitter
+    // during a tap must NOT be mistaken for "snapped open", or the tap would
+    // be eaten and the chat would need a second tap to open (mouse path).
+    if (Math.abs(dragX) >= TAP_MAX_DRAG) { setDragX(0); return; }
     onOpen();
   }
 

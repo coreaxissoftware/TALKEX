@@ -3,7 +3,8 @@ import {
   Auth, Me, Messages, Templates, Users, clearToken, forgetAccount, getToken,
   listSavedAccounts, rememberAccount, switchToAccount,
 } from "../api.js";
-import { ACCENTS, Av, Button, Field, G, I, SRow, Spinner, Toggle, clockTime, whenLabel } from "../ui.jsx";
+import { ACCENTS, Av, Button, Field, G, I, SRow, Spinner, Toggle, clockTime, whenLabel,
+         getStoredEnterToSend, saveEnterToSend } from "../ui.jsx";
 import { disablePush, enablePush, getPushSubscription, isPushSupported } from "../push.js";
 import { getAutoDownload, setAutoDownload } from "../mediaPrefs.js";
 import {
@@ -25,6 +26,7 @@ import { COUNTRY_CODES, flagFor, samplePlaceholder, splitPhone } from "../countr
 export default function Settings({ me, onUpdated, onSignedOut, toast,
                                     theme, onThemeChange, accent, onAccentChange }) {
   const [editing, setEditing] = useState(false);
+  const [enterToSend, setEnterToSend] = useState(getStoredEnterToSend);
   const [form, setForm] = useState({
     name: me.name, bio: me.bio || "",
     link_website: me.link_website || "", link_facebook: me.link_facebook || "",
@@ -510,6 +512,21 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
           <input type="range" min={0} max={20} value={blur}
                  onChange={(event) => changeWallpaperBlur(Number(event.target.value))}
                  style={{ width: "100%", accentColor: G.accent }}/>
+
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            gap: 12, marginTop: 20, paddingTop: 16, borderTop: `1px solid ${G.border}`,
+          }}>
+            <div>
+              <div style={{ fontSize: 14 }}>Press Enter to send</div>
+              <div style={{ fontSize: 11.5, color: G.muted, marginTop: 2 }}>
+                {enterToSend
+                  ? "Enter sends · Shift+Enter for a new line"
+                  : "Enter adds a new line · send with the button"}
+              </div>
+            </div>
+            <Toggle on={enterToSend} onChange={(value) => { setEnterToSend(value); saveEnterToSend(value); }}/>
+          </div>
         </div>
       </Section>
 

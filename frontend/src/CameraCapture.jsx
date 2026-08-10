@@ -17,6 +17,12 @@ export default function CameraCapture({ onCapture, onClose }) {
   const [facing, setFacing] = useState("environment");
   const [recording, setRecording] = useState(false);
   const [error, setError] = useState("");
+  // Bumped by the Retry button (below) to force the getUserMedia effect
+  // to re-run without needing to change `facing`. Without it, a person who
+  // hit "Deny" on the OS permission dialog by mistake had no way back —
+  // the error string just sat there forever and the only escape was
+  // closing the camera and reopening the whole sheet.
+  const [retryTick, setRetryTick] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -35,7 +41,7 @@ export default function CameraCapture({ onCapture, onClose }) {
       } catch (problem) {
         if (!cancelled) {
           setError(problem.name === "NotAllowedError"
-            ? "Camera access was denied."
+            ? "Camera access was denied. Grant camera + microphone permission from your device settings and try again."
             : "Could not open the camera.");
         }
       }
@@ -47,7 +53,7 @@ export default function CameraCapture({ onCapture, onClose }) {
       streamRef.current?.getTracks().forEach((track) => track.stop());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [facing]);
+  }, [facing, retryTick]);
 
   function takePhoto() {
     const video = videoRef.current;
@@ -100,7 +106,16 @@ export default function CameraCapture({ onCapture, onClose }) {
         display: "flex", alignItems: "center", justifyContent: "center",
       }}>
         {error ? (
-          <div style={{ color: "#fff", fontSize: 14, textAlign: "center", padding: 24 }}>{error}</div>
+          <div style={{ color: "#fff", fontSize: 14, textAlign: "center", padding: 24, maxWidth: 320 }}>
+            {error}
+            <div onClick={() => { setError(""); setRetryTick((n) => n + 1); }} style={{
+              marginTop: 18, padding: "10px 20px", borderRadius: 22, background: "#ffffff22",
+              border: "1px solid #ffffff44", display: "inline-block", cursor: "pointer",
+              fontSize: 14, fontWeight: 600,
+            }}>
+              Try again
+            </div>
+          </div>
         ) : (
           <video ref={videoRef} playsInline muted style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
         )}

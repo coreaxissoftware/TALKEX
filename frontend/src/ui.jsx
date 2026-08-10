@@ -486,6 +486,10 @@ export const ACCENTS = {
 const DEFAULT_ACCENT = "skyblue";
 const THEME_STORAGE_KEY = "ht_theme";
 const ACCENT_STORAGE_KEY = "ht_accent";
+const ENTER_TO_SEND_KEY = "ht_enter_to_send";
+// Custom event the composer listens for so a change made in Settings takes
+// effect immediately, without needing the chat to be reopened.
+const ENTER_TO_SEND_EVENT = "ht-enter-to-send-changed";
 
 // A real, mutable object — never reassigned, only its fields change. Every
 // file in the app does `import { G } from "./ui.jsx"` and reads G.xxx at
@@ -530,6 +534,39 @@ export function saveTheme(mode) {
 
 export function saveAccent(accentKey) {
   try { localStorage.setItem(ACCENT_STORAGE_KEY, accentKey); } catch { /* best effort */ }
+}
+
+// "Press Enter to send" — a per-device composer preference. Defaults ON (the
+// long-standing behaviour), so anyone who never touches the setting keeps the
+// exact same Enter-sends experience. When OFF, Enter inserts a newline and
+// only the send button sends.
+export function getStoredEnterToSend() {
+  try {
+    return localStorage.getItem(ENTER_TO_SEND_KEY) !== "0"; // absent → default ON
+  } catch {
+    return true;
+  }
+}
+
+export function saveEnterToSend(on) {
+  try { localStorage.setItem(ENTER_TO_SEND_KEY, on ? "1" : "0"); } catch { /* best effort */ }
+  // Let any mounted composer update live rather than only on next open.
+  try { window.dispatchEvent(new Event(ENTER_TO_SEND_EVENT)); } catch { /* SSR / no window */ }
+}
+
+// Live-updating read of the preference for the composer.
+export function useEnterToSend() {
+  const [on, setOn] = useState(getStoredEnterToSend);
+  useEffect(() => {
+    const update = () => setOn(getStoredEnterToSend());
+    window.addEventListener(ENTER_TO_SEND_EVENT, update);
+    window.addEventListener("storage", update); // another tab changed it
+    return () => {
+      window.removeEventListener(ENTER_TO_SEND_EVENT, update);
+      window.removeEventListener("storage", update);
+    };
+  }, []);
+  return on;
 }
 
 // Applied once at module load, before the first render, so the very first
@@ -699,15 +736,42 @@ export const I = {
   calendar: (c = G.muted, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>,
   fwd: (c = G.sub, s = 16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round"><polyline points="15 10 20 15 15 20"/><path d="M4 4v7a4 4 0 0 0 4 4h12"/></svg>,
   reply: (c = G.sub, s = 16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round"><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg>,
+  info: (c = G.sub, s = 18) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>,
+  star: (c = G.sub, s = 18) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>,
+  starFill: (c = G.sub, s = 18) => <svg width={s} height={s} viewBox="0 0 24 24" fill={c} stroke="none"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>,
+  download: (c = G.sub, s = 18) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>,
+  copy: (c = G.sub, s = 18) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>,
+  share: (c = G.sub, s = 18) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>,
+  select: (c = G.sub, s = 18) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><polyline points="8 12 11 15 16 9"/></svg>,
+  keyboard: (c = G.sub, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><line x1="6" y1="10" x2="6" y2="10"/><line x1="10" y1="10" x2="10" y2="10"/><line x1="14" y1="10" x2="14" y2="10"/><line x1="18" y1="10" x2="18" y2="10"/><line x1="8" y1="14" x2="16" y2="14"/></svg>,
   verified: (c = G.accent, s = 14) => <svg width={s} height={s} viewBox="0 0 24 24" fill={c}><path d="M9 12l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>,
   // The activity-earned blue tick (see BLUE_TICK_TARGET in main.py) — a
-  // fixed brand blue rather than `verified`'s theme-accent color on purpose.
-  // `verified` already means something else here (a chat/channel's own
-  // is_verified), and it tracks whatever accent color the viewer picked, so
-  // it can render in green, pink, anything — this badge needs to read as
-  // "the blue tick" specifically, in every theme, the way it does on every
-  // other platform that has one.
-  blueTick: (s = 14) => <svg width={s} height={s} viewBox="0 0 24 24" fill="#1d9bf0"><path d="M9 12l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>,
+  // TalkEx-specific mark, not the stock Instagram/X plain-circle-with-check
+  // this replaced. Distinctive shape choices:
+  //   - 16-point rounded starburst (rosette) outer edge, so the badge
+  //     reads as its own icon at a glance rather than "the same blue
+  //     circle every social app uses";
+  //   - a top-left → bottom-right blue gradient (#4bb4ff → #0d7bc4) for
+  //     depth, matching the TX icon's own gradient rather than a flat
+  //     brand-blue fill;
+  //   - a heavier white check with rounded caps sitting on a subtle inner
+  //     ring, so it's still legible at 12–14px in a chat header row.
+  // Kept in a fixed brand palette (never G.accent) for the same reason
+  // note above: it must read as "the blue tick" in every user's theme,
+  // not shift color with the accent picker.
+  blueTick: (s = 14) => <svg width={s} height={s} viewBox="0 0 24 24">
+    <defs>
+      <linearGradient id="talkexBlueTick" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stopColor="#4bb4ff"/>
+        <stop offset="1" stopColor="#0d7bc4"/>
+      </linearGradient>
+    </defs>
+    <polygon fill="url(#talkexBlueTick)" strokeLinejoin="round" strokeWidth="0.4" stroke="url(#talkexBlueTick)"
+             points="12,1 13.8,3 16.2,1.8 17.1,4.4 19.8,4.2 19.7,6.9 22.2,7.8 21,10.2 23,12 21,13.8 22.2,16.2 19.7,17.1 19.8,19.8 17.1,19.7 16.2,22.2 13.8,21 12,23 10.2,21 7.8,22.2 6.9,19.7 4.2,19.8 4.4,17.1 1.8,16.2 3,13.8 1,12 3,10.2 1.8,7.8 4.4,6.9 4.2,4.2 6.9,4.4 7.8,1.8 10.2,3"/>
+    <circle cx="12" cy="12" r="8" fill="none" stroke="#fff" strokeOpacity="0.18" strokeWidth="0.6"/>
+    <path d="M7.5 12.3 L10.7 15.5 L16.6 9.2" fill="none" stroke="#fff" strokeWidth="2.6"
+          strokeLinecap="round" strokeLinejoin="round"/>
+  </svg>,
   check: (c = G.accent, s = 14) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>,
   checkDouble: (c = G.accent, s = 15) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 7 17l-5-5"/><path d="M22 6 12.5 15.5"/></svg>,
   doc: (c = G.accent, s = 28) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>,
@@ -719,6 +783,10 @@ export const I = {
   contactCard: (c = G.sub, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round"><rect x="2" y="4" width="20" height="16" rx="2"/><circle cx="9" cy="10" r="2.5"/><path d="M5 17c.7-2.3 2.4-3.5 4-3.5s3.3 1.2 4 3.5"/><line x1="15" y1="9" x2="19" y2="9"/><line x1="15" y1="13" x2="19" y2="13"/></svg>,
   image: (c = G.sub, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>,
   camera: (c = G.sub, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>,
+  // "Flip camera" — a camera body with two curved arrows circling the lens,
+  // the standard front/back-switch glyph WhatsApp/Instagram/Meet all use
+  // (replaces the old generic rotate-arrow that read as "rotate photo").
+  cameraFlip: (c = G.sub, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><path d="M8.5 13a3.5 3.5 0 0 1 6-2.4"/><polyline points="14.8 8 14.8 10.6 12.2 10.6"/><path d="M15.5 13a3.5 3.5 0 0 1-6 2.4"/><polyline points="9.2 18 9.2 15.4 11.8 15.4"/></svg>,
   musicNote: (c = G.sub, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>,
   scan: (c = G.sub, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><rect x="7" y="7" width="10" height="10" rx="1"/></svg>,
   rotateLeft: (c = G.sub, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 14 5 10l4-4"/><path d="M5 10h9a5 5 0 0 1 5 5v1a5 5 0 0 1-5 5H9"/></svg>,
@@ -910,6 +978,44 @@ export function ContextMenu({ x, y, items, onClose }) {
   );
 }
 
+/**
+ * Keeps a CSS variable `--app-height` in sync with the ACTUALLY-VISIBLE
+ * viewport height (window.visualViewport) rather than the layout viewport
+ * that `100vh` measures. The two differ exactly when it matters here: when
+ * the on-screen keyboard is open, or the mobile browser's URL bar is showing,
+ * `100vh` stays the full screen height while visualViewport.height shrinks to
+ * the strip above the keyboard. Binding the app shell's height to this
+ * variable is what stops the bottom nav / message composer from being pushed
+ * off-screen behind the keyboard — or, on some Android WebViews, floating up
+ * over it — instead of sitting neatly just above it, WhatsApp-style. Call
+ * once, high in the tree.
+ */
+export function useViewportHeightVar() {
+  useEffect(() => {
+    const root = document.documentElement;
+    const vv = typeof window !== "undefined" ? window.visualViewport : null;
+    function apply() {
+      const height = vv && vv.height ? vv.height : window.innerHeight;
+      root.style.setProperty("--app-height", `${Math.round(height)}px`);
+    }
+    apply();
+    if (vv) {
+      vv.addEventListener("resize", apply);
+      vv.addEventListener("scroll", apply);
+    }
+    window.addEventListener("resize", apply);
+    window.addEventListener("orientationchange", apply);
+    return () => {
+      if (vv) {
+        vv.removeEventListener("resize", apply);
+        vv.removeEventListener("scroll", apply);
+      }
+      window.removeEventListener("resize", apply);
+      window.removeEventListener("orientationchange", apply);
+    };
+  }, []);
+}
+
 export function Screen({ children, style }) {
   return (
     <div style={{
@@ -919,7 +1025,11 @@ export function Screen({ children, style }) {
       // the header/footer away with everything else. Fixed height + hidden
       // overflow here forces each screen's own `flex:1, overflowY:auto` inner
       // pane to be the only thing that scrolls.
-      height: "100vh", overflow: "hidden", background: G.bg,
+      //
+      // --app-height (kept live by useViewportHeightVar) is the visible
+      // height above any open keyboard; 100vh is the fallback before the
+      // variable is first set or where visualViewport isn't available.
+      height: "var(--app-height, 100vh)", overflow: "hidden", background: G.bg,
       fontFamily: "'SF Pro Text',-apple-system,sans-serif", color: G.text,
       maxWidth: 430, margin: "0 auto", display: "flex", flexDirection: "column",
       ...style,

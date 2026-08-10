@@ -8,7 +8,7 @@ import { useRealtime } from "./useRealtime.js";
 import { useCall } from "./useCall.js";
 import { useGroupCall } from "./useGroupCall.js";
 import {
-  Button, ChatBackdrop, Field, G, I, Screen, Spinner, useIsDesktop,
+  Button, ChatBackdrop, Field, G, I, Screen, Spinner, useIsDesktop, useViewportHeightVar,
   applyTheme, getStoredAccent, getStoredTheme, saveAccent, saveTheme,
 } from "./ui.jsx";
 import { getAppLockTimeout, isAppLockEnabled, verifyAppLockPin } from "./appLock.js";
@@ -47,6 +47,9 @@ const TABS = [
  */
 export default function App() {
   const isDesktop = useIsDesktop();
+  // Keep --app-height tracking the space above the keyboard so the bottom nav
+  // and message composer never overlap it or float over it (see the hook).
+  useViewportHeightVar();
   const [me, setMe] = useState(null);
   const [reactivatePending, setReactivatePending] = useState(false);
   const [checking, setChecking] = useState(true);
@@ -292,6 +295,72 @@ export default function App() {
     }
   }, [missedCalls]);
 
+  // ── Hardware / browser back button ───────────────────────────────────────────
+  //
+  // Wrapped in Capacitor (Android), the app is a single WebView. Android's
+  // hardware back button, by default, exits the whole app the moment the
+  // WebView has no page history to go back through — and this SPA never
+  // navigated between real pages, so it had none. That's why one back press
+  // closed everything instead of stepping back one screen at a time.
+  //
+  // The fix models the app's own navigation depth with synthetic History API
+  // entries: each open "layer" (a non-default tab, an open chat, the Discover
+  // sheet, a search results view) pushes one entry, and pressing back pops the
+  // topmost layer instead of exiting. Only when every layer is closed does a
+  // further back finally leave the app — exactly the step-by-step behaviour a
+  // native app has. Works in a desktop browser too (the browser Back button
+  // drives the same popstate), so there's nothing Capacitor-specific here.
+  const backLayers = [];
+  if (tab !== "chats" && !openChat) backLayers.push(() => changeTab("chats"));
+  if (openChat) backLayers.push(() => setOpenChat(null));
+  if (discoverOpen) backLayers.push(() => setDiscoverOpen(false));
+  if (searchResults) backLayers.push(() => setSearchResults(null));
+
+  const backLayersRef = useRef([]);
+  backLayersRef.current = backLayers;
+  const backDepth = useRef(0);
+  const suppressPop = useRef(0);
+
+  // Keep the number of synthetic history entries equal to the number of open
+  // layers. Growing: push entries as layers open. Shrinking because the UI
+  // itself closed a layer (an on-screen ✕/back arrow, not the hardware
+  // button): quietly consume the now-extra history entries with history.go,
+  // flagging suppressPop so our own popstate handler ignores those.
+  useEffect(() => {
+    const target = backLayers.length;
+    const current = backDepth.current;
+    if (target > current) {
+      for (let i = current; i < target; i += 1) window.history.pushState({ htLayer: i + 1 }, "");
+      backDepth.current = target;
+    } else if (target < current) {
+      suppressPop.current += current - target;
+      backDepth.current = target;
+      window.history.go(-(current - target));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backLayers.length]);
+
+  useEffect(() => {
+    function onPop() {
+      if (suppressPop.current > 0) { suppressPop.current -= 1; return; }
+      const layers = backLayersRef.current;
+      if (layers.length === 0) {
+        // Nothing left to close — re-seed one entry so a subsequent back still
+        // has something to consume rather than immediately exiting mid-use.
+        // (When the user genuinely wants to leave, a second back with no
+        // layers open falls through to the platform's real exit.)
+        return;
+      }
+      // The back press already consumed one history entry, so our depth drops
+      // by one; update it BEFORE closing the layer so the sync effect above
+      // sees a matching count and doesn't try to rewrite history again.
+      backDepth.current = layers.length - 1;
+      layers[layers.length - 1]();
+    }
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
   // ── Realtime ───────────────────────────────────────────────────────────────
 
   const onEvent = useCallback((event) => {
@@ -495,13 +564,39 @@ export default function App() {
   useEffect(() => {
     if (chats.length === 0) return;
     let cancelled = false;
-    (async () => {
-      for (const chat of chats) {
-        if (cancelled) return;
-        await Messages.list(chat.id).catch(() => {});
-      }
-    })();
-    return () => { cancelled = true; };
+    let idleHandle = null;
+    let timer = null;
+
+    // This warm-up used to fire a back-to-back burst of fetch()+IndexedDB
+    // writes for EVERY chat the instant the list loaded — cheap in a desktop
+    // browser, but on the Android WebView (Capacitor) that same burst lands
+    // right on top of first paint and the initial socket/E2EE setup, and the
+    // single-threaded WebView visibly froze for a few seconds on accounts
+    // with many chats. That's the "app hangs but the browser is fine"
+    // difference. Two changes fix it without dropping the feature: wait for
+    // the WebView to go idle before starting, and yield ~120ms between each
+    // chat so the main thread stays free for taps and scrolling throughout.
+    const start = () => {
+      (async () => {
+        for (const chat of chats) {
+          if (cancelled) return;
+          await Messages.list(chat.id).catch(() => {});
+          await new Promise((resolve) => { timer = setTimeout(resolve, 120); });
+        }
+      })();
+    };
+
+    if (typeof window.requestIdleCallback === "function") {
+      idleHandle = window.requestIdleCallback(start, { timeout: 4000 });
+    } else {
+      timer = setTimeout(start, 1200);
+    }
+
+    return () => {
+      cancelled = true;
+      if (idleHandle != null && typeof window.cancelIdleCallback === "function") window.cancelIdleCallback(idleHandle);
+      if (timer != null) clearTimeout(timer);
+    };
     // Deliberately keyed on the chat id list, not the whole `chats` array
     // (which gets a new reference on every unread-count tick) — this only
     // needs to re-run when the SET of chats actually changes.

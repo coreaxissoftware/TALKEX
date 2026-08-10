@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Actions, Chats, Contacts, Me, Meetings, Messages, Pins, Report, Scheduled, Search, Uploads, Users,
   sendReliably, sendFileReliably, newClientMessageId, meetingLink,
@@ -6,16 +6,18 @@ import {
 import * as offlineDb from "../offlineDb.js";
 import {
   Av, Button, ChatBackdrop, ContextMenu, EMOJIS, EMOJI_GROUPS, Field, G, I, SRow, Spinner, Toggle,
-  clockTime, countdown, durationLabel, lastSeenLabel, localInputToUnix, whenLabel,
+  clockTime, countdown, durationLabel, lastSeenLabel, localInputToUnix, whenLabel, useEnterToSend,
 } from "../ui.jsx";
 import { useVoiceRecorder } from "../useVoiceRecorder.js";
-import { canvasToPdfBlob } from "../imageToPdf.js";
+import { canvasesToPdfBlob } from "../imageToPdf.js";
 import { STICKERS, STICKERS_BY_ID } from "../stickers.jsx";
 import { shouldAutoDownload } from "../mediaPrefs.js";
 import CameraCapture from "../CameraCapture.jsx";
 import { COUNTRY_CODES, flagFor, samplePlaceholder, splitPhone } from "../countryCodes.js";
 import LocationMap from "../LocationMap.jsx";
 import PhotoEditor from "../PhotoEditor.jsx";
+// pdf.js is heavy; load the viewer/editor only when a PDF is actually opened.
+const PdfDoc = lazy(() => import("../PdfDoc.jsx"));
 
 const SLOW_MODE_CHOICES = [
   { label: "Off", seconds: 0 },
@@ -620,6 +622,9 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         onClick: toggleFavoriteTop,
       },
       { label: "Add to list", icon: I.archive(G.sub, 16), onClick: () => setFolderSheetOpen(true) },
+      ...(["group", "channel", "community"].includes(chat.type)
+        ? [{ label: "Schedule a meeting", icon: I.calendar(G.sub, 16), onClick: () => setSheet("meeting") }]
+        : []),
       { divider: true },
       ...(chat.type === "dm" || chat.type === "group"
         ? [
@@ -875,8 +880,65 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
 
   const typingNames = Object.values(typingBy[chat.id] || {});
 
+  // WhatsApp Web-style drag-and-drop file support. Attached to the whole
+  // ChatView (not just the composer) so a file can be dropped anywhere in
+  // the conversation area, same as WhatsApp Web. onDragOver's
+  // preventDefault is the actual switch that tells the browser "yes, this
+  // is a drop target" — without it Chrome opens the file in a new tab
+  // instead of firing our onDrop.
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const dragEnterCount = useRef(0);
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100vh", position: "relative" }}
+      onDragEnter={(event) => {
+        if (!event.dataTransfer?.types?.includes("Files")) return;
+        event.preventDefault();
+        // dragenter fires for every child element the cursor crosses, not
+        // just the outer div — counter approach is the standard trick to
+        // avoid flicker as it re-enters children while the drag is still
+        // over the drop zone as a whole.
+        dragEnterCount.current += 1;
+        setIsDraggingFile(true);
+      }}
+      onDragLeave={(event) => {
+        if (!event.dataTransfer?.types?.includes("Files")) return;
+        dragEnterCount.current -= 1;
+        if (dragEnterCount.current <= 0) {
+          dragEnterCount.current = 0;
+          setIsDraggingFile(false);
+        }
+      }}
+      onDragOver={(event) => {
+        if (event.dataTransfer?.types?.includes("Files")) event.preventDefault();
+      }}
+      onDrop={(event) => {
+        if (!event.dataTransfer?.files?.length) return;
+        event.preventDefault();
+        dragEnterCount.current = 0;
+        setIsDraggingFile(false);
+        // Kind auto-picked from mime type per file — matches how the
+        // Attach sheet's file picker works (photos go as photo, videos as
+        // video, everything else as document).
+        const files = Array.from(event.dataTransfer.files);
+        for (const file of files) {
+          const kind = file.type.startsWith("image/") ? "photo"
+            : file.type.startsWith("video/") ? "video"
+            : file.type.startsWith("audio/") ? "voice"
+            : "document";
+          sendFile(file, kind);
+        }
+      }}>
+      {isDraggingFile && (
+        <div style={{
+          position: "absolute", inset: 0, zIndex: 45, pointerEvents: "none",
+          background: `${G.accent}22`, border: `3px dashed ${G.accent}`, borderRadius: 8,
+          display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column",
+        }}>
+          <div style={{ fontSize: 48, marginBottom: 8 }}>📎</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: G.accent }}>Drop files to send</div>
+        </div>
+      )}
       <Header chat={chat} typing={typingNames} onBack={onBack}
               onTimer={() => setSheet("timer")}
               onMeeting={() => setSheet("meeting")}
@@ -1077,6 +1139,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
                         }
                       }}
                       onVote={(index) => vote(message, index)}
+                      onForward={() => setForwarding(message)}
                       onCallAgain={(kind) => onStartCall(kind)} onJoinMeeting={joinMeeting} toast={toast}/>
             </div>
           </div>
@@ -1103,7 +1166,6 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         onChange={onType}
         onSend={send}
         onSchedule={() => setSheet("schedule")}
-        onAttach={() => setSheet("attach")}
         onVoice={sendVoiceNote}
         uploading={uploading}
         disappearSecs={chat.disappear_secs}
@@ -1111,7 +1173,17 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         members={members}
         toast={toast}
         viewOnce={viewOnceText}
-        onToggleViewOnce={() => setViewOnceText((v) => !v)}/>
+        onToggleViewOnce={() => setViewOnceText((v) => !v)}
+        onFile={sendFile}
+        onLocation={() => setSheet("location")}
+        onContact={() => setSheet("contact")}
+        onPoll={() => setSheet("poll")}
+        onSticker={() => setSheet("sticker")}
+        onScanCaptured={(file) => { setScanFile(file); setSheet("scanEdit"); }}
+        onFilesPicked={(files, kindOverride) => {
+          setMediaPreview({ files, kindOverride });
+          setSheet("mediaPreview");
+        }}/>
 
       {menuFor && (
         <MessageMenu
@@ -1183,17 +1255,6 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
       {sheet === "poll" && (
         <PollSheet chat={chat} onClose={() => setSheet(null)} toast={toast}
                    onCreated={(message) => setMessages((c) => [...c, message])}/>
-      )}
-
-      {sheet === "attach" && (
-        <AttachSheet onClose={() => setSheet(null)} onFile={sendFile}
-                     onLocation={() => setSheet("location")} onContact={() => setSheet("contact")}
-                     onPoll={() => setSheet("poll")} onSticker={() => setSheet("sticker")}
-                     onScanCaptured={(file) => { setScanFile(file); setSheet("scanEdit"); }}
-                     onFilesPicked={(files, kindOverride) => {
-                       setMediaPreview({ files, kindOverride });
-                       setSheet("mediaPreview");
-                     }}/>
       )}
 
       {sheet === "sticker" && (
@@ -1344,31 +1405,28 @@ function Header({ chat, typing, onBack, onTimer, onMeeting, onInfo, onVoiceCall,
         position: "absolute", bottom: 2, left: 0, right: 0, textAlign: "center",
         fontSize: 9, color: G.muted, letterSpacing: 0.3, pointerEvents: "none",
       }}>🔒 End-to-end encrypted</div>
-      <div onClick={onSearch} style={{ cursor: "pointer" }} title="Search in chat">
-        {I.search(G.sub, 18)}
-      </div>
+      {/* WhatsApp-style trimmed header: only ONE primary call action sits up
+          front — a voice-call icon for a one-to-one chat, a video-call icon
+          for a group — and everything else (search, the other call type,
+          schedule a meeting, disappearing messages, mute, lock, …) lives in
+          the ⋮ menu. Keeps the header uncluttered on a phone. The pinned-
+          messages shortcut only appears when there actually are pins. */}
       {pinCount > 0 && (
         <div onClick={onTogglePins} style={{ cursor: "pointer", position: "relative" }}
              title={`${pinCount} pinned`}>
           {I.pin(G.accentText, 18)}
         </div>
       )}
-      {(chat.type === "dm" || chat.type === "group") && (
-        <>
-          <div onClick={onVoiceCall} style={{ cursor: "pointer" }} title="Voice call">
-            {I.phone(G.sub, 19)}
-          </div>
-          <div onClick={onVideoCall} style={{ cursor: "pointer" }} title="Video call">
-            {I.video(G.sub, 20)}
-          </div>
-        </>
+      {chat.type === "dm" && (
+        <div onClick={onVoiceCall} style={{ cursor: "pointer" }} title="Voice call">
+          {I.phone(G.sub, 20)}
+        </div>
       )}
-      <div onClick={onMeeting} style={{ cursor: "pointer" }} title="Schedule a meeting">
-        {I.calendar(G.sub, 20)}
-      </div>
-      <div onClick={onTimer} style={{ cursor: "pointer" }} title="Disappearing messages">
-        {I.timer(chat.disappear_secs ? G.yellow : G.sub, 20)}
-      </div>
+      {chat.type === "group" && (
+        <div onClick={onVideoCall} style={{ cursor: "pointer" }} title="Video call">
+          {I.video(G.sub, 21)}
+        </div>
+      )}
       <div onClick={onMenu} style={{ cursor: "pointer" }} title="More options">
         {I.moreVertical(G.sub, 20)}
       </div>
@@ -1386,18 +1444,23 @@ function EmojiPicker({ onPick, onClose }) {
 
   return (
     <div onClick={(e) => e.stopPropagation()} style={{
-      position: "absolute", bottom: "100%", left: 12, right: 12, marginBottom: 4,
-      background: G.surface, border: `1px solid ${G.border}`, borderRadius: 14,
-      // Capped to the smaller of a fixed height or 60% of the viewport, not
-      // a flat 280px — on a phone with the on-screen keyboard still up
-      // (exactly when someone taps this, mid-message), 280px can be taller
-      // than the space actually left above the composer and push its own
-      // top off-screen, which is what "the picker doesn't work" looks like
-      // in practice even though the tap handlers themselves were fine.
+      // Edge-to-edge panel sitting flush above the input bar, like WhatsApp's
+      // emoji keyboard (and matching the app's other bottom sheets) rather
+      // than a narrow floating box inset from the sides. left/right:0 span the
+      // composer's full width; only the top corners are rounded since the
+      // bottom edge meets the input row.
+      position: "absolute", bottom: "100%", left: 0, right: 0,
+      background: G.surface, borderTop: `1px solid ${G.border}`,
+      borderTopLeftRadius: 16, borderTopRightRadius: 16,
+      // Capped to the smaller of a fixed height or 50% of the viewport, not
+      // a flat height — on a phone with the on-screen keyboard still up
+      // (exactly when someone taps this, mid-message), a tall panel can push
+      // its own top off-screen, which is what "the picker doesn't work" looks
+      // like in practice even though the tap handlers themselves were fine.
       // z-index makes sure nothing else in the composer row can ever paint
       // over it, which position/DOM-order alone doesn't guarantee.
-      boxShadow: `0 4px 16px ${G.border}`, overflow: "hidden",
-      height: "min(280px, 60vh)", display: "flex", flexDirection: "column", zIndex: 20,
+      boxShadow: `0 -4px 16px ${G.border}`, overflow: "hidden",
+      height: "min(320px, 50vh)", display: "flex", flexDirection: "column", zIndex: 20,
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 10px", borderBottom: `1px solid ${G.border}` }}>
         <input value={query} onChange={(e) => setQuery(e.target.value)}
@@ -1527,7 +1590,46 @@ function PinnedBar({ pins, onJump }) {
 // a segment is either an @mention (never re-parsed for markdown, since a
 // username can legitimately contain underscores) or plain text that gets a
 // second pass for the four markers below.
+// http(s):// or bare www. links, up to the next whitespace. Split-capture so
+// the URLs themselves come back as their own array entries between the plain
+// text around them.
+const URL_PATTERN = /(https?:\/\/[^\s<]+|www\.[^\s<]+)/gi;
+
+// A trailing . , ) ! ? etc. is almost always sentence punctuation, not part
+// of the address ("visit https://x.com." → the dot isn't in the URL).
+function trimUrlPunctuation(url) {
+  const match = url.match(/[.,;:!?)\]]+$/);
+  return match ? url.slice(0, -match[0].length) : url;
+}
+
 function renderFormatting(text, mine, keyPrefix) {
+  const parts = text.split(URL_PATTERN);
+  if (parts.length === 1) return renderMarkdown(text, mine, keyPrefix);
+  return parts.map((part, index) => {
+    if (!part) return null;
+    if (/^(https?:\/\/|www\.)/i.test(part)) {
+      const clean = trimUrlPunctuation(part);
+      const trailing = part.slice(clean.length);
+      const href = clean.startsWith("www.") ? `https://${clean}` : clean;
+      return (
+        <span key={`${keyPrefix}-u${index}`}>
+          <a href={href} target="_blank" rel="noopener noreferrer"
+             onClick={(event) => event.stopPropagation()}
+             style={{ color: mine ? "#fff" : G.accentText, textDecoration: "underline", wordBreak: "break-all" }}>
+            {clean}
+          </a>
+          {trailing}
+        </span>
+      );
+    }
+    return <span key={`${keyPrefix}-t${index}`}>{renderMarkdown(part, mine, `${keyPrefix}-${index}`)}</span>;
+  });
+}
+
+// The *bold* / _italic_ / ~strike~ / `code` markdown pass, split out from
+// renderFormatting so the URL linkifier above can run first and hand each
+// non-URL span through here.
+function renderMarkdown(text, mine, keyPrefix) {
   const tokenPattern = /(\*[^*\n]+\*|_[^_\n]+_|~[^~\n]+~|`[^`\n]+`)/g;
   const parts = text.split(tokenPattern);
   if (parts.length === 1) return text;
@@ -1564,8 +1666,71 @@ function renderWithMentions(text, mine) {
   ));
 }
 
+function firstUrl(text) {
+  const match = (text || "").match(URL_PATTERN);
+  if (!match) return null;
+  const clean = trimUrlPunctuation(match[0]);
+  return clean.startsWith("www.") ? `https://${clean}` : clean;
+}
+
+/**
+ * The little title/description/thumbnail card WhatsApp shows under a message
+ * that contains a link. The server does the actual page fetch and OpenGraph
+ * parse (a browser can't read another origin's HTML) via GET /link-preview,
+ * caching it briefly — see _fetch_link_preview in main.py. Renders nothing at
+ * all until (and unless) that returns something worth showing, so a plain
+ * message with a bare link is never pushed around by an empty box.
+ */
+function LinkPreview({ text, mine }) {
+  const url = firstUrl(text);
+  const [data, setData] = useState(null);
+
+  useEffect(() => {
+    if (!url) { setData(null); return; }
+    let cancelled = false;
+    Chats.linkPreview(url)
+      .then((preview) => { if (!cancelled) setData(preview); })
+      .catch(() => { if (!cancelled) setData(null); });
+    return () => { cancelled = true; };
+  }, [url]);
+
+  if (!url || !data || (!data.title && !data.description && !data.image)) return null;
+
+  return (
+    <a href={url} target="_blank" rel="noopener noreferrer"
+       onClick={(event) => event.stopPropagation()}
+       style={{
+         display: "block", marginTop: 6, borderRadius: 10, overflow: "hidden",
+         textDecoration: "none", color: "inherit",
+         background: mine ? "#ffffff1f" : G.dim,
+         border: `1px solid ${mine ? "#ffffff33" : G.border}`,
+       }}>
+      {data.image && (
+        <img src={data.image} alt="" loading="lazy"
+             style={{ width: "100%", maxHeight: 160, objectFit: "cover", display: "block" }}/>
+      )}
+      <div style={{ padding: "7px 10px" }}>
+        {data.site_name && (
+          <div style={{ fontSize: 10.5, textTransform: "uppercase", letterSpacing: 0.3, opacity: 0.7, marginBottom: 2 }}>
+            {data.site_name}
+          </div>
+        )}
+        {data.title && (
+          <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.3 }}>{data.title}</div>
+        )}
+        {data.description && (
+          <div style={{
+            fontSize: 11.5, opacity: 0.85, marginTop: 2, lineHeight: 1.35,
+            display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden",
+          }}>{data.description}</div>
+        )}
+      </div>
+    </a>
+  );
+}
+
 function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead,
-                  onLongPress, onVote, onCallAgain, onJoinMeeting, toast }) {
+                  onLongPress, onVote, onForward, onCallAgain, onJoinMeeting, toast }) {
   const mine = message.sender_id === me.id;
   const gone = message.deleted_at || message.expired;
 
@@ -1699,7 +1864,7 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead,
               // out, same as any other pending attachment until it actually
               // reaches the server.
               ? <ViewOnceAttachment message={message} mine={mine}/>
-              : <Attachment message={message} mine={mine}/>}
+              : <Attachment message={message} mine={mine} onForward={onForward} toast={toast}/>}
             {message.text && (
               <div style={{ fontSize: 14, lineHeight: 1.4, whiteSpace: "pre-wrap", marginTop: 6 }}>
                 {renderWithMentions(message.text, mine)}
@@ -1736,9 +1901,12 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead,
             </div>
           )
         ) : (
-          <div style={{ fontSize: 14.5, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>
-            {renderWithMentions(message.text, mine)}
-          </div>
+          <>
+            <div style={{ fontSize: 14.5, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>
+              {renderWithMentions(message.text, mine)}
+            </div>
+            <LinkPreview text={message.text} mine={mine}/>
+          </>
         )}
 
         <div style={{
@@ -2070,9 +2238,15 @@ function ViewOnceAttachment({ message, mine }) {
  * cannot carry an Authorization header, only cookies, which this app does not
  * use for auth.
  */
-function Attachment({ message, mine }) {
+function Attachment({ message, mine, onForward, toast }) {
   const [blobUrl, setBlobUrl] = useState(null);
   const [error, setError] = useState(false);
+  // Tapping a photo/video opens it full-screen, the way WhatsApp does —
+  // reusing the blob URL already loaded below, so there's nothing to refetch.
+  const [fullscreen, setFullscreen] = useState(false);
+  const [editingPhoto, setEditingPhoto] = useState(false);
+  const [editFile, setEditFile] = useState(null);
+  const [viewingPdf, setViewingPdf] = useState(false);
   // Starts closed when the setting says not to fetch automatically; tapping
   // the placeholder below flips this to fetch on demand, same one-time
   // manual download WhatsApp offers when auto-download is off.
@@ -2140,17 +2314,90 @@ function Attachment({ message, mine }) {
     );
   }
 
+  const isPdf = /\.pdf$/i.test(fileName) || message.payload?.mime === "application/pdf";
+
+  // Blob URLs download fine through a synthesised <a download>; doing it in JS
+  // (rather than a static link) lets the same handler back every download
+  // button below and the in-app PDF viewer's own download control.
+  function downloadFile() {
+    if (!effectiveUrl) return;
+    const link = document.createElement("a");
+    link.href = effectiveUrl;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+
+  // Editing works on a File rebuilt from the already-loaded blob — no refetch.
+  async function openPhotoEditor() {
+    try {
+      const blob = await (await fetch(effectiveUrl)).blob();
+      setEditFile(new File([blob], fileName || "photo.jpg", { type: blob.type || "image/jpeg" }));
+      setEditingPhoto(true);
+    } catch {
+      toast && toast("Could not open the editor");
+    }
+  }
+
+  function saveEditedPhoto(edited) {
+    setEditingPhoto(false);
+    const url = URL.createObjectURL(edited);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = edited.name || "edited.jpg";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    toast && toast("Saved edited photo");
+  }
+
   if (message.kind === "photo") {
     return (
-      <img src={effectiveUrl} alt={fileName}
-           style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 10, display: "block" }}/>
+      <>
+        <img src={effectiveUrl} alt={fileName}
+             onClick={(event) => { event.stopPropagation(); setFullscreen(true); }}
+             style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 10, display: "block", cursor: "pointer" }}/>
+        {fullscreen && (
+          <FullscreenMedia kind="photo" src={effectiveUrl} alt={fileName}
+                           onEdit={() => { setFullscreen(false); openPhotoEditor(); }}
+                           onClose={() => setFullscreen(false)}/>
+        )}
+        {editingPhoto && editFile && (
+          <PhotoEditor file={editFile} onCancel={() => setEditingPhoto(false)} onDone={saveEditedPhoto}/>
+        )}
+      </>
     );
   }
 
   if (message.kind === "video") {
     return (
-      <video controls src={effectiveUrl}
-             style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 10, display: "block" }}/>
+      <div>
+        <div style={{ position: "relative" }}>
+          <video controls src={effectiveUrl}
+                 style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 10, display: "block" }}/>
+          {/* An explicit expand button — tapping the video body itself is
+              reserved for play/pause via the native controls, so the way into
+              full-screen is this corner control rather than a tap anywhere. */}
+          <div onClick={(event) => { event.stopPropagation(); setFullscreen(true); }}
+               title="Full screen" style={{
+                 position: "absolute", top: 6, right: 6, width: 30, height: 30, borderRadius: "50%",
+                 background: "#00000099", display: "flex", alignItems: "center", justifyContent: "center",
+                 cursor: "pointer",
+               }}>
+            {I.expand ? I.expand("#fff", 15) : "⛶"}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+          <AttachmentAction label="Download" icon={I.download} mine={mine} onClick={downloadFile}/>
+          {onForward && <AttachmentAction label="Forward" icon={I.fwd} mine={mine} onClick={onForward}/>}
+        </div>
+        {fullscreen && (
+          <FullscreenMedia kind="video" src={effectiveUrl} alt={fileName}
+                           onClose={() => setFullscreen(false)}/>
+        )}
+      </div>
     );
   }
 
@@ -2158,20 +2405,99 @@ function Attachment({ message, mine }) {
     return <VoicePlayer src={effectiveUrl}/>;
   }
 
-  // document, and anything else that lands here as a fallback.
+  // document (and anything else that falls through) — a WhatsApp-style file
+  // card with an inline action row underneath: View (PDF only) / Download /
+  // Forward, instead of the whole bubble being one bare download link.
   return (
-    <a href={effectiveUrl} download={fileName} style={{
-      display: "flex", alignItems: "center", gap: 10, textDecoration: "none",
-      color: mine ? "#fff" : G.text, padding: "6px 2px",
-    }}>
-      {I.doc ? I.doc(mine ? "#fff" : G.accent, 26) : "📄"}
-      <div style={{ minWidth: 0 }}>
-        <div style={{ fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>
-          {fileName}
+    <div style={{ minWidth: 210 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        {I.doc ? I.doc(mine ? "#fff" : G.accent, 26) : "📄"}
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {fileName}
+          </div>
+          <div style={{ fontSize: 11, opacity: 0.7 }}>
+            {isPdf ? "PDF · " : ""}{formatBytes(sizeBytes)}
+          </div>
         </div>
-        <div style={{ fontSize: 11, opacity: 0.7 }}>{formatBytes(sizeBytes)}</div>
       </div>
-    </a>
+      <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+        {isPdf && <AttachmentAction label="View" icon={I.eye} mine={mine} onClick={() => setViewingPdf(true)}/>}
+        <AttachmentAction label="Download" icon={I.download} mine={mine} onClick={downloadFile}/>
+        {onForward && <AttachmentAction label="Forward" icon={I.fwd} mine={mine} onClick={onForward}/>}
+      </div>
+      {viewingPdf && (
+        <Suspense fallback={
+          <div style={{
+            position: "fixed", inset: 0, background: "#1e1e1e", zIndex: 1300,
+            display: "flex", alignItems: "center", justifyContent: "center", color: "#fff",
+          }}>Loading…</div>
+        }>
+          <PdfDoc src={effectiveUrl} name={fileName} toast={toast}
+                  onClose={() => setViewingPdf(false)} onDownloadOriginal={downloadFile}/>
+        </Suspense>
+      )}
+    </div>
+  );
+}
+
+/** A small pill button used under a file/video bubble. Adapts its colours to
+ *  whether it sits inside the sender's (coloured) bubble or a received one. */
+function AttachmentAction({ label, icon, mine, onClick }) {
+  const fg = mine ? "#fff" : G.accentText;
+  return (
+    <button onClick={(e) => { e.stopPropagation(); onClick(); }} style={{
+      display: "flex", alignItems: "center", gap: 6, padding: "5px 12px", borderRadius: 16,
+      cursor: "pointer", fontSize: 12.5, fontWeight: 600, color: fg,
+      background: mine ? "#ffffff26" : G.accentSoft, border: "none",
+    }}>
+      {icon ? icon(fg, 15) : null}
+      <span>{label}</span>
+    </button>
+  );
+}
+
+
+/**
+ * Full-screen viewer for a single tapped photo/video in a chat bubble. Kept
+ * separate from MediaLightbox (which swipes through a whole gallery and
+ * refetches each slide by attachment id) because here the blob URL is already
+ * in hand — nothing to fetch, no neighbours to page through.
+ */
+function FullscreenMedia({ kind, src, alt, onEdit, onClose }) {
+  useEffect(() => {
+    function onKey(event) { if (event.key === "Escape") onClose(); }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "#000000ee", zIndex: 1200,
+      display: "flex", alignItems: "center", justifyContent: "center",
+    }}>
+      <div style={{
+        position: "absolute", top: 10, right: 12, zIndex: 1, display: "flex", gap: 8, alignItems: "center",
+      }}>
+        {kind === "photo" && onEdit && (
+          <button onClick={(e) => { e.stopPropagation(); onEdit(); }} title="Edit" style={{
+            display: "flex", alignItems: "center", gap: 6, padding: "6px 14px", borderRadius: 18,
+            cursor: "pointer", fontSize: 13, fontWeight: 600, color: "#fff",
+            background: "#ffffff2e", border: "none",
+          }}>
+            {I.edit ? I.edit("#fff", 15) : null}<span>Edit</span>
+          </button>
+        )}
+        <div onClick={onClose} style={{ cursor: "pointer", color: "#fff", fontSize: 30, lineHeight: 1 }}>×</div>
+      </div>
+      {kind === "video" ? (
+        <video src={src} controls autoPlay onClick={(e) => e.stopPropagation()}
+               style={{ maxWidth: "96vw", maxHeight: "92vh" }}/>
+      ) : (
+        <img src={src} alt={alt || "Photo"} onClick={(e) => e.stopPropagation()}
+             style={{ maxWidth: "96vw", maxHeight: "92vh", objectFit: "contain" }}/>
+      )}
+    </div>
   );
 }
 
@@ -2344,16 +2670,70 @@ function Banner({ label, onClear }) {
 
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
-function Composer({ value, onChange, onSend, onSchedule, onAttach, onVoice, uploading,
-                    disappearSecs, editing, members, toast, viewOnce, onToggleViewOnce }) {
+function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
+                    disappearSecs, editing, members, toast, viewOnce, onToggleViewOnce,
+                    onFile, onLocation, onContact, onPoll, onSticker, onScanCaptured, onFilesPicked }) {
   const voice = useVoiceRecorder((blob) => onVoice(blob));
+  const enterToSend = useEnterToSend();
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [attachOpen, setAttachOpen] = useState(false);
   const [quickReplyOpen, setQuickReplyOpen] = useState(false);
   const [cannedReplies, setCannedReplies] = useState([]);
+  const inputRef = useRef(null);
+
+  // Enter behaviour depends on the per-device "Press Enter to send" setting.
+  // ON  → Enter sends, Shift+Enter makes a newline.
+  // OFF → Enter makes a newline, only the send button sends.
+  function onInputKeyDown(event) {
+    if (event.key !== "Enter") return;
+    if (enterToSend && !event.shiftKey) {
+      event.preventDefault();
+      onSend();
+    }
+    // else: let the newline through (textarea default).
+  }
+
+  // The attach button and the emoji button each double as a keyboard switch,
+  // WhatsApp-style: opening a panel blurs the field (so the on-screen keyboard
+  // drops and the panel has room); tapping the button again — now showing a
+  // keyboard glyph — refocuses the field to bring the keyboard back.
+  function toggleAttach() {
+    if (attachOpen) {
+      setAttachOpen(false);
+      inputRef.current?.focus();
+    } else {
+      setEmojiOpen(false);
+      setQuickReplyOpen(false);
+      setAttachOpen(true);
+      inputRef.current?.blur();
+    }
+  }
+
+  function toggleEmoji() {
+    if (emojiOpen) {
+      setEmojiOpen(false);
+      inputRef.current?.focus();
+    } else {
+      setAttachOpen(false);
+      setQuickReplyOpen(false);
+      setEmojiOpen(true);
+      inputRef.current?.blur();
+    }
+  }
 
   useEffect(() => {
     Me.cannedReplies().then(setCannedReplies).catch(() => {});
   }, []);
+
+  // Auto-grow the textarea to fit its content (up to the CSS max-height, after
+  // which it scrolls). Runs on every value change, including after a send
+  // clears it back to a single row.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+  }, [value]);
 
   useEffect(() => {
     if (voice.state === "error" && voice.error) toast(voice.error);
@@ -2400,11 +2780,33 @@ function Composer({ value, onChange, onSend, onSchedule, onAttach, onVoice, uplo
     );
   }
 
+  const panelOpen = emojiOpen || quickReplyOpen || attachOpen;
+
   return (
     <div style={{
       position: "relative", display: "flex", alignItems: "center", gap: 8, padding: "10px 12px",
       borderTop: `1px solid ${G.border}`, background: G.surface,
+      // Lift the composer (and the emoji/attach/quick-reply panel it hosts)
+      // above the tap-catcher below while a panel is open, so the input and its
+      // buttons stay interactive — only taps OUTSIDE the composer hit the catcher.
+      zIndex: panelOpen ? 30 : "auto",
     }}>
+      {/* Tap-anywhere-to-dismiss: while a panel is up, a tap on the chat (or
+          anywhere off the composer) closes it, the way WhatsApp dismisses its
+          emoji/attach keyboard. Tapping the button again still toggles it shut
+          via that button's own handler. */}
+      {panelOpen && (
+        <div onClick={() => { setEmojiOpen(false); setQuickReplyOpen(false); setAttachOpen(false); }}
+             style={{ position: "fixed", inset: 0, zIndex: 20 }}/>
+      )}
+
+      {attachOpen && (
+        <AttachPanel onClose={() => setAttachOpen(false)}
+                     onFile={onFile} onLocation={onLocation} onContact={onContact}
+                     onPoll={onPoll} onSticker={onSticker}
+                     onScanCaptured={onScanCaptured} onFilesPicked={onFilesPicked}/>
+      )}
+
       {mentionCandidates.length > 0 && (
         <div style={{
           position: "absolute", bottom: "100%", left: 12, right: 12, marginBottom: 4,
@@ -2452,9 +2854,9 @@ function Composer({ value, onChange, onSend, onSchedule, onAttach, onVoice, uplo
         </IconButton>
       )}
 
-      <IconButton onClick={() => !uploading && onAttach()} label="Attach" disabled={uploading}
-                  style={{ opacity: uploading ? 0.5 : 1 }}>
-        {uploading ? <Spinner small/> : I.paperclip(G.sub, 20)}
+      <IconButton onClick={() => !uploading && toggleAttach()} label={attachOpen ? "Keyboard" : "Attach"}
+                  disabled={uploading} style={{ opacity: uploading ? 0.5 : 1 }}>
+        {uploading ? <Spinner small/> : attachOpen ? I.keyboard(G.sub, 20) : I.paperclip(G.sub, 20)}
       </IconButton>
       <IconButton onClick={onSchedule} label="Schedule this message">
         {I.clock(G.sub, 20)}
@@ -2469,21 +2871,27 @@ function Composer({ value, onChange, onSend, onSchedule, onAttach, onVoice, uplo
           {I.eye(viewOnce ? G.accent : G.sub, 20)}
         </IconButton>
       )}
-      <IconButton onClick={() => setEmojiOpen((v) => !v)} label="Emoji" style={{ fontSize: 19 }}>
-        🙂
+      <IconButton onClick={toggleEmoji} label={emojiOpen ? "Keyboard" : "Emoji"} style={{ fontSize: 19 }}>
+        {emojiOpen ? I.keyboard(G.sub, 20) : "🙂"}
       </IconButton>
 
-      <input
+      <textarea
+        ref={inputRef}
         value={value}
+        rows={1}
         onChange={(event) => onChange(event.target.value)}
-        onKeyDown={(event) => event.key === "Enter" && onSend()}
+        onKeyDown={onInputKeyDown}
         placeholder={disappearSecs
           ? `Disappears after ${durationLabel(disappearSecs)}…`
           : editing ? "Edit message…" : "Message"}
         style={{
           flex: 1, padding: "11px 14px", borderRadius: 22, background: G.dim,
           border: `1px solid ${G.border}`, color: G.text, fontSize: 14.5,
-          outline: "none",
+          outline: "none", resize: "none", fontFamily: "inherit", lineHeight: 1.35,
+          // Grow with content up to a few lines, then scroll inside — so a
+          // multi-line draft (Enter-to-send OFF) doesn't push the whole
+          // composer off-screen.
+          maxHeight: 120, overflowY: "auto",
         }}/>
 
       {value.trim() ? (
@@ -2570,11 +2978,38 @@ function Sheet({ title, children, onClose }) {
   );
 }
 
+/** One tappable row in the message popover: an icon + a label, tight and
+ *  left-aligned, WhatsApp-style. */
+function MenuRow({ icon, label, danger, onClick }) {
+  const color = danger ? G.red : G.text;
+  return (
+    <button onClick={onClick} style={{
+      display: "flex", alignItems: "center", gap: 14, width: "100%",
+      padding: "11px 16px", background: "transparent", border: "none", cursor: "pointer",
+      color, fontSize: 14.5, textAlign: "left", lineHeight: 1.1,
+    }}
+      onMouseEnter={(e) => { e.currentTarget.style.background = G.dim; }}
+      onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
+      <span style={{ display: "flex", width: 18, justifyContent: "center", flexShrink: 0 }}>
+        {icon ? icon(danger ? G.red : G.sub, 18) : null}
+      </span>
+      <span>{label}</span>
+    </button>
+  );
+}
+
+/**
+ * The message action menu, WhatsApp-style: a horizontal reaction bar floating
+ * above a compact icon-list popover — NOT the old full-width bottom sheet that
+ * stacked every action as a giant button and overflowed the screen. Tapping
+ * the "+" on the reaction bar expands it to the full emoji set.
+ */
 function MessageMenu({ message, me, isModerator, isPinned, isStarred, onClose, onReact, onReply,
                       onEdit, onUnsend, onDeleteForEveryone, onHide, onPin, onStar, onForward, onShare,
                       onCopy, onSelect, onDownload, onInfo }) {
   const mine = message.sender_id === me.id;
   const hasAttachment = Boolean(message.payload?.attachment_id);
+  const canShare = typeof navigator !== "undefined" && navigator.share && !message.deleted_at;
   // Two genuinely different removals, not two labels on one action:
   //   Unsend — only the sender, on their own message, no trace left at all.
   //   Delete for everyone — sender OR a moderator; always leaves a visible
@@ -2583,77 +3018,75 @@ function MessageMenu({ message, me, isModerator, isPinned, isStarred, onClose, o
   //     wrote, with no trace, is not something this app does.
   const canUnsend = !message.deleted_at && mine;
   const canDeleteForEveryone = !message.deleted_at && (mine || isModerator);
-  return (
-    <Sheet title="Message" onClose={onClose}>
-      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-        {EMOJIS.map((emoji) => (
-          <button key={emoji} onClick={() => onReact(emoji)} style={{
-            fontSize: 22, padding: "6px 10px", borderRadius: 12, cursor: "pointer",
-            background: G.dim, border: `1px solid ${G.border}`,
-          }}>{emoji}</button>
-        ))}
-      </div>
+  const [showAllEmojis, setShowAllEmojis] = useState(false);
 
-      {mine && !message.deleted_at && (
-        <Button variant="ghost" onClick={onInfo} style={{ width: "100%", marginBottom: 8 }}>
-          Message info
-        </Button>
-      )}
-      <Button variant="ghost" onClick={onReply} style={{ width: "100%", marginBottom: 8 }}>
-        Reply
-      </Button>
-      <Button variant="ghost" onClick={onForward} style={{ width: "100%", marginBottom: 8 }}>
-        Forward
-      </Button>
-      {hasAttachment && !message.deleted_at && (
-        <Button variant="ghost" onClick={onDownload} style={{ width: "100%", marginBottom: 8 }}>
-          Download
-        </Button>
-      )}
-      {typeof navigator !== "undefined" && navigator.share && !message.deleted_at && (
-        <Button variant="ghost" onClick={onShare} style={{ width: "100%", marginBottom: 8 }}>
-          Share
-        </Button>
-      )}
-      {!message.deleted_at && (
-        <Button variant="ghost" onClick={onPin} style={{ width: "100%", marginBottom: 8 }}>
-          {isPinned ? "Unpin" : "Pin"}
-        </Button>
-      )}
-      {!message.deleted_at && (
-        <Button variant="ghost" onClick={onStar} style={{ width: "100%", marginBottom: 8 }}>
-          {isStarred ? "Unstar" : "Star"}
-        </Button>
-      )}
-      <Button variant="ghost" onClick={onSelect} style={{ width: "100%", marginBottom: 8 }}>
-        Select
-      </Button>
-      {message.text && (
-        <Button variant="ghost" onClick={onCopy} style={{ width: "100%", marginBottom: 8 }}>
-          Copy text
-        </Button>
-      )}
-      {mine && !message.deleted_at && (
-        <Button variant="ghost" onClick={onEdit} style={{ width: "100%", marginBottom: 8 }}>
-          Edit
-        </Button>
-      )}
-      {!message.deleted_at && (
-        <Button variant="ghost" onClick={onHide} style={{ width: "100%", marginBottom: 8 }}>
-          Delete for me
-        </Button>
-      )}
-      {canUnsend && (
-        <Button variant="danger" onClick={onUnsend} style={{ width: "100%", marginBottom: 8 }}>
-          Unsend
-        </Button>
-      )}
-      {canDeleteForEveryone && (
-        <Button variant="danger" onClick={onDeleteForEveryone} style={{ width: "100%" }}>
-          Delete for everyone
-        </Button>
-      )}
-    </Sheet>
+  // The six most-reached-for reactions sit inline; "+" reveals the rest.
+  const quickEmojis = EMOJIS.slice(0, 6);
+
+  const actionRows = [
+    mine && !message.deleted_at && { key: "info", label: "Message info", icon: I.info, onClick: onInfo },
+    { key: "reply", label: "Reply", icon: I.reply, onClick: onReply },
+    message.text && { key: "copy", label: "Copy", icon: I.copy, onClick: onCopy },
+    { key: "forward", label: "Forward", icon: I.fwd, onClick: onForward },
+    hasAttachment && !message.deleted_at && { key: "download", label: "Download", icon: I.download, onClick: onDownload },
+    canShare && { key: "share", label: "Share", icon: I.share, onClick: onShare },
+    !message.deleted_at && { key: "pin", label: isPinned ? "Unpin" : "Pin", icon: I.pin, onClick: onPin },
+    !message.deleted_at && { key: "star", label: isStarred ? "Unstar" : "Star", icon: isStarred ? I.starFill : I.star, onClick: onStar },
+    { key: "select", label: "Select", icon: I.select, onClick: onSelect },
+    mine && !message.deleted_at && { key: "edit", label: "Edit", icon: I.edit, onClick: onEdit },
+  ].filter(Boolean);
+
+  const dangerRows = [
+    !message.deleted_at && { key: "hide", label: "Delete for me", icon: I.trash, onClick: onHide },
+    canUnsend && { key: "unsend", label: "Unsend", icon: I.trash, onClick: onUnsend },
+    canDeleteForEveryone && { key: "dfe", label: "Delete for everyone", icon: I.trash, onClick: onDeleteForEveryone },
+  ].filter(Boolean);
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, zIndex: 1200, background: "#00000066",
+      display: "flex", alignItems: "center", justifyContent: "center", padding: 16,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        display: "flex", flexDirection: "column", gap: 10, width: "100%", maxWidth: 300,
+      }}>
+        {/* Reaction bar */}
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
+          flexWrap: showAllEmojis ? "wrap" : "nowrap",
+          background: G.surface, border: `1px solid ${G.border}`,
+          borderRadius: 26, padding: showAllEmojis ? "10px 12px" : "7px 10px",
+          maxHeight: showAllEmojis ? "40vh" : "none", overflowY: showAllEmojis ? "auto" : "visible",
+        }}>
+          {(showAllEmojis ? EMOJIS : quickEmojis).map((emoji) => (
+            <button key={emoji} onClick={() => onReact(emoji)} style={{
+              fontSize: 25, lineHeight: 1, padding: 4, borderRadius: "50%", cursor: "pointer",
+              background: "transparent", border: "none",
+            }}>{emoji}</button>
+          ))}
+          {!showAllEmojis && (
+            <button onClick={() => setShowAllEmojis(true)} title="More" style={{
+              width: 34, height: 34, borderRadius: "50%", cursor: "pointer", flexShrink: 0,
+              background: G.dim, border: "none", display: "flex", alignItems: "center", justifyContent: "center",
+            }}>{I.plus(G.sub, 18)}</button>
+          )}
+        </div>
+
+        {/* Action list */}
+        <div style={{
+          background: G.surface, border: `1px solid ${G.border}`, borderRadius: 14,
+          overflow: "hidden", maxHeight: "56vh", overflowY: "auto",
+        }}>
+          {actionRows.map((row) => (
+            <MenuRow key={row.key} icon={row.icon} label={row.label} onClick={row.onClick}/>
+          ))}
+          {dangerRows.length > 0 && <div style={{ height: 1, background: G.border, margin: "4px 0" }}/>}
+          {dangerRows.map((row) => (
+            <MenuRow key={row.key} icon={row.icon} label={row.label} danger onClick={row.onClick}/>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -2968,8 +3401,14 @@ function PollSheet({ chat, onClose, toast, onCreated }) {
   );
 }
 
-function AttachSheet({ onClose, onFile, onLocation, onContact, onPoll, onSticker,
-                        onScanCaptured, onFilesPicked }) {
+// The attach picker as an INLINE bottom panel (not a modal sheet), so it sits
+// flush above the input bar the way WhatsApp's does — the input row and its
+// attach/keyboard switcher button stay visible and interactive on top. Each
+// action closes the panel; the ones that open a follow-up sheet (location,
+// contact, poll, sticker, caption preview, scan) do so through the parent's
+// handlers, which move ChatView's own `sheet` state.
+function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker,
+                       onScanCaptured, onFilesPicked }) {
   const [cameraOpen, setCameraOpen] = useState(false);
   const galleryInput = useRef(null);
   const docInput = useRef(null);
@@ -2993,12 +3432,8 @@ function AttachSheet({ onClose, onFile, onLocation, onContact, onPoll, onSticker
       const files = [...(event.target.files || [])];
       event.target.value = "";               // lets the same file(s) be picked twice in a row
       if (files.length === 0 || files.some(tooBig)) return;
-      // Not followed by onClose() — onFilesPicked already moves ChatView's
-      // `sheet` state to "mediaPreview", and both are the same state, set in
-      // the same event handler tick. Calling onClose() after it would set
-      // `sheet` back to null immediately, since React applies both updates
-      // in order and the later one wins — the caption sheet would never show.
       onFilesPicked(files, kindOverride);
+      onClose();
     };
   }
 
@@ -3015,23 +3450,28 @@ function AttachSheet({ onClose, onFile, onLocation, onContact, onPoll, onSticker
     event.target.value = "";
     if (!file || tooBig(file)) return;
     onScanCaptured(file);
+    onClose();
   }
 
   function onCameraCaptured(file) {
     setCameraOpen(false);
     onFilesPicked([file], null);
+    onClose();
   }
 
+  // Each tile gets its own accent colour, WhatsApp-style — the icon takes the
+  // colour and the circle behind it a soft tint of the same, so the grid reads
+  // as a set of distinct actions rather than one wall of identical buttons.
   const options = [
-    { label: "Camera", icon: I.camera, action: () => setCameraOpen(true) },
-    { label: "Gallery", icon: I.image, action: () => galleryInput.current?.click() },
-    { label: "Document", icon: I.doc, action: () => docInput.current?.click() },
-    { label: "Scan PDF", icon: I.scan, action: () => scanInput.current?.click() },
-    { label: "Location", icon: I.mapPin, action: onLocation },
-    { label: "Contact", icon: I.contactCard, action: onContact },
-    { label: "Audio", icon: I.musicNote, action: () => audioInput.current?.click() },
-    { label: "Poll", icon: I.poll, action: onPoll },
-    { label: "Sticker", icon: I.sticker, action: onSticker },
+    { label: "Gallery", icon: I.image, color: "#7c5cff", action: () => galleryInput.current?.click() },
+    { label: "Camera", icon: I.camera, color: "#e0245e", action: () => setCameraOpen(true) },
+    { label: "Location", icon: I.mapPin, color: "#22c55e", action: () => { onLocation(); onClose(); } },
+    { label: "Contact", icon: I.contactCard, color: "#3b82f6", action: () => { onContact(); onClose(); } },
+    { label: "Document", icon: I.doc, color: "#5b6ef5", action: () => docInput.current?.click() },
+    { label: "Scan PDF", icon: I.scan, color: "#0fb5a6", action: () => scanInput.current?.click() },
+    { label: "Audio", icon: I.musicNote, color: "#f59e0b", action: () => audioInput.current?.click() },
+    { label: "Poll", icon: I.poll, color: "#f97316", action: () => { onPoll(); onClose(); } },
+    { label: "Sticker", icon: I.sticker, color: "#a855f7", action: () => { onSticker(); onClose(); } },
   ];
 
   if (cameraOpen) {
@@ -3039,7 +3479,14 @@ function AttachSheet({ onClose, onFile, onLocation, onContact, onPoll, onSticker
   }
 
   return (
-    <Sheet title="Attach" onClose={onClose}>
+    <div onClick={(e) => e.stopPropagation()} style={{
+      // Same edge-to-edge bottom-panel chrome as the emoji picker.
+      position: "absolute", bottom: "100%", left: 0, right: 0,
+      background: G.surface, borderTop: `1px solid ${G.border}`,
+      borderTopLeftRadius: 16, borderTopRightRadius: 16,
+      boxShadow: `0 -4px 16px ${G.border}`, overflow: "hidden",
+      maxHeight: "min(340px, 55vh)", overflowY: "auto", zIndex: 20,
+    }}>
       <input ref={galleryInput} type="file" accept="image/*,video/*" multiple
              onChange={pickToPreview(null)} style={{ display: "none" }}/>
       <input ref={docInput} type="file" multiple
@@ -3048,21 +3495,21 @@ function AttachSheet({ onClose, onFile, onLocation, onContact, onPoll, onSticker
              onChange={pickToScan} style={{ display: "none" }}/>
       <input ref={audioInput} type="file" accept="audio/*" onChange={pickAudio} style={{ display: "none" }}/>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14, padding: "4px 2px 8px" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, padding: 16 }}>
         {options.map((option) => (
           <div key={option.label} onClick={option.action}
                style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, cursor: "pointer" }}>
             <div style={{
-              width: 52, height: 52, borderRadius: "50%", background: G.dim,
-              border: `1px solid ${G.border}`, display: "flex", alignItems: "center", justifyContent: "center",
+              width: 58, height: 58, borderRadius: "50%", background: `${option.color}22`,
+              display: "flex", alignItems: "center", justifyContent: "center",
             }}>
-              {option.icon(G.accentText, 22)}
+              {option.icon(option.color, 24)}
             </div>
             <div style={{ fontSize: 12, color: G.sub }}>{option.label}</div>
           </div>
         ))}
       </div>
-    </Sheet>
+    </div>
   );
 }
 
@@ -3192,79 +3639,214 @@ const COMPRESSION_LEVELS = [
   { label: "High", quality: 0.92 },
 ];
 
+// Document-scan cleanup filters, applied per pixel over a rendered page.
+const SCAN_FILTERS = [
+  { key: "original", label: "Original" },
+  { key: "magic", label: "Magic" },     // whiten paper, deepen ink, keep colour
+  { key: "whiten", label: "Whiten" },   // grey + strong contrast, clean B/W-ish
+  { key: "bw", label: "B&W" },          // hard threshold — crisp text
+  { key: "grayscale", label: "Gray" },
+];
+
+function clamp255(value) {
+  return value < 0 ? 0 : value > 255 ? 255 : value;
+}
+
 /**
- * Preview screen between "photo captured" and "PDF sent": rotate and pick a
- * compression level before the bytes actually leave the device. The canvas
- * here is the single source of truth for what gets wrapped into the PDF —
- * imageToPdf.js only ever wraps whatever is already drawn on it.
+ * In-place pixel cleanup for a scanned page. "Magic"/"Whiten" push the paper
+ * background toward white and the ink toward black (a contrast+brightness
+ * stretch) the way CamScanner/WhatsApp's document mode does; "B&W" is a hard
+ * threshold for the crispest text; "Gray" just desaturates. "original" is a
+ * no-op so the un-filtered scan costs nothing.
+ */
+function applyScanFilter(ctx, width, height, filterName) {
+  if (!filterName || filterName === "original") return;
+  const image = ctx.getImageData(0, 0, width, height);
+  const d = image.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const r = d[i], g = d[i + 1], b = d[i + 2];
+    const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+    if (filterName === "grayscale") {
+      d[i] = d[i + 1] = d[i + 2] = gray;
+    } else if (filterName === "bw") {
+      const v = gray > 140 ? 255 : 0;
+      d[i] = d[i + 1] = d[i + 2] = v;
+    } else if (filterName === "whiten") {
+      const v = clamp255((gray - 128) * 1.9 + 128 + 26);
+      d[i] = d[i + 1] = d[i + 2] = v;
+    } else if (filterName === "magic") {
+      d[i] = clamp255((r - 128) * 1.55 + 128 + 20);
+      d[i + 1] = clamp255((g - 128) * 1.55 + 128 + 20);
+      d[i + 2] = clamp255((b - 128) * 1.55 + 128 + 20);
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+}
+
+/**
+ * Preview screen between "photo captured" and "PDF sent". Supports a
+ * MULTI-PAGE scan: the first captured photo is page 1, and "Add page" snaps
+ * more pages onto the same document (a real scanner flow, not one-photo-one-
+ * PDF). Each page keeps its own rotation; a single compression level applies
+ * to the whole document. On send, every page is drawn to its own canvas and
+ * the lot is wrapped into one multi-page PDF (see canvasesToPdfBlob).
  */
 function ScanEditSheet({ file, onClose, onSend, toast }) {
   const canvasRef = useRef(null);
   const bitmapRef = useRef(null);
-  const [rotation, setRotation] = useState(0);
+  const addInputRef = useRef(null);
+  // Each entry is { file, rotation, filter } — all per-page.
+  const [pages, setPages] = useState([{ file, rotation: 0, filter: "original" }]);
+  const [current, setCurrent] = useState(0);
   const [quality, setQuality] = useState(COMPRESSION_LEVELS[1].quality);
   const [previewBytes, setPreviewBytes] = useState(null);
   const [sending, setSending] = useState(false);
 
+  const currentFile = pages[current]?.file;
+  const rotation = pages[current]?.rotation || 0;
+  const filter = pages[current]?.filter || "original";
+
+  // Load the bitmap for whichever page is being previewed. Keyed on the file
+  // reference (not the pages array) so a rotate — which only changes the
+  // rotation field, not the file — doesn't needlessly re-decode the image.
   useEffect(() => {
     let cancelled = false;
-    createImageBitmap(file).then((bitmap) => {
+    if (!currentFile) return;
+    createImageBitmap(currentFile).then((bitmap) => {
       if (cancelled) return;
       bitmapRef.current = bitmap;
-      redraw();
+      redraw(bitmap, rotation, filter);
     });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [file]);
+  }, [currentFile]);
 
-  useEffect(() => { redraw(); }, [rotation, quality]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { redraw(bitmapRef.current, rotation, filter); }, [rotation, quality, filter]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  function redraw() {
-    const bitmap = bitmapRef.current;
-    const canvas = canvasRef.current;
-    if (!bitmap || !canvas) return;
-
-    const swapped = rotation === 90 || rotation === 270;
+  function drawTo(canvas, bitmap, deg, filterName) {
+    const swapped = deg === 90 || deg === 270;
     canvas.width = swapped ? bitmap.height : bitmap.width;
     canvas.height = swapped ? bitmap.width : bitmap.height;
-
     const ctx = canvas.getContext("2d");
     ctx.save();
     ctx.translate(canvas.width / 2, canvas.height / 2);
-    ctx.rotate((rotation * Math.PI) / 180);
+    ctx.rotate((deg * Math.PI) / 180);
     ctx.drawImage(bitmap, -bitmap.width / 2, -bitmap.height / 2);
     ctx.restore();
+    applyScanFilter(ctx, canvas.width, canvas.height, filterName);
+  }
 
-    canvas.toBlob((blob) => setPreviewBytes(blob.size), "image/jpeg", quality);
+  function redraw(bitmap, deg, filterName) {
+    const canvas = canvasRef.current;
+    if (!bitmap || !canvas) return;
+    drawTo(canvas, bitmap, deg, filterName);
+    canvas.toBlob((blob) => blob && setPreviewBytes(blob.size), "image/jpeg", quality);
+  }
+
+  function rotatePage(delta) {
+    setPages((prev) => prev.map((page, i) =>
+      i === current ? { ...page, rotation: (page.rotation + delta + 360) % 360 } : page));
+  }
+
+  function setPageFilter(filterName) {
+    setPages((prev) => prev.map((page, i) => (i === current ? { ...page, filter: filterName } : page)));
+  }
+
+  function onAddPage(event) {
+    const picked = event.target.files?.[0];
+    event.target.value = ""; // let the same file be picked again later
+    if (!picked) return;
+    setPages((prev) => [...prev, { file: picked, rotation: 0, filter: "original" }]);
+    setCurrent(pages.length); // the new page's index is the old length
+  }
+
+  function removePage(index) {
+    if (pages.length === 1) return; // a document needs at least one page
+    setPages((prev) => prev.filter((_, i) => i !== index));
+    setCurrent((prev) => (prev > index ? prev - 1 : Math.min(prev, pages.length - 2)));
   }
 
   async function send() {
     setSending(true);
     try {
-      const pdfBlob = await canvasToPdfBlob(canvasRef.current, quality);
+      const canvases = [];
+      for (const page of pages) {
+        const bitmap = await createImageBitmap(page.file);
+        const offscreen = document.createElement("canvas");
+        drawTo(offscreen, bitmap, page.rotation, page.filter || "original");
+        canvases.push(offscreen);
+      }
+      const pdfBlob = await canvasesToPdfBlob(canvases, quality);
       await onSend(pdfBlob);
     } catch {
-      toast("Could not create the PDF from that photo");
+      toast("Could not create the PDF");
       setSending(false);
     }
   }
 
   return (
-    <Sheet title="Edit scan" onClose={onClose}>
-      <div style={{ display: "flex", justifyContent: "center", marginBottom: 14 }}>
+    <Sheet title={pages.length > 1 ? `Edit scan · ${pages.length} pages` : "Edit scan"} onClose={onClose}>
+      <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
         <canvas ref={canvasRef} style={{
-          maxWidth: "100%", maxHeight: 260, borderRadius: 10,
+          maxWidth: "100%", maxHeight: 240, borderRadius: 10,
           border: `1px solid ${G.border}`, background: G.dim,
         }}/>
       </div>
 
+      {/* Page strip: thumbnails of every page, the current one highlighted,
+          each removable, with an "add another page" tile at the end. */}
+      <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 6, marginBottom: 12 }}>
+        {pages.map((page, index) => (
+          <div key={index} onClick={() => setCurrent(index)} style={{
+            position: "relative", flexShrink: 0, width: 54, height: 54, borderRadius: 8, cursor: "pointer",
+            border: `2px solid ${index === current ? G.accent : G.border}`,
+            background: G.dim, display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: 13, fontWeight: 700, color: index === current ? G.accentText : G.muted,
+          }}>
+            {index + 1}
+            {pages.length > 1 && (
+              <div onClick={(e) => { e.stopPropagation(); removePage(index); }} title="Remove page" style={{
+                position: "absolute", top: -6, right: -6, width: 18, height: 18, borderRadius: "50%",
+                background: G.red, color: "#fff", fontSize: 12, lineHeight: "16px", textAlign: "center",
+              }}>×</div>
+            )}
+          </div>
+        ))}
+        <div onClick={() => addInputRef.current?.click()} title="Add page" style={{
+          flexShrink: 0, width: 54, height: 54, borderRadius: 8, cursor: "pointer",
+          border: `2px dashed ${G.border}`, display: "flex", flexDirection: "column",
+          alignItems: "center", justifyContent: "center", color: G.accent,
+        }}>
+          <span style={{ fontSize: 20, lineHeight: 1 }}>+</span>
+          <span style={{ fontSize: 8.5, color: G.muted }}>Page</span>
+        </div>
+      </div>
+      <input ref={addInputRef} type="file" accept="image/*" capture="environment"
+             onChange={onAddPage} style={{ display: "none" }}/>
+
+      {/* Scan cleanup filters — applied to the current page. */}
+      <div style={{ fontSize: 12, color: G.sub, marginBottom: 6 }}>Filter</div>
+      <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4, marginBottom: 14 }}>
+        {SCAN_FILTERS.map((f) => (
+          <div key={f.key} onClick={() => setPageFilter(f.key)} style={{
+            flexShrink: 0, padding: "7px 14px", borderRadius: 16, cursor: "pointer", fontSize: 12.5,
+            fontWeight: filter === f.key ? 600 : 400,
+            background: filter === f.key ? G.accentSoft : G.dim,
+            border: `1px solid ${filter === f.key ? G.accent : G.border}`,
+            color: filter === f.key ? G.accentText : G.text,
+          }}>
+            {f.label}
+          </div>
+        ))}
+      </div>
+
       <div style={{ display: "flex", justifyContent: "center", gap: 24, marginBottom: 16 }}>
-        <div onClick={() => setRotation((r) => (r + 270) % 360)}
+        <div onClick={() => rotatePage(-90)}
              style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, cursor: "pointer" }}>
           {I.rotateLeft(G.sub, 22)}
           <span style={{ fontSize: 11, color: G.muted }}>Rotate left</span>
         </div>
-        <div onClick={() => setRotation((r) => (r + 90) % 360)}
+        <div onClick={() => rotatePage(90)}
              style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, cursor: "pointer" }}>
           {I.rotateRight(G.sub, 22)}
           <span style={{ fontSize: 11, color: G.muted }}>Rotate right</span>
@@ -3288,12 +3870,12 @@ function ScanEditSheet({ file, onClose, onSend, toast }) {
 
       {previewBytes != null && (
         <div style={{ fontSize: 12, color: G.muted, marginBottom: 14 }}>
-          Estimated size: {formatBytes(previewBytes)}
+          Current page: {formatBytes(previewBytes)}{pages.length > 1 ? ` · ${pages.length} pages total` : ""}
         </div>
       )}
 
       <Button onClick={send} disabled={sending} style={{ width: "100%" }}>
-        {sending ? "Preparing…" : "Send as PDF"}
+        {sending ? "Preparing…" : pages.length > 1 ? `Send ${pages.length}-page PDF` : "Send as PDF"}
       </Button>
     </Sheet>
   );
