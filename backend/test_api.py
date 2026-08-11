@@ -4926,6 +4926,30 @@ def test_group_photo_can_be_set_by_admin_and_viewed_by_members(client):
     assert removed.json()["avatar_attachment_id"] is None
 
 
+def test_cover_photo_and_business_category(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, _, _ = make_user(client, "Bob")
+
+    # Business/services line (a " · "-joined multi-select) saves and is public.
+    client.patch("/me", headers=alice, json={"business_category": "Software company · Web designer"})
+    assert client.get("/me", headers=alice).json()["business_category"] == "Software company · Web designer"
+
+    # Cover photo set → visible to others, downloadable, then removable.
+    up = client.post("/me/cover", headers=alice,
+                     files={"file": ("cover.png", b"\x89PNG cover", "image/png")})
+    assert up.status_code == 200, up.text
+    cover_id = up.json()["cover_attachment_id"]
+    assert cover_id
+    # Another signed-in user sees the same cover on the public profile...
+    assert client.get(f"/users/{alice_id}", headers=bob).json()["cover_attachment_id"] == cover_id
+    # ...and can fetch the image.
+    assert client.get(f"/uploads/{cover_id}", headers=bob).status_code == 200
+
+    removed = client.delete("/me/cover", headers=alice)
+    assert removed.status_code == 200
+    assert removed.json()["cover_attachment_id"] is None
+
+
 def test_any_signed_in_user_can_view_someone_elses_avatar(client):
     alice, _, _ = make_user(client, "Alice")
     bob, _, _ = make_user(client, "Bob")  # not a contact, no shared chat at all

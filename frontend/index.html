@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover"/>
   <!--
     No script-src injection surface beyond our own bundle: blocks inline
     <script> and any third-party script/plugin from ever running, which is
@@ -37,6 +37,14 @@
   <meta name="apple-mobile-web-app-title" content="TalkEx"/>
   <style>
     *{margin:0;padding:0;box-sizing:border-box;}
+    /* Lock the document itself so the page can NEVER scroll. Without this, iOS
+       Safari scrolls the whole document up when the keyboard opens to reveal a
+       focused input — dragging the header off the top and the composer out of
+       view (the app-height sizing below already keeps everything above the
+       keyboard, so the browser's own scroll only broke the layout). Every real
+       scroll happens inside the app's own flex:1/overflowY:auto panes instead. */
+    html,body{height:100%;overflow:hidden;overscroll-behavior:none;}
+    #root{height:100%;}
     body{background:#f5f9fc;}
     /* Thin scrollbars everywhere — Firefox via scrollbar-width, everything
        else (Chrome/Safari/Edge) via the ::-webkit-scrollbar pseudo-elements. */

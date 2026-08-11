@@ -1084,6 +1084,13 @@ COLUMNS_ADDED_LATER = [
     # group-call mesh but is hidden from every chat list, so it behaves like an
     # ad-hoc call rather than a persistent group you have to clean up later.
     ("chats", "ephemeral", "INTEGER NOT NULL DEFAULT 0"),
+    # A profile cover/banner photo (shown behind the avatar). The
+    # "Business / services" line reuses the existing users.business_category
+    # column (now a " · "-joined multi-select, e.g. "Software company · Web designer").
+    ("users", "cover_attachment_id", "TEXT"),
+    # Binds an upload as a user's cover photo — the cover counterpart to
+    # avatar_of_user_id; must also be excluded from orphan cleanup below.
+    ("attachments", "cover_of_user_id", "TEXT"),
 ]
 
 
@@ -1109,7 +1116,7 @@ def _add_missing_columns(conn: sqlite3.Connection):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_attachments_orphans ON attachments (created_at) "
             "WHERE message_id IS NULL AND story_id IS NULL AND avatar_of_user_id IS NULL "
-            "AND avatar_of_chat_id IS NULL"
+            "AND avatar_of_chat_id IS NULL AND cover_of_user_id IS NULL"
         )
         conn.commit()
 

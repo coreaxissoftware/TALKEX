@@ -153,11 +153,11 @@ class UpdateProfileRequest(BaseModel):
     link_twitter: Optional[str] = Field(default=None, max_length=500)
     link_youtube: Optional[str] = Field(default=None, max_length=500)
     link_linkedin: Optional[str] = Field(default=None, max_length=500)
-    # Self-editable once verified — mirrors a WhatsApp Business Profile's
-    # category field. is_business itself is deliberately NOT here: that
-    # badge is admin-granted (see admin_verify_business in main.py), not
-    # something an account can turn on for itself.
-    business_category: Optional[str] = Field(default=None, max_length=64)
+    # Self-editable — a WhatsApp Business-Profile-style category line. Holds one
+    # or more picks from the app's category list, joined with " · " (so the max
+    # allows several). is_business itself is deliberately NOT here: that badge is
+    # admin-granted (see admin_verify_business in main.py), not self-serve.
+    business_category: Optional[str] = Field(default=None, max_length=200)
 
 
 class CommentRequest(BaseModel):

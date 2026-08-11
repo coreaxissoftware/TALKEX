@@ -621,6 +621,11 @@ function ChatRow({ chat, typing, onOpen, onPin, onArchive, onClear, onDelete, on
   const startedAt = useRef(0);
   const longPressTimer = useRef(null);
   const longPressFired = useRef(false);
+  // Which way the finger committed: null (undecided), "x" (horizontal swipe —
+  // we drive the row), or "y" (vertical scroll — hands off, the LIST scrolls
+  // natively and this row must NOT open on release).
+  const axis = useRef(null);
+  const captured = useRef(false);
 
   function clearLongPressTimer() {
     if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = null; }
@@ -657,10 +662,16 @@ function ChatRow({ chat, typing, onOpen, onPin, onArchive, onClear, onDelete, on
     // it doesn't start a fresh drag from an offset position.
     if (dragX !== 0) { setDragX(0); return; }
     dragging.current = true;
+    axis.current = null;
+    captured.current = false;
     startX.current = event.clientX;
     startY.current = event.clientY;
     startedAt.current = Date.now();
-    event.currentTarget.setPointerCapture(event.pointerId);
+    // Deliberately DON'T setPointerCapture here: capturing a touch pointer
+    // stops the browser's native vertical pan (even with touch-action: pan-y),
+    // which made the whole chat list unscrollable — every scroll attempt was
+    // swallowed and landed as a tap that opened a chat. Capture is deferred to
+    // the moment a HORIZONTAL swipe is actually committed (onPointerMove).
 
     // Touch has no right-click, so a long-press stands in for it here —
     // mirrors the desktop onContextMenu below, just reached differently.
@@ -679,15 +690,28 @@ function ChatRow({ chat, typing, onOpen, onPin, onArchive, onClear, onDelete, on
   function onPointerMove(event) {
     if (selectMode || !dragging.current) return;
     const delta = event.clientX - startX.current;
+    const deltaY = event.clientY - startY.current;
     if (longPressTimer.current && (Math.abs(delta) > LONG_PRESS_MOVE_TOLERANCE
-        || Math.abs(event.clientY - startY.current) > LONG_PRESS_MOVE_TOLERANCE)) {
+        || Math.abs(deltaY) > LONG_PRESS_MOVE_TOLERANCE)) {
       clearLongPressTimer();
     }
-    // Ignore sub-threshold travel so a tap with a few pixels of finger jitter
-    // stays a tap (dragX untouched at 0) rather than becoming a micro-swipe
-    // that then eats the tap. Once a real drag is under way (dragX already
-    // moved), keep following the finger.
-    if (dragX === 0 && Math.abs(delta) < TAP_MAX_DRAG) return;
+    // Decide the gesture's axis once it clears the tap threshold: a mostly
+    // vertical move is a LIST SCROLL — hand off to the browser and never touch
+    // dragX, so the row neither moves nor opens. A mostly horizontal move is a
+    // swipe we drive ourselves.
+    if (axis.current === null) {
+      if (Math.abs(deltaY) > TAP_MAX_DRAG && Math.abs(deltaY) > Math.abs(delta)) {
+        axis.current = "y";
+        return;
+      }
+      if (Math.abs(delta) > TAP_MAX_DRAG) {
+        axis.current = "x";
+        // Now that it's a horizontal swipe, capture so we keep following the
+        // finger even if it strays off the row.
+        try { event.currentTarget.setPointerCapture(event.pointerId); captured.current = true; } catch {}
+      }
+    }
+    if (axis.current !== "x") return;   // vertical scroll or still undecided
     // Right swipe (positive) is a short one-shot pin gesture; left swipe
     // (negative) opens further to reveal three action icons.
     setDragX(Math.max(-ACTIONS_WIDTH, Math.min(PIN_SWIPE_TRIGGER + 20, delta)));
@@ -697,7 +721,12 @@ function ChatRow({ chat, typing, onOpen, onPin, onArchive, onClear, onDelete, on
     clearLongPressTimer();
     if (!dragging.current) return;
     dragging.current = false;
+    const wasScroll = axis.current === "y" || event.type === "pointercancel";
+    axis.current = null;
     if (longPressFired.current) { setDragX(0); return; }
+    // A vertical scroll (or a pointer the browser cancelled to take over
+    // scrolling) must never open the chat.
+    if (wasScroll) { setDragX(0); return; }
 
     if (dragX >= PIN_SWIPE_TRIGGER) {
       onPin();

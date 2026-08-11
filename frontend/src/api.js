@@ -317,6 +317,22 @@ export const Me = {
     return response.json();
   },
   removeAvatar: () => remove("/me/avatar"),
+  // Cover/banner photo — same single-call upload-and-set as the avatar.
+  async setCover(file) {
+    const body = new FormData();
+    body.append("file", file);
+    const response = await fetch(`${BASE}/me/cover`, {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body,
+    });
+    if (!response.ok) {
+      const problem = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, problem.detail);
+    }
+    return response.json();
+  },
+  removeCover: () => remove("/me/cover"),
 };
 
 export const Users = {

@@ -5,7 +5,8 @@ import {
 } from "../api.js";
 import * as offlineDb from "../offlineDb.js";
 import {
-  Av, Button, ChatBackdrop, ContextMenu, EMOJIS, EMOJI_GROUPS, Field, G, I, SRow, SocialLinks, Spinner, Toggle,
+  Av, Button, ChatBackdrop, ContextMenu, CoverImage, EMOJIS, EMOJI_GROUPS, Field, G, I, SRow, SocialLinks,
+  Spinner, Toggle,
   clockTime, countdown, durationLabel, lastSeenLabel, localInputToUnix, whenLabel, useEnterToSend,
   useIsDesktop,
 } from "../ui.jsx";
@@ -1347,6 +1348,9 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
       {sheet === "info" && (
         <ChatInfoSheet chat={chat} me={me} events={events} onClose={() => setSheet(null)} toast={toast}
                        onChanged={onChanged} onOpenChat={onOpenChat} onChatLocked={onChatLocked}
+                       onVoiceCall={() => (chat.type === "dm" ? onStartCall("voice") : onStartGroupCall("voice"))}
+                       onVideoCall={() => (chat.type === "dm" ? onStartCall("video") : onStartGroupCall("video"))}
+                       onSearch={() => { setSheet(null); setChatSearchOpen(true); setChatSearchQuery(""); setChatSearchResults([]); }}
                        onLeft={() => { setSheet(null); onBack(); }}/>
       )}
 
@@ -1813,6 +1817,13 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead, is
                   commentsOn, onComments, onLongPress, onVote, onForward, onOpenMedia, onCallAgain, onJoinMeeting, toast }) {
   const mine = message.sender_id === me.id;
   const gone = message.deleted_at || message.expired;
+  // A photo/video shows nearly edge-to-edge like WhatsApp — the bubble shrinks
+  // to a hairline frame instead of the usual roomy text padding. Only when
+  // there are no header decorations (reply/forward/signature/broadcast), which
+  // still want the normal inset.
+  const mediaFlush = ["photo", "video"].includes(message.kind) && !gone
+    && !message.view_once
+    && !replyTarget && !message.forwarded_from && !signature && !message.payload?.via_broadcast;
 
   // Desktop opens the message menu on a plain click OR a right-click; touch
   // has neither, so a real press-and-hold stands in — a bare tap is left
@@ -1898,7 +1909,8 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead, is
         {...pressHandlers}
         onMouseEnter={showChevron} onMouseLeave={hideChevron}
         style={{
-          position: "relative", maxWidth: "78%", padding: "9px 13px", borderRadius: 16,
+          position: "relative", maxWidth: "78%",
+          padding: mediaFlush ? 3 : "9px 13px", borderRadius: 16,
           borderBottomRightRadius: mine ? 4 : 16,
           borderBottomLeftRadius: mine ? 16 : 4,
           background: mine ? G.accent : G.card,
@@ -1958,7 +1970,12 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead, is
               ? <ViewOnceAttachment message={message} mine={mine}/>
               : <Attachment message={message} mine={mine} onForward={onForward} onOpenMedia={onOpenMedia} toast={toast}/>}
             {message.text && (
-              <div style={{ fontSize: 14, lineHeight: 1.4, whiteSpace: "pre-wrap", marginTop: 6 }}>
+              <div style={{
+                fontSize: 14, lineHeight: 1.4, whiteSpace: "pre-wrap", marginTop: 6,
+                // The bubble lost its padding to make the media flush; the
+                // caption gets its own inset back so it isn't jammed to the edge.
+                padding: mediaFlush ? "0 8px 4px" : 0,
+              }}>
                 {renderWithMentions(message.text, mine)}
               </div>
             )}
@@ -2004,6 +2021,9 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead, is
         <div style={{
           display: "flex", alignItems: "center", justifyContent: "flex-end",
           gap: 5, marginTop: 3,
+          // Inset the time/ticks off the hairline edge when the bubble went flush
+          // for media (unless a caption already re-added its own padding).
+          padding: mediaFlush && !message.text ? "0 8px 4px" : 0,
         }}>
           {message.edited_at && (
             <span style={{ fontSize: 10, color: mine ? "#ffffff99" : G.muted }}>edited</span>
@@ -2467,7 +2487,7 @@ function Attachment({ message, mine, onForward, onOpenMedia, toast }) {
       <>
         <img src={effectiveUrl} alt={fileName} data-media="1"
              onClick={(event) => { event.stopPropagation(); onOpenMedia ? onOpenMedia(message) : setFullscreen(true); }}
-             style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 10, display: "block", cursor: "pointer" }}/>
+             style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 13, display: "block", cursor: "pointer" }}/>
         {fullscreen && (
           <FullscreenMedia kind="photo" src={effectiveUrl} alt={fileName}
                            onEdit={() => { setFullscreen(false); openPhotoEditor(); }}
@@ -2485,7 +2505,7 @@ function Attachment({ message, mine, onForward, onOpenMedia, toast }) {
       <div>
         <div style={{ position: "relative" }} data-media="1">
           <video controls src={effectiveUrl}
-                 style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 10, display: "block" }}/>
+                 style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 13, display: "block" }}/>
           {/* An explicit expand button — tapping the video body itself is
               reserved for play/pause via the native controls, so the way into
               full-screen is this corner control rather than a tap anywhere. */}
@@ -4431,8 +4451,22 @@ function CommentsSheet({ post, chat, me, events, onClose, toast }) {
   );
 }
 
+/** One rounded quick-action tile (Voice/Video/Search) in the contact info header. */
+function InfoAction({ icon, label, onClick }) {
+  return (
+    <div onClick={onClick} style={{
+      flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 5,
+      padding: "12px 6px", borderRadius: 12, cursor: "pointer",
+      background: `${G.accent}0c`, border: `1px solid ${G.accent}1f`,
+    }}>
+      {icon}
+      <span style={{ fontSize: 12, color: G.accent, fontWeight: 600 }}>{label}</span>
+    </div>
+  );
+}
+
 function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, onOpenChat,
-                        onChatLocked }) {
+                        onChatLocked, onVoiceCall, onVideoCall, onSearch }) {
   const [folder, setFolder] = useState(chat.folder || "");
   const [busy, setBusy] = useState(false);
   const [full, setFull] = useState(null);          // members + my_role, fetched separately
@@ -4479,6 +4513,7 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
   const contactPhoneValid = contactForm.phone.length === contactCountry.len;
 
   const [commonGroups, setCommonGroups] = useState([]);
+  const [viewingAvatar, setViewingAvatar] = useState(false);
 
   useEffect(() => {
     if (!isDm || !chat.peer_id) return;
@@ -4706,6 +4741,11 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
 
   return (
     <Sheet title={chat.name || "Chat info"} onClose={onClose} side="right">
+      {isDm && peerProfile?.cover_attachment_id && (
+        <div style={{ margin: "-4px 0 14px", borderRadius: 12, overflow: "hidden" }}>
+          <CoverImage coverId={peerProfile.cover_attachment_id} height={120}/>
+        </div>
+      )}
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
         {MANAGED_TYPES.includes(chat.type) && canManage ? (
           <div style={{ position: "relative", cursor: "pointer" }}
@@ -4721,7 +4761,11 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
                    onChange={changeAvatar}/>
           </div>
         ) : (
-          <Av av={chat.avatar_letter} color={chat.color} size={52} photoId={chat.avatar_attachment_id}/>
+          <div onClick={() => chat.avatar_attachment_id && setViewingAvatar(true)}
+               style={{ cursor: chat.avatar_attachment_id ? "zoom-in" : "default" }}
+               title={chat.avatar_attachment_id ? "View photo" : undefined}>
+            <Av av={chat.avatar_letter} color={chat.color} size={52} photoId={chat.avatar_attachment_id}/>
+          </div>
         )}
         <div>
           <div style={{ fontSize: 16, fontWeight: 700, display: "flex", alignItems: "center", gap: 5 }}>
@@ -4730,8 +4774,36 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
           {isDm && peerProfile?.phone
             ? <div style={{ fontSize: 12.5, color: G.muted }}>{peerProfile.phone}</div>
             : <div style={{ fontSize: 12.5, color: G.muted, textTransform: "capitalize" }}>{chat.type}</div>}
+          {isDm && peerProfile?.business_category && (
+            <div style={{ fontSize: 12, color: G.sub, marginTop: 2, fontWeight: 600 }}>
+              {peerProfile.business_category}
+            </div>
+          )}
         </div>
       </div>
+
+      {viewingAvatar && chat.avatar_attachment_id && (
+        <div onClick={() => setViewingAvatar(false)} style={{
+          position: "fixed", inset: 0, zIndex: 90, background: "#000000e6",
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <div onClick={(e) => e.stopPropagation()}>
+            <Av av={chat.avatar_letter} color={chat.color} size={300} photoId={chat.avatar_attachment_id}/>
+          </div>
+          <div onClick={() => setViewingAvatar(false)} style={{
+            position: "absolute", top: 18, right: 20, color: "#fff", fontSize: 26, cursor: "pointer",
+          }}>✕</div>
+        </div>
+      )}
+
+      {/* WhatsApp-style quick actions right under the header. */}
+      {isDm && (
+        <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+          <InfoAction icon={I.phone(G.accent, 20)} label="Voice" onClick={onVoiceCall}/>
+          <InfoAction icon={I.video(G.accent, 20)} label="Video" onClick={onVideoCall}/>
+          <InfoAction icon={I.search(G.accent, 20)} label="Search" onClick={onSearch}/>
+        </div>
+      )}
 
       {isDm && peerProfile?.bio && (
         <div style={{ fontSize: 13.5, color: G.text, marginBottom: 12, lineHeight: 1.4 }}>

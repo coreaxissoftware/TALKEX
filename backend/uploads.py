@@ -219,6 +219,22 @@ def attach_to_avatar(attachment_id: str, user_id: str) -> dict | None:
     return dict(db.query_one("SELECT * FROM attachments WHERE id = ?", (attachment_id,)))
 
 
+def attach_to_cover(attachment_id: str, user_id: str) -> dict | None:
+    """Bind an upload as a user's cover/banner photo — the cover counterpart to
+    attach_to_avatar; you can only set YOUR OWN cover from YOUR OWN upload."""
+    changed = db.execute(
+        """
+        UPDATE attachments SET cover_of_user_id = ?
+        WHERE id = ? AND uploader_id = ? AND message_id IS NULL AND story_id IS NULL
+          AND avatar_of_user_id IS NULL AND avatar_of_chat_id IS NULL AND cover_of_user_id IS NULL
+        """,
+        (user_id, attachment_id, user_id),
+    )
+    if changed.rowcount == 0:
+        return None
+    return dict(db.query_one("SELECT * FROM attachments WHERE id = ?", (attachment_id,)))
+
+
 def attach_to_chat_avatar(attachment_id: str, chat_id: str, uploader_id: str) -> dict | None:
     """
     Bind an upload as a chat's (group/channel/community) photo — the chat
@@ -304,7 +320,8 @@ def sweep_orphans(older_than_seconds: float = 3600) -> int:
     cutoff = time.time() - older_than_seconds
     orphans = db.query_all(
         "SELECT id FROM attachments WHERE message_id IS NULL AND story_id IS NULL "
-        "AND avatar_of_user_id IS NULL AND avatar_of_chat_id IS NULL AND created_at < ?",
+        "AND avatar_of_user_id IS NULL AND avatar_of_chat_id IS NULL "
+        "AND cover_of_user_id IS NULL AND created_at < ?",
         (cutoff,),
     )
     for orphan in orphans:

@@ -3,7 +3,8 @@ import {
   Auth, Contacts, Me, Messages, Templates, Users, clearToken, forgetAccount, getToken,
   listSavedAccounts, rememberAccount, switchToAccount,
 } from "../api.js";
-import { ACCENTS, Av, Button, Field, G, I, SRow, SOCIAL_PLATFORMS, SocialLinks, Spinner, Toggle,
+import { ACCENTS, Av, BUSINESS_CATEGORIES, Button, CoverImage, Field, G, I, SRow, SOCIAL_PLATFORMS,
+         SocialLinks, Spinner, Toggle,
          clockTime, whenLabel, getStoredEnterToSend, saveEnterToSend, useInstallPrompt } from "../ui.jsx";
 import QrView from "../QrView.jsx";
 import { disablePush, enablePush, getPushSubscription, isPushSupported } from "../push.js";
@@ -32,6 +33,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
   const [enterToSend, setEnterToSend] = useState(getStoredEnterToSend);
   const [form, setForm] = useState({
     name: me.name, bio: me.bio || "",
+    business: (me.business_category || "").split(" · ").map((s) => s.trim()).filter(Boolean),
     link_website: me.link_website || "", link_facebook: me.link_facebook || "",
     link_instagram: me.link_instagram || "", link_twitter: me.link_twitter || "",
     link_youtube: me.link_youtube || "", link_linkedin: me.link_linkedin || "",
@@ -74,7 +76,15 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
   const [deletingAccount, setDeletingAccount] = useState(false);
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [wallpaperBusy, setWallpaperBusy] = useState(false);
+  const [photoMenu, setPhotoMenu] = useState(false);   // View/Take/Upload/Remove menu
+  const [viewingPhoto, setViewingPhoto] = useState(false);
+  const [coverMenu, setCoverMenu] = useState(false);
+  const [coverBusy, setCoverBusy] = useState(false);
+  const [viewingCover, setViewingCover] = useState(false);
   const avatarInputRef = useRef(null);
+  const cameraInputRef = useRef(null);   // capture="user" → opens the camera on mobile
+  const coverInputRef = useRef(null);
+  const coverCameraInputRef = useRef(null);
   const wallpaperInputRef = useRef(null);
 
   function changeAutoDownload(value) {
@@ -131,6 +141,33 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
       toast(error.message || "Could not remove photo");
     } finally {
       setAvatarBusy(false);
+    }
+  }
+
+  async function onCoverFileChosen(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setCoverBusy(true);
+    try {
+      onUpdated(await Me.setCover(file));
+      toast("Cover photo updated");
+    } catch (error) {
+      toast(error.message || "Could not upload cover");
+    } finally {
+      setCoverBusy(false);
+    }
+  }
+
+  async function removeCoverPhoto() {
+    setCoverBusy(true);
+    try {
+      onUpdated(await Me.removeCover());
+      toast("Cover photo removed");
+    } catch (error) {
+      toast(error.message || "Could not remove cover");
+    } finally {
+      setCoverBusy(false);
     }
   }
 
@@ -290,6 +327,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
   async function saveProfile() {
     const updated = await Me.update({
       name: form.name.trim(), bio: form.bio.trim(),
+      business_category: form.business.join(" · "),
       link_website: form.link_website.trim(), link_facebook: form.link_facebook.trim(),
       link_instagram: form.link_instagram.trim(), link_twitter: form.link_twitter.trim(),
       link_youtube: form.link_youtube.trim(), link_linkedin: form.link_linkedin.trim(),
@@ -297,6 +335,13 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
     onUpdated(updated);
     setEditing(false);
     toast("Profile saved");
+  }
+
+  function toggleBusiness(cat) {
+    setForm((f) => ({
+      ...f,
+      business: f.business.includes(cat) ? f.business.filter((c) => c !== cat) : [...f.business, cat],
+    }));
   }
 
   async function togglePrivacy(key, value) {
@@ -328,6 +373,46 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
     <div style={{ flex: 1, overflowY: "auto" }}>
       {activeSection === null && (
         <>
+          {/* Cover / banner photo with its own view/take/upload/remove menu. */}
+          <div style={{ position: "relative" }}>
+            <div onClick={() => me.cover_attachment_id && setViewingCover(true)}
+                 style={{ cursor: me.cover_attachment_id ? "zoom-in" : "default" }}>
+              <CoverImage coverId={me.cover_attachment_id} height={128}/>
+            </div>
+            <input ref={coverInputRef} type="file" accept="image/*" style={{ display: "none" }}
+                   onChange={onCoverFileChosen}/>
+            <input ref={coverCameraInputRef} type="file" accept="image/*" capture="environment"
+                   style={{ display: "none" }} onChange={onCoverFileChosen}/>
+            <div onClick={() => !coverBusy && setCoverMenu((v) => !v)} style={{
+              position: "absolute", top: 10, right: 12, width: 30, height: 30, borderRadius: "50%",
+              background: "#00000066", display: "flex", alignItems: "center", justifyContent: "center",
+              cursor: "pointer", opacity: coverBusy ? 0.6 : 1,
+            }}>{I.camera("#fff", 15)}</div>
+            {coverMenu && (
+              <>
+                <div onClick={() => setCoverMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }}/>
+                <div style={{
+                  position: "absolute", top: 44, right: 12, zIndex: 41, minWidth: 172,
+                  background: G.surface, border: `1px solid ${G.border}`, borderRadius: 12,
+                  boxShadow: `0 8px 24px ${G.border}`, overflow: "hidden",
+                }}>
+                  {me.cover_attachment_id && (
+                    <PhotoMenuRow icon={I.eye(G.text, 17)} label="View cover"
+                                  onClick={() => { setCoverMenu(false); setViewingCover(true); }}/>
+                  )}
+                  <PhotoMenuRow icon={I.camera(G.text, 17)} label="Take photo"
+                                onClick={() => { setCoverMenu(false); coverCameraInputRef.current?.click(); }}/>
+                  <PhotoMenuRow icon={I.image(G.text, 17)} label="Upload cover"
+                                onClick={() => { setCoverMenu(false); coverInputRef.current?.click(); }}/>
+                  {me.cover_attachment_id && (
+                    <PhotoMenuRow icon={I.trash(G.red, 17)} label="Remove cover" danger
+                                  onClick={() => { setCoverMenu(false); removeCoverPhoto(); }}/>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+
           <div style={{
             display: "flex", alignItems: "center", gap: 14, padding: 20,
             borderBottom: `1px solid ${G.border}`,
@@ -336,12 +421,41 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
               <Av av={me.avatar_letter} color={me.color} size={64} photoId={me.avatar_attachment_id}/>
               <input ref={avatarInputRef} type="file" accept="image/*" style={{ display: "none" }}
                      onChange={onAvatarFileChosen}/>
-              <div onClick={() => !avatarBusy && avatarInputRef.current?.click()} style={{
+              {/* capture="user" makes mobile open the front camera directly;
+                  desktop ignores it and falls back to the file picker. */}
+              <input ref={cameraInputRef} type="file" accept="image/*" capture="user"
+                     style={{ display: "none" }} onChange={onAvatarFileChosen}/>
+              <div onClick={() => !avatarBusy && setPhotoMenu((v) => !v)} style={{
                 position: "absolute", bottom: -2, right: -2, width: 24, height: 24,
                 borderRadius: "50%", background: G.accent, display: "flex",
                 alignItems: "center", justifyContent: "center", cursor: "pointer",
                 border: `2px solid ${G.surface}`, opacity: avatarBusy ? 0.6 : 1,
               }}>{I.camera("#fff", 13)}</div>
+
+              {photoMenu && (
+                <>
+                  <div onClick={() => setPhotoMenu(false)}
+                       style={{ position: "fixed", inset: 0, zIndex: 40 }}/>
+                  <div style={{
+                    position: "absolute", top: 70, left: 0, zIndex: 41, minWidth: 172,
+                    background: G.surface, border: `1px solid ${G.border}`, borderRadius: 12,
+                    boxShadow: `0 8px 24px ${G.border}`, overflow: "hidden",
+                  }}>
+                    {me.avatar_attachment_id && (
+                      <PhotoMenuRow icon={I.eye(G.text, 17)} label="View photo"
+                                    onClick={() => { setPhotoMenu(false); setViewingPhoto(true); }}/>
+                    )}
+                    <PhotoMenuRow icon={I.camera(G.text, 17)} label="Take photo"
+                                  onClick={() => { setPhotoMenu(false); cameraInputRef.current?.click(); }}/>
+                    <PhotoMenuRow icon={I.image(G.text, 17)} label="Upload photo"
+                                  onClick={() => { setPhotoMenu(false); avatarInputRef.current?.click(); }}/>
+                    {me.avatar_attachment_id && (
+                      <PhotoMenuRow icon={I.trash(G.red, 17)} label="Remove photo" danger
+                                    onClick={() => { setPhotoMenu(false); removeAvatarPhoto(); }}/>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 19, fontWeight: 700, display: "flex", alignItems: "center", gap: 5 }}>
@@ -351,12 +465,14 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
                    style={{ fontSize: 13, color: G.sub, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 4 }}>
                 @{me.username} {I.edit(G.muted, 12)}
               </div>
-              {me.bio && <div style={{ fontSize: 12.5, color: G.muted, marginTop: 3 }}>{me.bio}</div>}
-              {me.avatar_attachment_id && (
-                <div onClick={() => !avatarBusy && removeAvatarPhoto()} style={{
-                  fontSize: 12, color: G.red, marginTop: 4, cursor: "pointer",
-                }}>Remove photo</div>
+              {me.business_category && (
+                <div style={{ fontSize: 12.5, color: G.sub, marginTop: 2, fontWeight: 600 }}>
+                  {me.business_category}
+                </div>
               )}
+              {me.bio && <div style={{ fontSize: 12.5, color: G.muted, marginTop: 3 }}>{me.bio}</div>}
+              {/* Social links — icon only, right after the bio (WhatsApp-style). */}
+              <SocialLinks profile={me} style={{ marginTop: 8 }}/>
             </div>
           </div>
 
@@ -367,7 +483,27 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
               <Field label="Bio" value={form.bio}
                      onChange={(event) => setForm({ ...form, bio: event.target.value })}/>
 
-              <div style={{ marginTop: 12, marginBottom: 6, fontSize: 13, fontWeight: 700, color: G.sub }}>
+              <div style={{ marginTop: 14, marginBottom: 4, fontSize: 13, fontWeight: 700, color: G.sub }}>
+                Business / Services / Designation
+              </div>
+              <div style={{ fontSize: 11.5, color: G.muted, marginBottom: 8 }}>
+                Tap to select any that apply — they show on your profile.
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginBottom: 4 }}>
+                {BUSINESS_CATEGORIES.map((cat) => {
+                  const on = form.business.includes(cat);
+                  return (
+                    <span key={cat} onClick={() => toggleBusiness(cat)} style={{
+                      padding: "6px 12px", borderRadius: 16, fontSize: 12.5, cursor: "pointer",
+                      background: on ? G.accent : G.dim,
+                      color: on ? G.accentText : G.text,
+                      border: `1px solid ${on ? G.accent : G.border}`,
+                    }}>{cat}</span>
+                  );
+                })}
+              </div>
+
+              <div style={{ marginTop: 14, marginBottom: 6, fontSize: 13, fontWeight: 700, color: G.sub }}>
                 Social Links
               </div>
               {SOCIAL_PLATFORMS.map((platform) => (
@@ -390,13 +526,38 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
               </div>
             </div>
           ) : (
-            <>
-              <SRow icon={I.edit(G.accent, 18)} label="Edit profile" sub="Name, bio and social links"
-                    onClick={() => setEditing(true)}/>
-              <SocialLinks profile={me} style={{ padding: "0 20px 12px" }}/>
-            </>
+            <SRow icon={I.edit(G.accent, 18)} label="Edit profile" sub="Name, bio and social links"
+                  onClick={() => setEditing(true)}/>
           )}
         </>
+      )}
+
+      {viewingPhoto && me.avatar_attachment_id && (
+        <div onClick={() => setViewingPhoto(false)} style={{
+          position: "fixed", inset: 0, zIndex: 80, background: "#000000e6",
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <div onClick={(e) => e.stopPropagation()}>
+            <Av av={me.avatar_letter} color={me.color} size={280} photoId={me.avatar_attachment_id}/>
+          </div>
+          <div onClick={() => setViewingPhoto(false)} style={{
+            position: "absolute", top: 18, right: 20, color: "#fff", fontSize: 26, cursor: "pointer",
+          }}>✕</div>
+        </div>
+      )}
+
+      {viewingCover && me.cover_attachment_id && (
+        <div onClick={() => setViewingCover(false)} style={{
+          position: "fixed", inset: 0, zIndex: 80, background: "#000000e6",
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: "92%", maxWidth: 640 }}>
+            <CoverImage coverId={me.cover_attachment_id} height={260} style={{ borderRadius: 12 }}/>
+          </div>
+          <div onClick={() => setViewingCover(false)} style={{
+            position: "absolute", top: 18, right: 20, color: "#fff", fontSize: 26, cursor: "pointer",
+          }}>✕</div>
+        </div>
       )}
 
       {canInstall && (
@@ -420,6 +581,37 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
           </button>
         </div>
       )}
+
+      {/* iOS Safari never fires beforeinstallprompt, so canInstall is always
+          false there — but the PWA installs fine manually. Show how, only on an
+          iOS browser tab that isn't already the installed standalone app. */}
+      {(() => {
+        const ua = navigator.userAgent || "";
+        const isIOS = /iphone|ipad|ipod/i.test(ua)
+          || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1); // iPadOS reports as Mac
+        const standalone = window.navigator.standalone
+          || window.matchMedia?.("(display-mode: standalone)").matches;
+        if (!isIOS || standalone) return null;
+        return (
+          <div style={{ padding: "0 16px", marginBottom: 4 }}>
+            <div style={{
+              display: "flex", alignItems: "flex-start", gap: 12, width: "100%",
+              padding: "14px 16px", borderRadius: 14,
+              background: `${G.accent}12`, border: `1px solid ${G.accent}33`, color: G.text,
+              fontSize: 14.5, fontWeight: 600,
+            }}>
+              <span style={{ display: "flex", flexShrink: 0, marginTop: 1 }}>{I.download(G.accent, 20)}</span>
+              <span style={{ flex: 1 }}>
+                Install TalkEx on iPhone / iPad
+                <div style={{ fontSize: 12, fontWeight: 400, color: G.muted, marginTop: 3, lineHeight: 1.5 }}>
+                  In Safari, tap the <b>Share</b> button (□↑) at the bottom, then choose
+                  <b> "Add to Home Screen"</b>. TalkEx will open like a native app.
+                </div>
+              </span>
+            </div>
+          </div>
+        );
+      })()}
 
       <Section id="myqr" icon={I.search(G.accent, 20)} title="My QR code"
                sub="Let people scan to add you"
@@ -2356,6 +2548,18 @@ function BlogSheet({ onClose }) {
           More stories coming soon — TalkEx, made from Bihar 💙💚
         </div>
       </div>
+    </div>
+  );
+}
+
+/** One row in the avatar's View/Take/Upload/Remove menu. */
+function PhotoMenuRow({ icon, label, onClick, danger }) {
+  return (
+    <div onClick={onClick} style={{
+      display: "flex", alignItems: "center", gap: 11, padding: "11px 14px", cursor: "pointer",
+      fontSize: 13.5, color: danger ? G.red : G.text,
+    }}>
+      {icon}{label}
     </div>
   );
 }

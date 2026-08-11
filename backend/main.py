@@ -2014,6 +2014,41 @@ def remove_avatar(user: dict = Depends(current_user)):
     return public_user(db.query_one("SELECT * FROM users WHERE id = ?", (user["id"],)), viewer_id=user["id"])
 
 
+@app.post("/me/cover")
+async def set_cover(file: UploadFile = File(...), user: dict = Depends(current_user)):
+    """Upload and set a profile cover/banner photo. Same single-call
+    upload-and-set shape as /me/avatar."""
+    try:
+        attachment = await uploads.store(file, user["id"])
+    except uploads.UploadTooLarge as error:
+        raise HTTPException(413, str(error))
+    except uploads.UploadTypeRefused as error:
+        raise HTTPException(415, str(error))
+
+    bound = uploads.attach_to_cover(attachment["id"], user["id"])
+    if bound is None:
+        uploads.delete(attachment["id"])
+        raise HTTPException(500, "Could not set the cover photo")
+
+    previous_id = db.query_one("SELECT cover_attachment_id FROM users WHERE id = ?",
+                               (user["id"],))["cover_attachment_id"]
+    db.execute("UPDATE users SET cover_attachment_id = ? WHERE id = ?", (attachment["id"], user["id"]))
+    if previous_id:
+        uploads.delete(previous_id)
+    return public_user(db.query_one("SELECT * FROM users WHERE id = ?", (user["id"],)), viewer_id=user["id"])
+
+
+@app.delete("/me/cover")
+def remove_cover(user: dict = Depends(current_user)):
+    """Remove the cover photo."""
+    previous_id = db.query_one("SELECT cover_attachment_id FROM users WHERE id = ?",
+                               (user["id"],))["cover_attachment_id"]
+    db.execute("UPDATE users SET cover_attachment_id = NULL WHERE id = ?", (user["id"],))
+    if previous_id:
+        uploads.delete(previous_id)
+    return public_user(db.query_one("SELECT * FROM users WHERE id = ?", (user["id"],)), viewer_id=user["id"])
+
+
 @app.post("/chats/{chat_id}/avatar")
 async def set_chat_avatar(chat_id: str, file: UploadFile = File(...),
                           user: dict = Depends(current_user)):
@@ -4578,10 +4613,10 @@ def download_file(attachment_id: str, user: dict = Depends(current_user)):
         )
         if story is None or not (is_author or visible):
             raise HTTPException(404, "File not found")
-    elif attachment["avatar_of_user_id"] or attachment["avatar_of_chat_id"]:
-        # A profile / group photo is meant to be visible to anyone in the app
-        # who can see the profile or chat at all — unlike a chat/story
-        # attachment there is no membership check, just "signed in."
+    elif attachment["avatar_of_user_id"] or attachment["avatar_of_chat_id"] or attachment["cover_of_user_id"]:
+        # A profile / group photo or a cover banner is meant to be visible to
+        # anyone in the app who can see the profile or chat at all — unlike a
+        # chat/story attachment there is no membership check, just "signed in."
         # current_user() above already established that. (Attachment ids are
         # unguessable UUIDs, same as user avatars.)
         pass

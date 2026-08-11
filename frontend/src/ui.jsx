@@ -910,6 +910,28 @@ function loadAvatarUrl(photoId) {
   return pending;
 }
 
+/** A wide cover/banner image fetched by attachment id (auth'd blob, same as
+ *  Av). Falls back to a soft accent gradient when there's no cover. `children`
+ *  render on top (e.g. an edit button). */
+export function CoverImage({ coverId, height = 130, children, style }) {
+  const [url, setUrl] = useState(null);
+  useEffect(() => {
+    if (!coverId) { setUrl(null); return; }
+    let cancelled = false;
+    loadAvatarUrl(coverId).then((u) => { if (!cancelled) setUrl(u); }).catch(() => { if (!cancelled) setUrl(null); });
+    return () => { cancelled = true; };
+  }, [coverId]);
+  return (
+    <div style={{
+      height, width: "100%", position: "relative", flexShrink: 0,
+      background: url
+        ? `#0b1220 url(${url}) center/cover no-repeat`
+        : `linear-gradient(135deg, ${G.accent}55, ${G.accent}18)`,
+      ...style,
+    }}>{children}</div>
+  );
+}
+
 export function Av({ av, color, size = 44, online, hasStory, isMe, photoId }) {
   // The download endpoint needs an Authorization header a plain <img src>
   // can't send, so a real profile photo is fetched as a blob URL — same
@@ -956,6 +978,22 @@ export function Av({ av, color, size = 44, online, hasStory, isMe, photoId }) {
     </div>
   );
 }
+
+// The category/designation/service tags a profile can carry (WhatsApp Business
+// "category" style). The Edit-profile screen lets the user pick any number of
+// these; the picks are stored joined with " · " in users.business_category and
+// shown under the name on their profile.
+export const BUSINESS_CATEGORIES = [
+  "Software company", "Web designer", "App developer", "IT services", "Digital marketing",
+  "Graphic designer", "Photographer", "Videographer", "Content creator", "Consultant",
+  "Freelancer", "Entrepreneur", "Founder / CEO", "Manager", "Engineer",
+  "Doctor", "Teacher", "Student", "Lawyer", "Accountant",
+  "Retail / shop", "Wholesale", "Restaurant / food", "Grocery", "Electronics",
+  "Real estate", "Construction", "Interior design", "Automobile", "Travel & tourism",
+  "Education / coaching", "Healthcare", "Finance / banking", "Insurance", "NGO / non-profit",
+  "Beauty & salon", "Fashion & clothing", "Fitness & gym", "Event management", "Printing press",
+  "Agriculture", "Manufacturing", "Logistics / transport", "Government service", "Other",
+];
 
 // The social links a profile can carry, each with its real brand mark (an
 // inline SVG glyph on the brand's colour) rather than an emoji stand-in — one
@@ -1004,26 +1042,15 @@ export function platformForUrl(url) {
     || SOCIAL_PLATFORMS[0];
 }
 
-/** One clickable brand chip. `platform` is a SOCIAL_PLATFORMS entry. */
+/** One clickable brand icon (icon-only — the URL text isn't shown, just the
+ *  platform's logo in its brand colour). `platform` is a SOCIAL_PLATFORMS entry. */
 export function SocialChip({ platform, url }) {
-  const domain = (() => {
-    try { return new URL(url).hostname.replace("www.", ""); } catch { return url; }
-  })();
   return (
     <a href={url} target="_blank" rel="noopener noreferrer" title={platform.label} style={{
-      display: "inline-flex", alignItems: "center", gap: 7,
-      padding: "5px 12px 5px 6px", borderRadius: 20, fontSize: 12.5,
-      background: G.dim, border: `1px solid ${G.border}`,
-      color: G.text, textDecoration: "none", cursor: "pointer",
-    }}>
-      <span style={{
-        width: 22, height: 22, borderRadius: "50%", flexShrink: 0,
-        background: platform.brand, display: "flex", alignItems: "center", justifyContent: "center",
-      }}>{platform.glyph("#fff", 14)}</span>
-      <span style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {domain}
-      </span>
-    </a>
+      width: 30, height: 30, borderRadius: "50%", flexShrink: 0,
+      background: platform.brand, display: "inline-flex", alignItems: "center", justifyContent: "center",
+      textDecoration: "none", cursor: "pointer",
+    }}>{platform.glyph("#fff", 17)}</a>
   );
 }
 
