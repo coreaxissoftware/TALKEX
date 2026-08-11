@@ -745,6 +745,38 @@ CREATE INDEX IF NOT EXISTS idx_contacts_owner ON contacts (owner_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_owner_phone ON contacts (owner_id, phone);
 
 
+-- Discussion comments under a channel/community post (Telegram-style). Each
+-- row is one comment on one post; chat_id is the channel the post lives in, so
+-- membership/permission checks and the realtime fan-out reuse the chat the
+-- comment belongs to. Cascades away with the post or the channel.
+CREATE TABLE IF NOT EXISTS comments (
+    id              TEXT PRIMARY KEY,
+    chat_id         TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    post_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    user_id         TEXT REFERENCES users(id) ON DELETE SET NULL,
+    text            TEXT NOT NULL,
+    created_at      REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_comments_post ON comments (post_message_id, created_at);
+
+
+-- In-app product feedback: the 10 multiple-choice answers land as one JSON
+-- blob (question key -> chosen answer) plus a single free-text comment, so
+-- adding or reordering questions never needs a schema change. user_id is SET
+-- NULL rather than cascade-deleted so feedback survives an account deletion —
+-- it's product signal, not personal data tied to a live account.
+CREATE TABLE IF NOT EXISTS feedback (
+    id         TEXT PRIMARY KEY,
+    user_id    TEXT REFERENCES users(id) ON DELETE SET NULL,
+    answers    TEXT NOT NULL DEFAULT '{}',
+    comment    TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_created ON feedback (created_at);
+
+
 CREATE TABLE IF NOT EXISTS meetings (
     id       TEXT PRIMARY KEY,
 
@@ -1023,6 +1055,23 @@ COLUMNS_ADDED_LATER = [
     # tick: a referrer earns the badge once BLUE_TICK_TARGET rows point back at
     # them. NULL for accounts that signed up without a referral.
     ("users", "referred_by", "TEXT"),
+    # Per-admin granular rights (Telegram-style), a CSV subset of
+    # post,edit,delete,pin,invite — see chatstore.member_permissions. Only
+    # meaningful for the 'admin' role; owners implicitly hold every right and
+    # members hold none. An EMPTY value on an admin means "all rights", so
+    # every admin that existed before this column keeps full power unchanged.
+    ("chat_members", "permissions", "TEXT NOT NULL DEFAULT ''"),
+    # Running count of discussion comments on a post, kept on the message row
+    # so a page of posts renders its "💬 N" badges without an N+1 of COUNT(*)
+    # per post. Maintained by the add/delete-comment endpoints.
+    ("messages", "comment_count", "INTEGER NOT NULL DEFAULT 0"),
+    # Whether a channel/community allows discussion comments on its posts.
+    # Defaults on; an admin can turn the discussion off (comments-policy).
+    ("chats", "comments_enabled", "INTEGER NOT NULL DEFAULT 1"),
+    # Who may post in a GROUP: 'all' (default) or 'admins' — WhatsApp's "Only
+    # admins can send messages" switch. Channels are admin-post-only regardless;
+    # this is the knob groups didn't have.
+    ("chats", "send_policy", "TEXT NOT NULL DEFAULT 'all'"),
 ]
 
 

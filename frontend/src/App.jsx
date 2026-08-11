@@ -764,6 +764,12 @@ export default function App() {
               onNewCall={() => setNewCallOpen(true)}
               onCallsMenuClick={(event) => setCallsMenuPos({ x: event.clientX, y: event.clientY })}/>
 
+      {/* One flex:1 region that ALWAYS fills the space between the top bar and
+          the bottom nav — so a screen that returns just a short <Spinner/>
+          while loading (CallsScreen, Status, …) can't let the nav bar ride up
+          into the middle of the viewport. Whatever renders inside sizes itself
+          within this region; the nav stays pinned at the bottom regardless. */}
+      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
       {searchResults ? (
         <SearchResults results={searchResults} onClose={() => setSearchResults(null)}
                        onOpen={(chatId) => {
@@ -809,6 +815,7 @@ export default function App() {
           {tab === "admin" && me.is_superadmin && <AdminPanel toast={toast}/>}
         </>
       )}
+      </div>
 
       <TabBar tab={tab} onChange={changeTab}
               unread={chats.reduce((total, chat) => total + (chat.unread || 0), 0)}

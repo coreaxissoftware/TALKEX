@@ -885,6 +885,31 @@ export const I = {
 
 // ── Shared components ────────────────────────────────────────────────────────
 
+// One shared blob URL per avatar, resolved once and reused by every <Av> that
+// shows the same person. Two things this fixes over fetching per-instance:
+//
+//   1. No revoke race. The old code revoked its object URL on unmount — fine
+//      when each instance had its own, but any refactor toward sharing would
+//      have one Av unmounting and breaking every other Av still showing that
+//      face. Session-lifetime URLs (avatars are small and few) sidestep it
+//      entirely: nothing is revoked while the app is open.
+//   2. Automatic retry. A single transient failure (Render free-tier cold
+//      start, a dropped request) used to leave the avatar stuck on its letter
+//      fallback forever, since photoId never changes to re-trigger the fetch.
+//      On failure we drop the cache entry so the very next mount tries again,
+//      and the effect below also retries once on its own after a short delay.
+const avatarUrlCache = new Map(); // photoId -> Promise<string blobURL>
+function loadAvatarUrl(photoId) {
+  const existing = avatarUrlCache.get(photoId);
+  if (existing) return existing;
+  const pending = Uploads.fetchBlobUrl(photoId, { cache: true }).catch((error) => {
+    avatarUrlCache.delete(photoId); // let a later mount/retry have another go
+    throw error;
+  });
+  avatarUrlCache.set(photoId, pending);
+  return pending;
+}
+
 export function Av({ av, color, size = 44, online, hasStory, isMe, photoId }) {
   // The download endpoint needs an Authorization header a plain <img src>
   // can't send, so a real profile photo is fetched as a blob URL — same
@@ -893,16 +918,20 @@ export function Av({ av, color, size = 44, online, hasStory, isMe, photoId }) {
   useEffect(() => {
     if (!photoId) { setPhotoUrl(null); return; }
     let cancelled = false;
-    let objectUrl = null;
-    Uploads.fetchBlobUrl(photoId, { cache: true }).then((url) => {
-      if (cancelled) { URL.revokeObjectURL(url); return; }
-      objectUrl = url;
-      setPhotoUrl(url);
-    }).catch(() => setPhotoUrl(null));
-    return () => {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    let retryTimer = null;
+    const attempt = (retriesLeft) => {
+      loadAvatarUrl(photoId)
+        .then((url) => { if (!cancelled) setPhotoUrl(url); })
+        .catch(() => {
+          if (cancelled) return;
+          setPhotoUrl(null);
+          // One delayed retry covers the common transient case (a cold-started
+          // backend that answers a second or two later) without hammering.
+          if (retriesLeft > 0) retryTimer = setTimeout(() => attempt(retriesLeft - 1), 1500);
+        });
     };
+    attempt(1);
+    return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer); };
   }, [photoId]);
 
   return (
@@ -924,6 +953,92 @@ export function Av({ av, color, size = 44, online, hasStory, isMe, photoId }) {
         width: size * 0.23, height: size * 0.23, borderRadius: "50%",
         background: G.green, border: `2px solid ${G.bg}`,
       }}/>}
+    </div>
+  );
+}
+
+// The social links a profile can carry, each with its real brand mark (an
+// inline SVG glyph on the brand's colour) rather than an emoji stand-in — one
+// definition shared by the Settings editor and every profile that displays
+// them, so a link the user adds shows the right logo everywhere at once.
+// `field` is the users-table column; `match` recognises which platform an
+// arbitrary URL belongs to so even a link typed into the wrong box still gets
+// a sensible icon.
+export const SOCIAL_PLATFORMS = [
+  {
+    key: "website", field: "link_website", label: "Website", brand: "#0ea5e9",
+    match: () => true, // fallback for anything not matched below
+    glyph: (c, s) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.5 2.5 15.5 0 18M12 3c-2.5 2.5-2.5 15.5 0 18"/></svg>,
+  },
+  {
+    key: "facebook", field: "link_facebook", label: "Facebook", brand: "#1877f2",
+    match: (u) => /facebook\.com|fb\.com|fb\.me/i.test(u),
+    glyph: (c, s) => <svg width={s} height={s} viewBox="0 0 24 24" fill={c}><path d="M13.5 21v-7h2.4l.4-2.9h-2.8V9.3c0-.85.24-1.43 1.46-1.43H16.8V5.28c-.27-.04-1.2-.12-2.28-.12-2.26 0-3.8 1.38-3.8 3.9v2.05H8.3V14h2.42v7z"/></svg>,
+  },
+  {
+    key: "instagram", field: "link_instagram", label: "Instagram", brand: "#e1306c",
+    match: (u) => /instagram\.com|instagr\.am/i.test(u),
+    glyph: (c, s) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.5" cy="6.5" r="1.2" fill={c} stroke="none"/></svg>,
+  },
+  {
+    key: "twitter", field: "link_twitter", label: "Twitter / X", brand: "#000000",
+    match: (u) => /twitter\.com|x\.com/i.test(u),
+    glyph: (c, s) => <svg width={s} height={s} viewBox="0 0 24 24" fill={c}><path d="M17.5 3h3l-6.55 7.48L21.75 21h-6.04l-4.72-6.17L5.6 21H2.6l7-8-6.85-10h6.2l4.27 5.64zm-1.06 16.13h1.66L7.65 4.77H5.86z"/></svg>,
+  },
+  {
+    key: "youtube", field: "link_youtube", label: "YouTube", brand: "#ff0000",
+    match: (u) => /youtube\.com|youtu\.be/i.test(u),
+    glyph: (c, s) => <svg width={s} height={s} viewBox="0 0 24 24" fill={c}><path d="M21.6 7.2a2.5 2.5 0 0 0-1.75-1.77C18.25 5 12 5 12 5s-6.25 0-7.85.43A2.5 2.5 0 0 0 2.4 7.2 26 26 0 0 0 2 12a26 26 0 0 0 .4 4.8 2.5 2.5 0 0 0 1.75 1.77C5.75 19 12 19 12 19s6.25 0 7.85-.43a2.5 2.5 0 0 0 1.75-1.77A26 26 0 0 0 22 12a26 26 0 0 0-.4-4.8zM10 15V9l5.2 3z"/></svg>,
+  },
+  {
+    key: "linkedin", field: "link_linkedin", label: "LinkedIn", brand: "#0a66c2",
+    match: (u) => /linkedin\.com|linked\.in/i.test(u),
+    glyph: (c, s) => <svg width={s} height={s} viewBox="0 0 24 24" fill={c}><path d="M4.98 3.5a2 2 0 1 1 0 4 2 2 0 0 1 0-4zM3 9h4v12H3zM10 9h3.8v1.7h.05c.53-1 1.83-2.05 3.77-2.05 4.03 0 4.78 2.65 4.78 6.1V21h-4v-5.4c0-1.3-.02-2.96-1.8-2.96-1.8 0-2.08 1.4-2.08 2.86V21h-4z"/></svg>,
+  },
+];
+
+/** Which platform a URL belongs to (for showing the right logo), defaulting
+ *  to the generic website globe when nothing more specific matches. */
+export function platformForUrl(url) {
+  return SOCIAL_PLATFORMS.find((p) => p.key !== "website" && p.match(url))
+    || SOCIAL_PLATFORMS[0];
+}
+
+/** One clickable brand chip. `platform` is a SOCIAL_PLATFORMS entry. */
+export function SocialChip({ platform, url }) {
+  const domain = (() => {
+    try { return new URL(url).hostname.replace("www.", ""); } catch { return url; }
+  })();
+  return (
+    <a href={url} target="_blank" rel="noopener noreferrer" title={platform.label} style={{
+      display: "inline-flex", alignItems: "center", gap: 7,
+      padding: "5px 12px 5px 6px", borderRadius: 20, fontSize: 12.5,
+      background: G.dim, border: `1px solid ${G.border}`,
+      color: G.text, textDecoration: "none", cursor: "pointer",
+    }}>
+      <span style={{
+        width: 22, height: 22, borderRadius: "50%", flexShrink: 0,
+        background: platform.brand, display: "flex", alignItems: "center", justifyContent: "center",
+      }}>{platform.glyph("#fff", 14)}</span>
+      <span style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {domain}
+      </span>
+    </a>
+  );
+}
+
+/** Renders every social link a profile object carries as brand chips. Reads
+ *  the same link_* fields Settings edits, so any link the user adds shows up
+ *  here — on their own profile and on how others see them — automatically. */
+export function SocialLinks({ profile, style }) {
+  if (!profile) return null;
+  const chips = SOCIAL_PLATFORMS
+    .map((platform) => ({ platform, url: profile[platform.field] }))
+    .filter((entry) => entry.url && entry.url.trim());
+  if (chips.length === 0) return null;
+  return (
+    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", ...style }}>
+      {chips.map((entry) => <SocialChip key={entry.platform.key} platform={entry.platform} url={entry.url}/>)}
     </div>
   );
 }

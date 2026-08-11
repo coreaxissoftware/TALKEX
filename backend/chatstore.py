@@ -108,6 +108,41 @@ def member_role(chat_id: str, user_id: str) -> str | None:
     return row["role"] if row else None
 
 
+# The full set of granular admin rights, Telegram-style. Owners always hold
+# every one; admins hold whatever subset was granted (see member_permissions).
+ADMIN_PERMISSIONS = ("post", "edit", "delete", "pin", "invite")
+
+
+def member_permissions(chat_id: str, user_id: str) -> set[str]:
+    """
+    The set of granular rights this member holds in this chat.
+
+    Owner  → every right, always.
+    Admin  → the CSV stored on their row, parsed. An EMPTY value means "all"
+             — that's the back-compat rule so every admin created before this
+             column shipped keeps full power instead of silently losing it.
+    Member → nothing.
+    """
+    row = db.query_one(
+        "SELECT role, permissions FROM chat_members WHERE chat_id = ? AND user_id = ?",
+        (chat_id, user_id),
+    )
+    if row is None:
+        return set()
+    if row["role"] == "owner":
+        return set(ADMIN_PERMISSIONS)
+    if row["role"] == "admin":
+        raw = (row["permissions"] or "").strip()
+        if not raw:
+            return set(ADMIN_PERMISSIONS)  # legacy admin — full power
+        return {p for p in raw.split(",") if p in ADMIN_PERMISSIONS}
+    return set()
+
+
+def has_permission(chat_id: str, user_id: str, perm: str) -> bool:
+    return perm in member_permissions(chat_id, user_id)
+
+
 # ── Writing ───────────────────────────────────────────────────────────────────
 
 def insert_message(

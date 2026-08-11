@@ -3,8 +3,8 @@ import {
   Auth, Contacts, Me, Messages, Templates, Users, clearToken, forgetAccount, getToken,
   listSavedAccounts, rememberAccount, switchToAccount,
 } from "../api.js";
-import { ACCENTS, Av, Button, Field, G, I, SRow, Spinner, Toggle, clockTime, whenLabel,
-         getStoredEnterToSend, saveEnterToSend, useInstallPrompt } from "../ui.jsx";
+import { ACCENTS, Av, Button, Field, G, I, SRow, SOCIAL_PLATFORMS, SocialLinks, Spinner, Toggle,
+         clockTime, whenLabel, getStoredEnterToSend, saveEnterToSend, useInstallPrompt } from "../ui.jsx";
 import QrView from "../QrView.jsx";
 import { disablePush, enablePush, getPushSubscription, isPushSupported } from "../push.js";
 import { getAutoDownload, setAutoDownload } from "../mediaPrefs.js";
@@ -27,6 +27,7 @@ import { COUNTRY_CODES, flagFor, samplePlaceholder, splitPhone } from "../countr
 export default function Settings({ me, onUpdated, onSignedOut, toast,
                                     theme, onThemeChange, accent, onAccentChange }) {
   const [editing, setEditing] = useState(false);
+  const [helpView, setHelpView] = useState(null); // 'blog' | 'feedback' | null
   const { canInstall, promptInstall } = useInstallPrompt();
   const [enterToSend, setEnterToSend] = useState(getStoredEnterToSend);
   const [form, setForm] = useState({
@@ -369,17 +370,16 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
               <div style={{ marginTop: 12, marginBottom: 6, fontSize: 13, fontWeight: 700, color: G.sub }}>
                 Social Links
               </div>
-              {[
-                { key: "link_website", label: "🌐 Website", placeholder: "https://yoursite.com" },
-                { key: "link_facebook", label: "📘 Facebook", placeholder: "https://facebook.com/username" },
-                { key: "link_instagram", label: "📸 Instagram", placeholder: "https://instagram.com/username" },
-                { key: "link_twitter", label: "𝕏 Twitter / X", placeholder: "https://x.com/username" },
-                { key: "link_youtube", label: "▶️ YouTube", placeholder: "https://youtube.com/@channel" },
-                { key: "link_linkedin", label: "💼 LinkedIn", placeholder: "https://linkedin.com/in/username" },
-              ].map(({ key, label, placeholder }) => (
-                <Field key={key} label={label} value={form[key]}
-                       placeholder={placeholder}
-                       onChange={(event) => setForm({ ...form, [key]: event.target.value })}/>
+              {SOCIAL_PLATFORMS.map((platform) => (
+                <div key={platform.key} style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
+                  <span style={{
+                    width: 26, height: 26, borderRadius: "50%", flexShrink: 0, marginBottom: 12,
+                    background: platform.brand, display: "flex", alignItems: "center", justifyContent: "center",
+                  }}>{platform.glyph("#fff", 16)}</span>
+                  <Field label={platform.label} value={form[platform.field]}
+                         placeholder={`https://…`} style={{ flex: 1 }}
+                         onChange={(event) => setForm({ ...form, [platform.field]: event.target.value })}/>
+                </div>
               ))}
 
               <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
@@ -393,16 +393,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
             <>
               <SRow icon={I.edit(G.accent, 18)} label="Edit profile" sub="Name, bio and social links"
                     onClick={() => setEditing(true)}/>
-              {(me.link_website || me.link_facebook || me.link_instagram || me.link_twitter || me.link_youtube || me.link_linkedin) && (
-                <div style={{ padding: "0 20px 12px", display: "flex", gap: 10, flexWrap: "wrap" }}>
-                  {me.link_website && <SocialChip emoji="🌐" url={me.link_website}/>}
-                  {me.link_facebook && <SocialChip emoji="📘" url={me.link_facebook}/>}
-                  {me.link_instagram && <SocialChip emoji="📸" url={me.link_instagram}/>}
-                  {me.link_twitter && <SocialChip emoji="𝕏" url={me.link_twitter}/>}
-                  {me.link_youtube && <SocialChip emoji="▶️" url={me.link_youtube}/>}
-                  {me.link_linkedin && <SocialChip emoji="💼" url={me.link_linkedin}/>}
-                </div>
-              )}
+              <SocialLinks profile={me} style={{ padding: "0 20px 12px" }}/>
             </>
           )}
         </>
@@ -850,14 +841,34 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
                   const subject = encodeURIComponent("TalkEx feedback");
                   window.location.href = `mailto:support@coreaxis.cloud?subject=${subject}`;
                 }}/>
+          <SRow icon={I.star(G.accent, 18)} label="Send feedback"
+                sub="Answer a few quick questions"
+                onClick={() => setHelpView("feedback")}/>
+          <SRow icon={I.info(G.accent, 18)} label="TalkEx Blog"
+                sub="News, tips and updates"
+                onClick={() => setHelpView("blog")}/>
           <SRow icon={I.shield(G.accent, 18)} label="Terms and privacy"
                 sub="How TalkEx handles your data"
                 onClick={() => window.open(`${window.location.origin}/privacy`, "_blank")}/>
+
+          <div style={{ marginTop: 14, marginBottom: 6, fontSize: 13, fontWeight: 700, color: G.sub }}>
+            More from CoreAxis
+          </div>
+          <SRow icon={<span style={{ fontSize: 18 }}>🛒</span>} label="CoreAxis ePOS"
+                sub="coreaxis.cloud"
+                onClick={() => window.open("https://coreaxis.cloud", "_blank", "noopener")}/>
+          <SRow icon={<span style={{ fontSize: 18 }}>🚀</span>} label="CoreAxis Ventures"
+                sub="ventures.coreaxis.cloud"
+                onClick={() => window.open("https://ventures.coreaxis.cloud", "_blank", "noopener")}/>
+
           <div style={{ fontSize: 12, color: G.muted, textAlign: "center", marginTop: 16 }}>
             TalkEx — Made from Bihar, connecting the world 💙💚
           </div>
         </div>
       </Section>
+
+      {helpView === "feedback" && <FeedbackForm onClose={() => setHelpView(null)} toast={toast}/>}
+      {helpView === "blog" && <BlogSheet onClose={() => setHelpView(null)}/>}
 
       <Section id="account" icon={I.logOut(G.accent, 20)} title="Account" sub={me.phone || "Sign out, deactivate or delete"}
                activeSection={activeSection} onOpen={setActiveSection}
@@ -1631,25 +1642,6 @@ function WallpaperSwatch({ label, active, onClick, style, children }) {
  * behind a back button. Nothing else on the home screen is visible while a
  * category is open — this is real navigation, not an inline expand/collapse.
  */
-function SocialChip({ emoji, url }) {
-  const domain = (() => {
-    try { return new URL(url).hostname.replace("www.", ""); } catch { return url; }
-  })();
-  return (
-    <a href={url} target="_blank" rel="noopener noreferrer" style={{
-      display: "inline-flex", alignItems: "center", gap: 6,
-      padding: "5px 12px", borderRadius: 20, fontSize: 12.5,
-      background: G.dim, border: `1px solid ${G.border}`,
-      color: G.accent, textDecoration: "none", cursor: "pointer",
-    }}>
-      <span>{emoji}</span>
-      <span style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {domain}
-      </span>
-    </a>
-  );
-}
-
 function Section({ id, icon, title, sub, activeSection, onOpen, onBack, children }) {
   if (activeSection === null) {
     return (
@@ -2194,6 +2186,175 @@ function InviteFriend({ me, toast }) {
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+
+// ── Feedback form (1 free-text + 10 select-answer questions) ─────────────────
+
+const FEEDBACK_QUESTIONS = [
+  { key: "overall", q: "How would you rate TalkEx overall?", options: ["Excellent", "Good", "Average", "Poor"] },
+  { key: "ease", q: "How easy is TalkEx to use?", options: ["Very easy", "Easy", "Neutral", "Difficult"] },
+  { key: "speed", q: "How is the app's speed & performance?", options: ["Fast", "OK", "Slow"] },
+  { key: "delivery", q: "How reliable is message delivery?", options: ["Always", "Mostly", "Sometimes", "Rarely"] },
+  { key: "calls", q: "How is the call quality?", options: ["Great", "Good", "Average", "Poor", "Haven't used"] },
+  { key: "most_used", q: "Which feature do you use most?", options: ["Chats", "Calls", "Status", "Channels", "Groups"] },
+  { key: "recommend", q: "How likely are you to recommend TalkEx?", options: ["Very likely", "Likely", "Neutral", "Unlikely"] },
+  { key: "vs_others", q: "How does TalkEx compare to other apps?", options: ["Better", "Same", "Worse"] },
+  { key: "bugs", q: "Have you faced any bugs or crashes?", options: ["Never", "Rarely", "Sometimes", "Often"] },
+  { key: "support", q: "How satisfied are you with support?", options: ["Very satisfied", "Satisfied", "Neutral", "Dissatisfied", "Haven't contacted"] },
+];
+
+function FeedbackForm({ onClose, toast }) {
+  const [answers, setAnswers] = useState({});
+  const [comment, setComment] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+
+  async function submit() {
+    if (Object.keys(answers).length === 0 && !comment.trim()) {
+      toast("Please answer at least one question");
+      return;
+    }
+    setBusy(true);
+    try {
+      await Me.submitFeedback(answers, comment.trim());
+      setDone(true);
+    } catch (problem) {
+      toast(problem.message || "Could not send feedback");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "#000000aa", zIndex: 60,
+      display: "flex", alignItems: "flex-end", justifyContent: "center",
+    }}>
+      <div onClick={(event) => event.stopPropagation()} style={{
+        width: "100%", maxWidth: 430, background: G.surface, padding: 20,
+        borderTopLeftRadius: 22, borderTopRightRadius: 22,
+        maxHeight: "85vh", overflowY: "auto",
+      }}>
+        {done ? (
+          <div style={{ textAlign: "center", padding: "20px 0" }}>
+            <div style={{ fontSize: 40, marginBottom: 8 }}>🙏</div>
+            <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 6 }}>Thank you!</div>
+            <div style={{ fontSize: 13.5, color: G.muted, marginBottom: 18 }}>
+              Your feedback helps us make TalkEx better.
+            </div>
+            <Button onClick={onClose} style={{ width: "100%" }}>Done</Button>
+          </div>
+        ) : (
+          <>
+            <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 4 }}>Send feedback</div>
+            <div style={{ fontSize: 12.5, color: G.muted, marginBottom: 16 }}>
+              Tap an answer for each — it only takes a minute.
+            </div>
+
+            {FEEDBACK_QUESTIONS.map((item, index) => (
+              <div key={item.key} style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 8 }}>
+                  {index + 1}. {item.q}
+                </div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {item.options.map((option) => {
+                    const active = answers[item.key] === option;
+                    return (
+                      <button key={option}
+                        onClick={() => setAnswers((current) => ({ ...current, [item.key]: option }))}
+                        style={{
+                          padding: "6px 12px", borderRadius: 16, fontSize: 12.5, cursor: "pointer",
+                          border: `1px solid ${active ? G.accent : G.border}`,
+                          background: active ? G.accent : "transparent",
+                          color: active ? "#fff" : G.text, fontWeight: active ? 600 : 400,
+                        }}>{option}</button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+
+            <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 8 }}>
+              Any suggestions or issues? (optional)
+            </div>
+            <textarea value={comment} onChange={(event) => setComment(event.target.value)}
+                      placeholder="Type your feedback here…" maxLength={2000} rows={4} style={{
+              width: "100%", padding: "10px 12px", borderRadius: 12, resize: "vertical",
+              background: G.dim, border: `1px solid ${G.border}`, color: G.text,
+              fontSize: 13.5, outline: "none", boxSizing: "border-box", fontFamily: "inherit",
+              marginBottom: 16,
+            }}/>
+
+            <div style={{ display: "flex", gap: 10 }}>
+              <Button onClick={submit} disabled={busy} style={{ flex: 1 }}>
+                {busy ? "Sending…" : "Submit feedback"}
+              </Button>
+              <Button variant="ghost" onClick={onClose} style={{ flex: 1 }}>Cancel</Button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+// ── TalkEx Blog ─────────────────────────────────────────────────────────────
+
+const BLOG_POSTS = [
+  {
+    title: "Welcome to TalkEx",
+    date: "2026",
+    body: "TalkEx is a fast, secure messenger built in Bihar for the world — chat, voice & video calls, status updates, channels, communities and meetings, all in one app. Everything is end-to-end encrypted, and it runs on your phone as well as right in your web browser.",
+  },
+  {
+    title: "Earn your Blue Tick by inviting friends",
+    date: "2026",
+    body: "Invite friends to TalkEx with your personal invite link. Once 10 new people join through your link, a blue tick is added to your profile automatically — a thank-you for helping the community grow. Find your link under Settings → Invite a friend.",
+  },
+  {
+    title: "Install TalkEx as an app",
+    date: "2026",
+    body: "TalkEx is a Progressive Web App — you can install it straight from your browser and it opens like a native app, even working offline for the parts that don't need a connection. Look for 'Install TalkEx app' in Settings, or your browser's install prompt.",
+  },
+  {
+    title: "Channels & Communities",
+    date: "2026",
+    body: "Broadcast to any audience with Channels, and bring related groups together under one roof with Communities. Share your channel with a link or a QR code so anyone can join in a tap.",
+  },
+];
+
+function BlogSheet({ onClose }) {
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "#000000aa", zIndex: 60,
+      display: "flex", alignItems: "flex-end", justifyContent: "center",
+    }}>
+      <div onClick={(event) => event.stopPropagation()} style={{
+        width: "100%", maxWidth: 430, background: G.surface, padding: 20,
+        borderTopLeftRadius: 22, borderTopRightRadius: 22,
+        maxHeight: "85vh", overflowY: "auto",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+          <div style={{ fontSize: 18, fontWeight: 800 }}>TalkEx Blog</div>
+          <div onClick={onClose} style={{ cursor: "pointer", color: G.muted, fontSize: 20 }}>✕</div>
+        </div>
+        {BLOG_POSTS.map((post) => (
+          <div key={post.title} style={{
+            padding: "14px 0", borderBottom: `1px solid ${G.border}`,
+          }}>
+            <div style={{ fontSize: 15.5, fontWeight: 700, marginBottom: 2 }}>{post.title}</div>
+            <div style={{ fontSize: 11.5, color: G.muted, marginBottom: 8 }}>{post.date}</div>
+            <div style={{ fontSize: 13.5, color: G.text, lineHeight: 1.55 }}>{post.body}</div>
+          </div>
+        ))}
+        <div style={{ fontSize: 12, color: G.muted, textAlign: "center", marginTop: 16 }}>
+          More stories coming soon — TalkEx, made from Bihar 💙💚
+        </div>
+      </div>
     </div>
   );
 }

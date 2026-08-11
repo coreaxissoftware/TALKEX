@@ -160,6 +160,26 @@ class UpdateProfileRequest(BaseModel):
     business_category: Optional[str] = Field(default=None, max_length=64)
 
 
+class CommentRequest(BaseModel):
+    """One discussion comment on a channel/community post."""
+    text: str = Field(min_length=1, max_length=4000)
+
+
+class UpdateChatInfoRequest(BaseModel):
+    """Edit a group/channel/community's own name and description (admin action),
+    distinct from ChatSettingsRequest which is per-member preferences."""
+    name: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    description: Optional[str] = Field(default=None, max_length=500)
+
+
+class FeedbackRequest(BaseModel):
+    """In-app product feedback: the multiple-choice answers as a small
+    {question_key: answer} map, plus one optional free-text comment. Bounded so
+    a malformed or oversized submission can't be used to bloat the table."""
+    answers: dict[str, str] = Field(default_factory=dict, max_length=32)
+    comment: str = Field(default="", max_length=2000)
+
+
 class StoryAudienceRequest(BaseModel):
     """Who gets to see status updates you post from now on. 'except' pairs
     with user_ids naming who is EXCLUDED from your full contact list;
@@ -266,6 +286,10 @@ class BroadcastRecipientsRequest(BaseModel):
 
 class SetRoleRequest(BaseModel):
     role: Literal["admin", "member"]
+    # Granular rights to grant when promoting to admin — any subset of
+    # post,edit,delete,pin,invite. Omitted (None) keeps the back-compat
+    # default of a full-power admin; ignored when demoting to member.
+    permissions: Optional[list[str]] = Field(default=None, max_length=8)
 
 
 class CreateSubChannelRequest(BaseModel):

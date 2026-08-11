@@ -96,6 +96,17 @@ function Users({ toast }) {
     reload();
   }
 
+  async function purgeGuests() {
+    if (!window.confirm("Permanently delete ALL guest accounts (usernames starting with 'guest')? This cannot be undone.")) return;
+    try {
+      const { deleted } = await Admin.purgeGuests();
+      toast(deleted > 0 ? `Removed ${deleted} guest account${deleted === 1 ? "" : "s"}` : "No guest accounts found");
+      reload();
+    } catch (problem) {
+      toast(problem.message || "Could not remove guest accounts");
+    }
+  }
+
   return (
     <div>
       <div style={{ padding: "0 16px 12px", display: "flex", gap: 8 }}>
@@ -103,6 +114,12 @@ function Users({ toast }) {
                onKeyDown={(event) => event.key === "Enter" && reload()}
                placeholder="Search by name, username or phone" style={{ flex: 1, marginBottom: 0 }}/>
         <Button onClick={() => reload()} style={{ padding: "0 16px" }}>Search</Button>
+      </div>
+
+      <div style={{ padding: "0 16px 12px" }}>
+        <Button variant="danger" onClick={purgeGuests} style={{ width: "100%" }}>
+          Remove all guest accounts
+        </Button>
       </div>
 
       {loading && <Spinner/>}

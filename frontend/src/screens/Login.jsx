@@ -56,19 +56,6 @@ export default function Login({ onAuthenticated }) {
     }
   }
 
-  const tryIt = () => {
-    const suffix = Math.random().toString(36).slice(2, 8);
-    return submit(() => Auth.register({
-      name: "Guest " + suffix.slice(0, 3).toUpperCase(),
-      username: "guest" + suffix,
-      // Long random password the guest never needs to type. This is a real
-      // account with a real password, not an authentication bypass.
-      password: crypto.randomUUID(),
-      phone: "",
-      bio: "Just looking around",
-    }));
-  };
-
   if (pendingToken) {
     return (
       <TwoStepGate
@@ -169,10 +156,6 @@ export default function Login({ onAuthenticated }) {
             <Button onClick={login} disabled={busy}
                     style={{ width: "100%", padding: 14, marginBottom: 10 }}>
               {busy ? "Please wait…" : "Sign in"}
-            </Button>
-
-            <Button variant="ghost" onClick={tryIt} disabled={busy} style={{ width: "100%" }}>
-              Try it with a guest account
             </Button>
           </>
         )}

@@ -276,8 +276,11 @@ export const Me = {
   createWebhook: (url) => post("/me/webhooks", { url }),
   deleteWebhook: (webhookId) => remove(`/me/webhooks/${webhookId}`),
 
-  // Progress toward the activity-earned blue tick — { chatted_with, target, earned }.
+  // Progress toward the invite-earned blue tick — { invited, target, earned }.
   blueTickProgress: () => get("/me/blue-tick-progress"),
+
+  // In-app product feedback: { answers: {questionKey: answer}, comment }.
+  submitFeedback: (answers, comment) => post("/feedback", { answers, comment }),
 
   // Saved quick-reply snippets for the composer picker.
   cannedReplies: () => get("/me/canned-replies"),
@@ -417,6 +420,17 @@ export const Chats = {
   // Admin toggle: whether messages/posts in this channel or group can be reacted to.
   setReactionsPolicy: (chatId, enabled) => put(`/chats/${chatId}/reactions-policy?enabled=${enabled}`),
 
+  // Edit a group/channel/community's own name & description (admin action).
+  updateInfo: (chatId, fields) => put(`/chats/${chatId}/info`, fields),
+  // WhatsApp's "Only admins can send messages" group switch.
+  setSendPolicy: (chatId, adminsOnly) => put(`/chats/${chatId}/send-policy?admins_only=${adminsOnly}`),
+
+  // Discussion comments on channel/community posts.
+  comments: (messageId) => get(`/messages/${messageId}/comments`),
+  addComment: (messageId, text) => post(`/messages/${messageId}/comments`, { text }),
+  deleteComment: (commentId) => remove(`/comments/${commentId}`),
+  setCommentsPolicy: (chatId, enabled) => put(`/chats/${chatId}/comments-policy?enabled=${enabled}`),
+
   // A channel's public @handle. Empty string clears it (makes it private).
   setChannelUsername: (chatId, username) =>
     put(`/chats/${chatId}/username?username=${encodeURIComponent(username)}`),
@@ -450,8 +464,8 @@ export const Chats = {
   // Owner/admin membership management, separate from the self-serve join/leave.
   addMembers: (chatId, userIds) => post(`/chats/${chatId}/members`, { user_ids: userIds }),
   removeMember: (chatId, userId) => remove(`/chats/${chatId}/members/${userId}`),
-  setMemberRole: (chatId, userId, role) =>
-    patch(`/chats/${chatId}/members/${userId}`, { role }),
+  setMemberRole: (chatId, userId, role, permissions) =>
+    patch(`/chats/${chatId}/members/${userId}`, permissions ? { role, permissions } : { role }),
 };
 
 // ── Messages ─────────────────────────────────────────────────────────────────
@@ -1151,6 +1165,8 @@ export const Admin = {
   disableUser: (userId) => post(`/admin/users/${userId}/disable`),
   enableUser: (userId) => post(`/admin/users/${userId}/enable`),
   deleteUser: (userId) => remove(`/admin/users/${userId}`),
+  purgeGuests: () => post("/admin/purge-guests"),
+  feedback: () => get("/admin/feedback"),
 
   integrations: () => get("/admin/integrations"),
   updateIntegrations: (fields) => put("/admin/integrations", fields),

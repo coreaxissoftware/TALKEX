@@ -62,11 +62,12 @@ import uploads
 from chatstore import new_id
 from models import (
     AddContactRequest, AddMembersRequest, BroadcastRecipientsRequest, BulkSendRequest,
-    ChatSettingsRequest, ConfirmEmailRequest, CreateApiKeyRequest, CreateBroadcastRequest,
+    ChatSettingsRequest, CommentRequest, ConfirmEmailRequest, CreateApiKeyRequest, CreateBroadcastRequest,
     CreateCannedReplyRequest, CreateChannelRequest, CreateCommunityRequest, CreateGroupRequest,
     CreateMeetingRequest, CreateSubChannelRequest, CreateTemplateRequest, CreateWebhookRequest,
     CreateBreakoutRoomsRequest, DisappearingRequest, InstantMeetingRequest,
-    EditMessageRequest, ForwardRequest, ForwardStoryRequest, LiveLocationUpdateRequest, LoginRequest,
+    EditMessageRequest, FeedbackRequest, ForwardRequest, ForwardStoryRequest,
+    LiveLocationUpdateRequest, LoginRequest,
     MatchContactsRequest,
     PushSubscribeRequest, PushUnsubscribeRequest, ReactRequest, ReadRequest,
     RegisterRequest, RemoveTwoStepRequest, RequestEmailOtpRequest, RequestOtpRequest,
@@ -75,7 +76,7 @@ from models import (
     SetSessionShortLivedRequest,
     SetTwoStepRequest, SetUsernameRequest, StartLinkRequest, StoryAudienceRequest, StoryRequest,
     TestEmailRequest, TestSmsRequest,
-    UpdateContactRequest, UpdateIntegrationSettingsRequest, UpdateMeetingRequest,
+    UpdateChatInfoRequest, UpdateContactRequest, UpdateIntegrationSettingsRequest, UpdateMeetingRequest,
     UpdateProfileRequest, VerifyOtpRequest, VerifyTwoStepRequest, VoteRequest,
 )
 from realtime import hub
@@ -1826,6 +1827,26 @@ def get_me(user: dict = Depends(current_user)):
     return public_user(user)
 
 
+feedback_rate_limiter = RateLimiter(max_events=5, window_seconds=3600)
+
+
+@app.post("/feedback")
+def submit_feedback(request: FeedbackRequest, user: dict = Depends(current_user)):
+    """
+    Store one in-app feedback submission (the multiple-choice answers plus an
+    optional free-text comment). Rate-limited per account so the form can't be
+    used to flood the table. Superadmins read it back via GET /admin/feedback.
+    """
+    feedback_rate_limiter.check(user["id"])
+    if not request.answers and not request.comment.strip():
+        raise HTTPException(400, "Nothing to submit")
+    db.execute(
+        "INSERT INTO feedback (id, user_id, answers, comment, created_at) VALUES (?, ?, ?, ?, ?)",
+        (new_id("fb"), user["id"], json.dumps(request.answers), request.comment.strip(), time.time()),
+    )
+    return {"submitted": True}
+
+
 @app.get("/me/blue-tick-progress")
 def blue_tick_progress(user: dict = Depends(current_user)):
     """
@@ -2499,7 +2520,14 @@ def list_chats(user: dict = Depends(current_user),
         FROM chat_members AS m
         JOIN chats AS c ON c.id = m.chat_id
         WHERE m.user_id = ?
-        ORDER BY m.is_pinned DESC, c.last_seq DESC
+        -- Newest ACTIVITY first, not highest seq: last_seq is a per-chat
+        -- counter, so ordering by it floated an old chat with many messages
+        -- above a brand-new chat with only a couple. The last message's
+        -- timestamp is the real "most recent" key; empty chats fall back to
+        -- when the chat itself was created so they still sort sensibly.
+        ORDER BY m.is_pinned DESC,
+          COALESCE((SELECT MAX(msg.created_at) FROM messages AS msg WHERE msg.chat_id = c.id),
+                   c.created_at) DESC
         LIMIT ? OFFSET ?
         """,
         (user["id"], limit, offset),
@@ -2594,12 +2622,17 @@ def get_chat(chat_id: str, user: dict = Depends(current_user)):
     chat.pop("pin_hash", None)
 
     member_rows = db.query_all(
-        "SELECT u.*, m.role, m.joined_at FROM chat_members m JOIN users u ON u.id = m.user_id "
+        "SELECT u.*, m.role, m.permissions, m.joined_at FROM chat_members m JOIN users u ON u.id = m.user_id "
         "WHERE m.chat_id = ? ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, m.joined_at",
         (chat_id,),
     )
-    chat["members"] = [{**public_user(row, viewer_id=user["id"]), "role": row["role"]} for row in member_rows]
+    chat["members"] = [
+        {**public_user(row, viewer_id=user["id"]), "role": row["role"],
+         "permissions": sorted(chatstore.member_permissions(chat_id, row["id"]))}
+        for row in member_rows
+    ]
     chat["my_role"] = next((m["role"] for m in chat["members"] if m["id"] == user["id"]), None)
+    chat["my_permissions"] = next((m["permissions"] for m in chat["members"] if m["id"] == user["id"]), [])
 
     # Same DM naming rule as the list endpoint, so a chat opened directly is
     # labelled the same way as one opened from the list.
@@ -3197,11 +3230,22 @@ def require_manager(chat_id: str, user_id: str) -> str:
     return role
 
 
+def require_permission(chat_id: str, user_id: str, perm: str, message: str):
+    """Refuse unless the caller holds a specific granular admin right in this
+    chat. Owners and legacy full-power admins pass automatically (see
+    chatstore.member_permissions); a narrowed admin only passes for the rights
+    they were actually granted."""
+    if not chatstore.has_permission(chat_id, user_id, perm):
+        raise HTTPException(403, message)
+
+
 @app.post("/chats/{chat_id}/members")
 async def add_members(chat_id: str, request: AddMembersRequest,
                       user: dict = Depends(current_user)):
     chat = require_member(chat_id, user["id"])
     require_manager(chat_id, user["id"])
+    require_permission(chat_id, user["id"], "invite",
+                       "You don't have permission to add members to this chat")
 
     if chat["type"] in ("dm", "saved"):
         raise HTTPException(400, "This chat type has fixed membership")
@@ -3281,10 +3325,68 @@ async def set_member_role(chat_id: str, target_id: str, request: SetRoleRequest,
     if target_role == "owner":
         raise HTTPException(400, "The owner's role cannot be changed this way")
 
-    db.execute("UPDATE chat_members SET role = ? WHERE chat_id = ? AND user_id = ?",
-              (request.role, chat_id, target_id))
+    # Granular rights only apply to admins. When promoting, an explicit
+    # `permissions` list narrows what this admin can do; omitting it keeps the
+    # legacy "full-power admin" behaviour (empty string → all, see
+    # chatstore.member_permissions). Demoting to member clears any grant.
+    if request.role == "admin" and request.permissions is not None:
+        granted = ",".join(p for p in request.permissions if p in chatstore.ADMIN_PERMISSIONS)
+    else:
+        granted = ""
+
+    db.execute("UPDATE chat_members SET role = ?, permissions = ? WHERE chat_id = ? AND user_id = ?",
+              (request.role, granted, chat_id, target_id))
     await hub.send_to_chat(chat_id, {"type": "members_changed", "chat_id": chat_id})
-    return {"user_id": target_id, "role": request.role}
+    return {"user_id": target_id, "role": request.role,
+            "permissions": sorted(chatstore.member_permissions(chat_id, target_id))}
+
+
+@app.put("/chats/{chat_id}/info")
+async def update_chat_info(chat_id: str, request: UpdateChatInfoRequest,
+                          user: dict = Depends(current_user)):
+    """
+    Rename a group/channel/community or change its description — the edit path
+    that simply didn't exist before, so a group's name and description were
+    frozen at creation. Admin-only; DMs and Saved Messages have no editable
+    info of this kind.
+    """
+    chat = require_member(chat_id, user["id"])
+    if chat["type"] in ("dm", "saved"):
+        raise HTTPException(400, "This chat has no editable name or description")
+    require_manager(chat_id, user["id"])
+
+    fields = {}
+    if request.name is not None:
+        fields["name"] = request.name.strip()
+        if not fields["name"]:
+            raise HTTPException(400, "Name cannot be empty")
+        fields["avatar_letter"] = fields["name"][0].upper()
+    if request.description is not None:
+        fields["description"] = request.description.strip()
+    if not fields:
+        return get_chat(chat_id, user)
+
+    assignments = ", ".join(f"{name} = ?" for name in fields)
+    db.execute(f"UPDATE chats SET {assignments} WHERE id = ?", (*fields.values(), chat_id))
+    # Everyone with the chat or its info sheet open refreshes to the new name.
+    await hub.send_to_chat(chat_id, {"type": "chat_updated", "chat_id": chat_id})
+    await hub.send_to_chat(chat_id, {"type": "members_changed", "chat_id": chat_id})
+    return get_chat(chat_id, user)
+
+
+@app.put("/chats/{chat_id}/send-policy")
+async def set_send_policy(chat_id: str, admins_only: bool = Query(...),
+                          user: dict = Depends(current_user)):
+    """WhatsApp's "Only admins can send messages" switch for a group. Channels
+    are already admin-post-only; this is the group-level knob."""
+    chat = require_member(chat_id, user["id"])
+    if chat["type"] != "group":
+        raise HTTPException(400, "Send policy only applies to groups")
+    require_manager(chat_id, user["id"])
+    db.execute("UPDATE chats SET send_policy = ? WHERE id = ?",
+               ("admins" if admins_only else "all", chat_id))
+    await hub.send_to_chat(chat_id, {"type": "chat_updated", "chat_id": chat_id})
+    return {"send_policy": "admins" if admins_only else "all"}
 
 
 @app.patch("/chats/{chat_id}/settings")
@@ -3632,15 +3734,24 @@ async def send_message(
     # (general discussion happens in sub-channels, which are ordinary chats
     # with their own type and are NOT restricted here).
     if chat["type"] in ("channel", "community"):
+        noun = "channel" if chat["type"] == "channel" else "community"
         if chatstore.member_role(request.chat_id, user["id"]) not in ("owner", "admin"):
-            noun = "channel" if chat["type"] == "channel" else "community"
             raise HTTPException(403, f"Only {noun} admins can post")
+        require_permission(request.chat_id, user["id"], "post",
+                           f"You don't have permission to post in this {noun}")
     elif chat["type"] == "broadcast":
         # Nobody but the owner is ever a chat_member of a broadcast list (see
         # broadcast_recipients' table comment), so in practice only the owner
         # could reach this far anyway — checked explicitly for a clear error.
         if chat["owner_id"] != user["id"]:
             raise HTTPException(403, "Only the owner can send to this broadcast list")
+    elif chat["type"] == "group":
+        # "Only admins can send messages" — WhatsApp's group lock. Off ('all')
+        # by default, so ordinary groups are unaffected.
+        send_policy = chat["send_policy"] if "send_policy" in chat.keys() else "all"
+        if send_policy == "admins" \
+                and chatstore.member_role(request.chat_id, user["id"]) not in ("owner", "admin"):
+            raise HTTPException(403, "Only admins can send messages in this group")
 
     # Slow mode: non-admin members must wait between sends.
     slow = chat["slow_mode_secs"] if "slow_mode_secs" in chat.keys() else 0
@@ -3858,7 +3969,10 @@ async def edit_message(message_id: str, request: EditMessageRequest,
         raise HTTPException(404, "Message not found")
     require_member(message["chat_id"], user["id"])
 
-    if message["sender_id"] != user["id"]:
+    # Your own message always; someone else's only with the "edit" granular
+    # admin right (Telegram lets a channel admin edit others' posts).
+    if message["sender_id"] != user["id"] \
+            and not chatstore.has_permission(message["chat_id"], user["id"], "edit"):
         raise HTTPException(403, "You can only edit your own messages")
     if message["deleted_at"]:
         raise HTTPException(400, "This message was deleted")
@@ -4015,7 +4129,10 @@ async def delete_message(message_id: str, mode: str = Query(default="everyone"),
     chat = require_member(message["chat_id"], user["id"])
 
     is_own = message["sender_id"] == user["id"]
-    is_moderator = chatstore.member_role(message["chat_id"], user["id"]) in ("owner", "admin")
+    # Deleting someone ELSE's message is the "delete" granular admin right —
+    # owners and legacy full-power admins hold it automatically; a narrowed
+    # admin only if it was granted.
+    is_moderator = chatstore.has_permission(message["chat_id"], user["id"], "delete")
     if not is_own and not is_moderator:
         raise HTTPException(403, "You can only delete your own messages")
     if mode == "unsend" and not is_own:
@@ -4315,7 +4432,14 @@ async def pin_message(message_id: str, user: dict = Depends(current_user)):
     message = db.query_one("SELECT chat_id FROM messages WHERE id = ?", (message_id,))
     if message is None:
         raise HTTPException(404, "Message not found")
-    require_member(message["chat_id"], user["id"])
+    chat = require_member(message["chat_id"], user["id"])
+
+    # In an admin-run space (channel/community) pinning is the "pin" granular
+    # right. DMs and ordinary groups stay open — anyone in the conversation can
+    # pin, same as before.
+    if chat["type"] in ("channel", "community", "community_channel"):
+        require_permission(message["chat_id"], user["id"], "pin",
+                           "You don't have permission to pin messages here")
 
     db.execute(
         "INSERT OR IGNORE INTO pinned_messages (chat_id, message_id, pinned_by, pinned_at) "
@@ -4340,6 +4464,139 @@ async def unpin_message(message_id: str, user: dict = Depends(current_user)):
         "type": "pins_changed", "chat_id": message["chat_id"],
     })
     return {"pinned": False}
+
+
+# ── Discussion comments on channel/community posts ──────────────────────────────
+
+def serialise_comment(row: dict) -> dict:
+    """One comment plus enough of its author for the client to render it — the
+    author is joined in at query time, and goes to a deleted-account placeholder
+    if the user_id was nulled by an account deletion."""
+    return {
+        "id": row["id"],
+        "post_message_id": row["post_message_id"],
+        "chat_id": row["chat_id"],
+        "text": row["text"],
+        "created_at": row["created_at"],
+        "user_id": row["user_id"],
+        "user_name": row["user_name"] or "Deleted account",
+        "user_avatar_letter": row["user_avatar_letter"] or "?",
+        "user_color": row["user_color"] or "#6366f1",
+        "user_avatar_attachment_id": row["user_avatar_attachment_id"],
+    }
+
+
+COMMENTABLE_TYPES = ("channel", "community", "community_channel")
+
+
+@app.get("/messages/{message_id}/comments")
+def list_comments(message_id: str, limit: int = Query(default=200, ge=1, le=500),
+                  offset: int = Query(default=0, ge=0), user: dict = Depends(current_user)):
+    """Every comment on a post, oldest first (natural reading order for a
+    thread). Only members/subscribers of the channel can read the discussion."""
+    post = db.query_one("SELECT chat_id FROM messages WHERE id = ?", (message_id,))
+    if post is None:
+        raise HTTPException(404, "Post not found")
+    require_member(post["chat_id"], user["id"])
+    rows = db.query_all(
+        """
+        SELECT c.*, u.name AS user_name, u.avatar_letter AS user_avatar_letter,
+               u.color AS user_color, u.avatar_attachment_id AS user_avatar_attachment_id
+        FROM comments AS c
+        LEFT JOIN users AS u ON u.id = c.user_id
+        WHERE c.post_message_id = ?
+        ORDER BY c.created_at ASC
+        LIMIT ? OFFSET ?
+        """,
+        (message_id, limit, offset),
+    )
+    return [serialise_comment(dict(row)) for row in rows]
+
+
+@app.post("/messages/{message_id}/comments")
+async def add_comment(message_id: str, request: CommentRequest, user: dict = Depends(current_user)):
+    """
+    Post a discussion comment under a channel/community post. Any member/
+    subscriber can comment (that's the whole point of a discussion), as long as
+    the channel hasn't turned comments off. Bumps the post's comment_count and
+    fans a realtime event out to everyone viewing the channel.
+    """
+    post = db.query_one("SELECT id, chat_id FROM messages WHERE id = ?", (message_id,))
+    if post is None:
+        raise HTTPException(404, "Post not found")
+    chat = require_member(post["chat_id"], user["id"])
+    if chat["type"] not in COMMENTABLE_TYPES:
+        raise HTTPException(400, "Comments are only available on channel and community posts")
+    if not chat["comments_enabled"]:
+        raise HTTPException(403, "Comments are turned off for this channel")
+
+    comment_id = new_id("cmt")
+    now = time.time()
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO comments (id, chat_id, post_message_id, user_id, text, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (comment_id, post["chat_id"], message_id, user["id"], request.text, now),
+        )
+        conn.execute("UPDATE messages SET comment_count = comment_count + 1 WHERE id = ?", (message_id,))
+
+    row = db.query_one(
+        """
+        SELECT c.*, u.name AS user_name, u.avatar_letter AS user_avatar_letter,
+               u.color AS user_color, u.avatar_attachment_id AS user_avatar_attachment_id
+        FROM comments AS c LEFT JOIN users AS u ON u.id = c.user_id WHERE c.id = ?
+        """,
+        (comment_id,),
+    )
+    comment = serialise_comment(dict(row))
+    count = db.query_one("SELECT comment_count FROM messages WHERE id = ?", (message_id,))["comment_count"]
+    await hub.send_to_chat(post["chat_id"], {
+        "type": "comment_added", "chat_id": post["chat_id"],
+        "post_message_id": message_id, "comment": comment, "comment_count": count,
+    })
+    return comment
+
+
+@app.delete("/comments/{comment_id}")
+async def delete_comment(comment_id: str, user: dict = Depends(current_user)):
+    """Remove a comment — your own always, or anyone's with the channel's
+    'delete' granular admin right. Decrements the post's comment_count and
+    tells every viewer."""
+    comment = db.query_one("SELECT * FROM comments WHERE id = ?", (comment_id,))
+    if comment is None:
+        raise HTTPException(404, "Comment not found")
+    require_member(comment["chat_id"], user["id"])
+    is_own = comment["user_id"] == user["id"]
+    if not is_own and not chatstore.has_permission(comment["chat_id"], user["id"], "delete"):
+        raise HTTPException(403, "You can only delete your own comments")
+
+    with db.transaction() as conn:
+        conn.execute("DELETE FROM comments WHERE id = ?", (comment_id,))
+        # Guard against ever going negative if a stale double-delete races.
+        conn.execute(
+            "UPDATE messages SET comment_count = MAX(comment_count - 1, 0) WHERE id = ?",
+            (comment["post_message_id"],),
+        )
+    count_row = db.query_one("SELECT comment_count FROM messages WHERE id = ?", (comment["post_message_id"],))
+    await hub.send_to_chat(comment["chat_id"], {
+        "type": "comment_deleted", "chat_id": comment["chat_id"],
+        "post_message_id": comment["post_message_id"], "comment_id": comment_id,
+        "comment_count": count_row["comment_count"] if count_row else 0,
+    })
+    return {"deleted": True}
+
+
+@app.put("/chats/{chat_id}/comments-policy")
+def set_comments_policy(chat_id: str, enabled: bool = Query(...), user: dict = Depends(current_user)):
+    """Admin switch for whether a channel/community allows discussion comments
+    on its posts at all."""
+    chat = require_member(chat_id, user["id"])
+    if chat["type"] not in COMMENTABLE_TYPES:
+        raise HTTPException(400, "Comments policy applies to channels and communities")
+    if chatstore.member_role(chat_id, user["id"]) not in ("owner", "admin"):
+        raise HTTPException(403, "Only admins can change the comments policy")
+    db.execute("UPDATE chats SET comments_enabled = ? WHERE id = ?", (int(enabled), chat_id))
+    return {"comments_enabled": enabled}
 
 
 @app.post("/messages/{message_id}/star")
@@ -6558,6 +6815,50 @@ def admin_delete_user(user_id: str, admin: dict = Depends(require_superadmin)):
         raise HTTPException(404, "User not found")
     delete_user_account(user_id)
     return {"deleted": True}
+
+
+@app.get("/admin/feedback")
+def admin_list_feedback(limit: int = Query(default=100, ge=1, le=500),
+                        offset: int = Query(default=0, ge=0),
+                        admin: dict = Depends(require_superadmin)):
+    """Every feedback submission, newest first, with the submitter's name/
+    username joined in (NULL for feedback whose account was later deleted)."""
+    rows = db.query_all(
+        """
+        SELECT f.id, f.answers, f.comment, f.created_at,
+               u.name AS user_name, u.username AS user_username
+        FROM feedback AS f
+        LEFT JOIN users AS u ON u.id = f.user_id
+        ORDER BY f.created_at DESC
+        LIMIT ? OFFSET ?
+        """,
+        (limit, offset),
+    )
+    out = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["answers"] = json.loads(item["answers"] or "{}")
+        except (ValueError, TypeError):
+            item["answers"] = {}
+        out.append(item)
+    return out
+
+
+@app.post("/admin/purge-guests")
+def admin_purge_guests(admin: dict = Depends(require_superadmin)):
+    """
+    Permanently remove every throwaway guest account — the ones the "try it"
+    button used to mint, whose usernames are all `guest<random>` (see Login's
+    tryIt). Each goes through the same delete_user_account path a real deletion
+    does, so ownership handoff and the FK cascade behave identically; the
+    admin's own account is never a guest, but it's excluded explicitly anyway.
+    """
+    guests = db.query_all(
+        "SELECT id FROM users WHERE username LIKE 'guest%' AND id != ?", (admin["id"],))
+    for row in guests:
+        delete_user_account(row["id"])
+    return {"deleted": len(guests)}
 
 
 @app.post("/admin/users/{user_id}/verify-business")

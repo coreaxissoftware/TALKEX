@@ -143,6 +143,169 @@ def test_blue_tick_is_earned_by_referring_ten_signups(client):
     assert client.get("/me", headers=referrer).json()["blue_tick"] is True
 
 
+def test_admin_purge_guests_removes_only_guest_accounts(client, monkeypatch):
+    import main
+    # Make the first account the superadmin so it can call the admin endpoint.
+    admin, admin_id, admin_username = make_user(client, "Boss")
+    monkeypatch.setattr(main, "SUPERADMIN_USERNAME", admin_username, raising=False)
+    db.execute("UPDATE users SET is_superadmin = 1 WHERE id = ?", (admin_id,))
+
+    # Two guest accounts and one real account.
+    for _ in range(2):
+        client.post("/auth/register", json={
+            "name": "Guest", "username": f"guest{uuid.uuid4().hex[:8]}",
+            "password": "correct horse battery", "phone": "", "bio": "",
+        }, headers={"X-Forwarded-For": fake_client_ip()})
+    real, _, _ = make_user(client, "Real Person")
+
+    result = client.post("/admin/purge-guests", headers=admin)
+    assert result.status_code == 200, result.text
+    assert result.json()["deleted"] == 2
+
+    # The real account and the admin survive; no guest usernames remain.
+    remaining = db.query_all("SELECT username FROM users WHERE username LIKE 'guest%'")
+    assert remaining == []
+    assert client.get("/me", headers=real).status_code == 200
+
+
+def test_granular_admin_permissions_restrict_an_admin(client):
+    owner, owner_id, _ = make_user(client, "Owner")
+    admin, admin_id, _ = make_user(client, "Admin")
+    member, member_id, _ = make_user(client, "Member")
+    stranger, stranger_id, _ = make_user(client, "Stranger")
+
+    # A channel: owner posts, others are audience.
+    chan = client.post("/chats/channel", headers=owner, json={"name": "News"}).json()
+    chan_id = chan["id"]
+    add = client.post(f"/chats/{chan_id}/members", headers=owner,
+                      json={"user_ids": [admin_id, member_id]})
+    assert add.status_code == 200, add.text
+
+    # Promote Admin with ONLY the "pin" right — no post, no invite.
+    r = client.patch(f"/chats/{chan_id}/members/{admin_id}", headers=owner,
+                     json={"role": "admin", "permissions": ["pin"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["permissions"] == ["pin"]
+
+    # Owner can post; the narrowed admin cannot (no "post" right).
+    post = client.post("/messages", headers=owner, json={"chat_id": chan_id, "text": "hello"})
+    assert post.status_code == 200
+    denied = client.post("/messages", headers=admin, json={"chat_id": chan_id, "text": "nope"})
+    assert denied.status_code == 403
+
+    # The admin CAN pin (has that right); can't add members (no "invite").
+    msg_id = post.json()["id"]
+    assert client.post(f"/messages/{msg_id}/pin", headers=admin).status_code == 200
+    assert client.post(f"/chats/{chan_id}/members", headers=admin,
+                       json={"user_ids": [stranger_id]}).status_code == 403
+
+    # A member reading the chat sees the admin's granted rights.
+    fetched = client.get(f"/chats/{chan_id}", headers=owner).json()
+    admin_member = next(m for m in fetched["members"] if m["id"] == admin_id)
+    assert admin_member["permissions"] == ["pin"]
+
+    # Promote to a FULL admin (no permissions list) — legacy behaviour, all rights.
+    client.patch(f"/chats/{chan_id}/members/{admin_id}", headers=owner, json={"role": "admin"})
+    assert client.post("/messages", headers=admin,
+                       json={"chat_id": chan_id, "text": "now i can"}).status_code == 200
+
+
+def test_group_info_can_be_edited_and_send_policy_enforced(client):
+    owner, owner_id, _ = make_user(client, "Owner")
+    member, member_id, _ = make_user(client, "Member")
+    group_id = client.post("/chats/group", headers=owner,
+                           json={"name": "Old Name", "member_ids": [member_id]}).json()["id"]
+
+    # Rename + description — admin only.
+    r = client.put(f"/chats/{group_id}/info", headers=owner,
+                   json={"name": "New Name", "description": "Now with a description"})
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "New Name"
+    assert r.json()["description"] == "Now with a description"
+    # A plain member can't rename it.
+    assert client.put(f"/chats/{group_id}/info", headers=member,
+                      json={"name": "Hacked"}).status_code == 403
+
+    # By default everyone can send.
+    assert client.post("/messages", headers=member,
+                       json={"chat_id": group_id, "text": "hi"}).status_code == 200
+
+    # Lock to admins-only — the member is now blocked, the owner still posts.
+    client.put(f"/chats/{group_id}/send-policy?admins_only=true", headers=owner)
+    assert client.post("/messages", headers=member,
+                       json={"chat_id": group_id, "text": "nope"}).status_code == 403
+    assert client.post("/messages", headers=owner,
+                       json={"chat_id": group_id, "text": "still me"}).status_code == 200
+
+    # Unlock — the member can send again.
+    client.put(f"/chats/{group_id}/send-policy?admins_only=false", headers=owner)
+    assert client.post("/messages", headers=member,
+                       json={"chat_id": group_id, "text": "back"}).status_code == 200
+
+
+def test_channel_post_comments_flow(client):
+    owner, owner_id, _ = make_user(client, "Owner")
+    sub, sub_id, _ = make_user(client, "Subscriber")
+
+    chan_id = client.post("/chats/channel", headers=owner, json={"name": "News"}).json()["id"]
+    client.post(f"/chats/{chan_id}/members", headers=owner, json={"user_ids": [sub_id]})
+    post = client.post("/messages", headers=owner, json={"chat_id": chan_id, "text": "Big update!"}).json()
+    post_id = post["id"]
+
+    # A subscriber (not an admin) can comment — that's the point of a discussion.
+    c1 = client.post(f"/messages/{post_id}/comments", headers=sub, json={"text": "Congrats!"})
+    assert c1.status_code == 200, c1.text
+    client.post(f"/messages/{post_id}/comments", headers=owner, json={"text": "Thanks!"})
+
+    # Comments come back oldest-first with author info; the post's count is bumped.
+    comments = client.get(f"/messages/{post_id}/comments", headers=sub).json()
+    assert [c["text"] for c in comments] == ["Congrats!", "Thanks!"]
+    assert comments[0]["user_name"] == "Subscriber"
+    fetched_post = next(m for m in client.get(f"/chats/{chan_id}/messages", headers=owner).json()
+                        if m["id"] == post_id)
+    assert fetched_post["comment_count"] == 2
+
+    # Author can delete their own; count drops.
+    assert client.delete(f"/comments/{comments[0]['id']}", headers=sub).status_code == 200
+    remaining = client.get(f"/messages/{post_id}/comments", headers=owner).json()
+    assert [c["text"] for c in remaining] == ["Thanks!"]
+
+    # A non-author, non-admin subscriber cannot delete someone else's comment.
+    assert client.delete(f"/comments/{remaining[0]['id']}", headers=sub).status_code == 403
+
+    # Turning the discussion off blocks new comments.
+    client.put(f"/chats/{chan_id}/comments-policy?enabled=false", headers=owner)
+    blocked = client.post(f"/messages/{post_id}/comments", headers=sub, json={"text": "late"})
+    assert blocked.status_code == 403
+
+
+def test_feedback_is_stored_and_readable_by_admin(client, monkeypatch):
+    import main
+    admin, admin_id, admin_username = make_user(client, "Boss")
+    monkeypatch.setattr(main, "SUPERADMIN_USERNAME", admin_username, raising=False)
+    db.execute("UPDATE users SET is_superadmin = 1 WHERE id = ?", (admin_id,))
+
+    reporter, _, _ = make_user(client, "Reporter")
+    r = client.post("/feedback", headers=reporter, json={
+        "answers": {"overall": "Good", "speed": "Fast"},
+        "comment": "Love the app!",
+    })
+    assert r.status_code == 200, r.text
+
+    # Empty submission is rejected.
+    empty = client.post("/feedback", headers=reporter, json={"answers": {}, "comment": "  "})
+    assert empty.status_code == 400
+
+    listed = client.get("/admin/feedback", headers=admin).json()
+    assert len(listed) == 1
+    assert listed[0]["answers"] == {"overall": "Good", "speed": "Fast"}
+    assert listed[0]["comment"] == "Love the app!"
+    assert listed[0]["user_name"] == "Reporter"
+
+    # A non-admin can't read the feedback inbox.
+    assert client.get("/admin/feedback", headers=reporter).status_code == 403
+
+
 def test_blue_tick_ignores_chatting_and_bad_referrals(client):
     # Chatting with lots of people no longer earns the badge on its own.
     alice, _, _ = make_user(client, "Alice")
@@ -317,6 +480,33 @@ def test_hiding_the_last_message_updates_the_chat_list_preview(client):
     # ...but Bob, who did not hide anything, still sees the real latest message.
     preview = next(c for c in client.get("/chats", headers=bob).json() if c["id"] == chat_id)
     assert preview["last_message"]["text"] == "second"
+
+
+def test_chat_list_is_ordered_by_newest_activity_not_seq(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    carol, carol_id, _ = make_user(client, "Carol")
+
+    bob_chat = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+    carol_chat = client.post(f"/chats/dm/{carol_id}", headers=alice).json()["id"]
+
+    # Pile several messages into Bob's chat first — this pushes its per-chat
+    # last_seq well above Carol's. Under the old "ORDER BY last_seq" this alone
+    # would wrongly keep Bob's chat on top forever.
+    for i in range(5):
+        client.post("/messages", headers=alice, json={"chat_id": bob_chat, "text": f"b{i}"})
+
+    # Then a single, LATER message to Carol. Carol's chat now has the most
+    # recent activity even though its last_seq is far lower than Bob's.
+    client.post("/messages", headers=alice, json={"chat_id": carol_chat, "text": "hi carol"})
+
+    order = [c["id"] for c in client.get("/chats", headers=alice).json()]
+    assert order.index(carol_chat) < order.index(bob_chat)
+
+    # A new message back in Bob's chat bumps it above Carol's again.
+    client.post("/messages", headers=alice, json={"chat_id": bob_chat, "text": "back to bob"})
+    order = [c["id"] for c in client.get("/chats", headers=alice).json()]
+    assert order.index(bob_chat) < order.index(carol_chat)
 
 
 def test_hidden_messages_are_excluded_from_search_and_pins(client):

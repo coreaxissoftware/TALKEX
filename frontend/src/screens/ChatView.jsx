@@ -5,7 +5,7 @@ import {
 } from "../api.js";
 import * as offlineDb from "../offlineDb.js";
 import {
-  Av, Button, ChatBackdrop, ContextMenu, EMOJIS, EMOJI_GROUPS, Field, G, I, SRow, Spinner, Toggle,
+  Av, Button, ChatBackdrop, ContextMenu, EMOJIS, EMOJI_GROUPS, Field, G, I, SRow, SocialLinks, Spinner, Toggle,
   clockTime, countdown, durationLabel, lastSeenLabel, localInputToUnix, whenLabel, useEnterToSend,
   useIsDesktop,
 } from "../ui.jsx";
@@ -20,6 +20,13 @@ import PhotoEditor from "../PhotoEditor.jsx";
 import QrView from "../QrView.jsx";
 // pdf.js is heavy; load the viewer/editor only when a PDF is actually opened.
 const PdfDoc = lazy(() => import("../PdfDoc.jsx"));
+
+// Granular admin rights, matching chatstore.ADMIN_PERMISSIONS on the backend.
+const ADMIN_PERMISSIONS = ["post", "edit", "delete", "pin", "invite"];
+const PERMISSION_LABELS = {
+  post: "Post messages", edit: "Edit others' messages", delete: "Delete messages",
+  pin: "Pin messages", invite: "Add members",
+};
 
 const SLOW_MODE_CHOICES = [
   { label: "Off", seconds: 0 },
@@ -91,6 +98,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   const [showPins, setShowPins] = useState(false);
   const [readState, setReadState] = useState([]);
   const [sheet, setSheet] = useState(null);       // 'schedule' | 'meeting' | 'timer' | 'poll' | 'info' | 'attach' | 'contact' | 'scanEdit' | 'mediaPreview'
+  const [commentsFor, setCommentsFor] = useState(null); // the channel post whose discussion thread is open
   const [scanFile, setScanFile] = useState(null); // the raw photo waiting in the scan-edit sheet
   const [mediaPreview, setMediaPreview] = useState(null); // {files, kindOverride} waiting in the caption sheet
   const [meetingUpdates, setMeetingUpdates] = useState({});
@@ -1170,6 +1178,9 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
                       signature={chat.signature_enabled && chat.type === "channel"
                         ? (members.find((m) => m.id === message.sender_id)?.name || "")
                         : ""}
+                      commentsOn={["channel", "community", "community_channel"].includes(chat.type)
+                        && chat.comments_enabled !== 0 && !message.deleted_at && !message.expired}
+                      onComments={() => setCommentsFor(message)}
                       onCallAgain={(kind) => onStartCall(kind)} onJoinMeeting={joinMeeting} toast={toast}/>
             </div>
           </div>
@@ -1328,6 +1339,11 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
                        onChanged={onChanged} onOpenChat={onOpenChat} onChatLocked={onChatLocked}
                        onLeft={() => { setSheet(null); onBack(); }}/>
       )}
+
+      {commentsFor && (
+        <CommentsSheet post={commentsFor} chat={chat} me={me} events={events}
+                       onClose={() => setCommentsFor(null)} toast={toast}/>
+      )}
     </div>
   );
 }
@@ -1359,6 +1375,13 @@ function applyEvent(messages, event) {
     case "reaction":
       return messages.map((m) =>
         m.id === event.message_id ? { ...m, reactions: event.reactions } : m);
+
+    case "comment_added":
+    case "comment_deleted":
+      // Keep the post's "💬 N" badge in sync live — the thread sheet handles
+      // the comment list itself.
+      return messages.map((m) =>
+        m.id === event.post_message_id ? { ...m, comment_count: event.comment_count } : m);
 
     default:
       return messages;
@@ -1777,7 +1800,7 @@ function LinkPreview({ text, mine }) {
 }
 
 function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead, isDelivered, signature,
-                  onLongPress, onVote, onForward, onOpenMedia, onCallAgain, onJoinMeeting, toast }) {
+                  commentsOn, onComments, onLongPress, onVote, onForward, onOpenMedia, onCallAgain, onJoinMeeting, toast }) {
   const mine = message.sender_id === me.id;
   const gone = message.deleted_at || message.expired;
 
@@ -1993,6 +2016,21 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead, is
 
         {message.reactions?.length > 0 && (
           <ReactionPills reactions={message.reactions} messageId={message.id}/>
+        )}
+
+        {/* Discussion comments button under a channel/community post. */}
+        {commentsOn && (
+          <div onClick={(e) => { e.stopPropagation(); onComments(); }} style={{
+            display: "inline-flex", alignItems: "center", gap: 6, marginTop: 6,
+            padding: "5px 12px", borderRadius: 16, cursor: "pointer",
+            background: G.dim, border: `1px solid ${G.border}`, color: G.accent,
+            fontSize: 12, fontWeight: 600,
+          }}>
+            {I.chat(G.accent, 14)}
+            {message.comment_count > 0
+              ? `${message.comment_count} comment${message.comment_count === 1 ? "" : "s"}`
+              : "Comment"}
+          </div>
         )}
       </div>
     </div>
@@ -4240,6 +4278,141 @@ const FOLDER_CHOICES = ["", "Work", "Family", "Friends"];
 
 const MANAGED_TYPES = ["group", "channel", "community", "community_channel"];
 
+/**
+ * The discussion thread under a single channel/community post (Telegram-style
+ * comments). Loads the post's comments, listens for comment_added/
+ * comment_deleted over the shared realtime `events` stream so it updates live
+ * while open, and lets anyone in the channel add a comment or remove their own
+ * (admins with the delete right can remove any).
+ */
+function CommentsSheet({ post, chat, me, events, onClose, toast }) {
+  const [comments, setComments] = useState(null);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const lastEvent = useRef(0);
+  const listBottom = useRef(null);
+  const canModerate = (chat.my_permissions || []).includes("delete") || chat.my_role === "owner";
+
+  useEffect(() => {
+    Chats.comments(post.id).then(setComments).catch(() => setComments([]));
+  }, [post.id]);
+
+  // Live updates for this post's thread from the shared event stream.
+  useEffect(() => {
+    const fresh = events.filter((event) => event._n > lastEvent.current
+      && event.post_message_id === post.id
+      && (event.type === "comment_added" || event.type === "comment_deleted"));
+    if (fresh.length === 0) return;
+    lastEvent.current = events[events.length - 1]._n;
+    setComments((current) => {
+      let next = current ? [...current] : [];
+      for (const event of fresh) {
+        if (event.type === "comment_added") {
+          if (!next.some((c) => c.id === event.comment.id)) next.push(event.comment);
+        } else {
+          next = next.filter((c) => c.id !== event.comment_id);
+        }
+      }
+      return next;
+    });
+  }, [events, post.id]);
+
+  async function send() {
+    const body = text.trim();
+    if (!body) return;
+    setBusy(true);
+    try {
+      const created = await Chats.addComment(post.id, body);
+      setText("");
+      // Optimistically add if the realtime event hasn't landed yet.
+      setComments((current) => (current || []).some((c) => c.id === created.id)
+        ? current : [...(current || []), created]);
+      setTimeout(() => listBottom.current?.scrollIntoView({ behavior: "smooth" }), 50);
+    } catch (problem) {
+      toast(problem.message || "Could not post comment");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(comment) {
+    try {
+      await Chats.deleteComment(comment.id);
+      setComments((current) => (current || []).filter((c) => c.id !== comment.id));
+    } catch (problem) {
+      toast(problem.message || "Could not delete comment");
+    }
+  }
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "#000000aa", zIndex: 55,
+      display: "flex", alignItems: "flex-end", justifyContent: "center",
+    }}>
+      <div onClick={(event) => event.stopPropagation()} style={{
+        width: "100%", maxWidth: 430, background: G.surface,
+        borderTopLeftRadius: 22, borderTopRightRadius: 22,
+        display: "flex", flexDirection: "column", height: "80vh",
+      }}>
+        <div style={{
+          padding: "16px 20px 12px", borderBottom: `1px solid ${G.border}`,
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+        }}>
+          <div style={{ fontSize: 16, fontWeight: 700 }}>
+            Comments{comments ? ` (${comments.length})` : ""}
+          </div>
+          <div onClick={onClose} style={{ cursor: "pointer", color: G.muted, fontSize: 20 }}>✕</div>
+        </div>
+
+        <div style={{ flex: 1, overflowY: "auto", padding: "12px 16px" }}>
+          {comments === null && <Spinner small/>}
+          {comments?.length === 0 && (
+            <div style={{ fontSize: 13, color: G.muted, textAlign: "center", padding: 24 }}>
+              No comments yet. Be the first to comment.
+            </div>
+          )}
+          {comments?.map((comment) => (
+            <div key={comment.id} style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+              <Av av={comment.user_avatar_letter} color={comment.user_color} size={32}
+                  photoId={comment.user_avatar_attachment_id}/>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>{comment.user_name}</span>
+                  <span style={{ fontSize: 10.5, color: G.muted }}>{whenLabel(comment.created_at)}</span>
+                </div>
+                <div style={{ fontSize: 13.5, color: G.text, wordBreak: "break-word", whiteSpace: "pre-wrap" }}>
+                  {comment.text}
+                </div>
+              </div>
+              {(comment.user_id === me.id || canModerate) && (
+                <div onClick={() => remove(comment)} style={{ cursor: "pointer", flexShrink: 0, padding: 2 }}
+                     title="Delete comment">{I.trash(G.muted, 15)}</div>
+              )}
+            </div>
+          ))}
+          <div ref={listBottom}/>
+        </div>
+
+        <div style={{
+          display: "flex", gap: 8, padding: "10px 14px",
+          borderTop: `1px solid ${G.border}`, alignItems: "flex-end",
+        }}>
+          <textarea value={text} onChange={(e) => setText(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+                    placeholder="Write a comment…" rows={1} style={{
+            flex: 1, padding: "9px 12px", borderRadius: 18, resize: "none", maxHeight: 100,
+            background: G.dim, border: `1px solid ${G.border}`, color: G.text,
+            fontSize: 14, outline: "none", fontFamily: "inherit",
+          }}/>
+          <Button onClick={send} disabled={busy || !text.trim()} style={{ padding: "9px 16px" }}>
+            Send
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, onOpenChat,
                         onChatLocked }) {
   const [folder, setFolder] = useState(chat.folder || "");
@@ -4260,11 +4433,17 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
   const [memberQuery, setMemberQuery] = useState("");
   const [slowModeSecs, setSlowModeSecs] = useState(chat.slow_mode_secs || 0);
   const [reactionsOn, setReactionsOn] = useState(chat.reactions_enabled !== 0);
+  const [commentsOn, setCommentsOn] = useState(chat.comments_enabled !== 0);
+  const [adminsOnlySend, setAdminsOnlySend] = useState(chat.send_policy === "admins");
+  const [editingInfo, setEditingInfo] = useState(false);
+  const [infoForm, setInfoForm] = useState({ name: chat.name || "", description: chat.description || "" });
   const [handle, setHandle] = useState(chat.public_username || "");
   const [handleSaving, setHandleSaving] = useState(false);
   const [approvalOn, setApprovalOn] = useState(Boolean(chat.require_approval));
   const [signatureOn, setSignatureOn] = useState(Boolean(chat.signature_enabled));
   const [pendingReqs, setPendingReqs] = useState([]);
+  const [permEditFor, setPermEditFor] = useState(null);   // member id whose granular admin rights are being edited
+  const [permDraft, setPermDraft] = useState([]);          // the rights selected in that editor
   const lastMemberEvent = useRef(0);
 
   // DM-only: the other person's profile plus whether they're already a
@@ -4386,13 +4565,26 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
     }
   }
 
-  async function setRole(userId, role) {
+  async function setRole(userId, role, permissions) {
     try {
-      await Chats.setMemberRole(chat.id, userId, role);
+      await Chats.setMemberRole(chat.id, userId, role, permissions);
+      setPermEditFor(null);
       reloadFull();
     } catch (problem) {
       toast(problem.message || "Could not change role");
     }
+  }
+
+  function openPermEditor(member) {
+    // Pre-fill with the admin's current rights, or all of them when first
+    // promoting a plain member (the sensible "full admin" default).
+    setPermDraft(member.role === "admin" && member.permissions ? [...member.permissions] : [...ADMIN_PERMISSIONS]);
+    setPermEditFor(member.id);
+  }
+
+  function togglePerm(perm) {
+    setPermDraft((current) =>
+      current.includes(perm) ? current.filter((p) => p !== perm) : [...current, perm]);
   }
 
   async function setMuteUntil(muted_until) {
@@ -4425,6 +4617,21 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
     onChanged();
   }
 
+  async function saveInfo() {
+    if (!infoForm.name.trim()) { toast("Name cannot be empty"); return; }
+    try {
+      await Chats.updateInfo(chat.id, {
+        name: infoForm.name.trim(), description: infoForm.description.trim(),
+      });
+      setEditingInfo(false);
+      reloadFull();
+      onChanged();
+      toast("Group info updated");
+    } catch (problem) {
+      toast(problem.message || "Could not update info");
+    }
+  }
+
   async function leave() {
     if (!confirm(`Leave ${chat.name || "this chat"}?`)) return;
     setBusy(true);
@@ -4452,6 +4659,15 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
         </div>
       </div>
 
+      {isDm && peerProfile?.bio && (
+        <div style={{ fontSize: 13.5, color: G.text, marginBottom: 12, lineHeight: 1.4 }}>
+          {peerProfile.bio}
+        </div>
+      )}
+
+      {/* The peer's social links, same brand chips their own profile shows. */}
+      {isDm && <SocialLinks profile={peerProfile} style={{ marginBottom: 14 }}/>}
+
       {/* E2EE badge in info sheet */}
       <div style={{
         display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", marginBottom: 12,
@@ -4465,6 +4681,40 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
           </div>
         </div>
       </div>
+
+      {/* Group/channel/community name + description, editable by admins. */}
+      {MANAGED_TYPES.includes(chat.type) && (
+        editingInfo ? (
+          <div style={{ marginBottom: 14 }}>
+            <Field label="Name" value={infoForm.name}
+                   onChange={(e) => setInfoForm({ ...infoForm, name: e.target.value })}/>
+            <div style={{ fontSize: 12.5, color: G.sub, margin: "6px 0 4px" }}>Description</div>
+            <textarea value={infoForm.description} rows={3}
+                      onChange={(e) => setInfoForm({ ...infoForm, description: e.target.value })}
+                      placeholder="What's this group about?" style={{
+              width: "100%", padding: "9px 12px", borderRadius: 12, resize: "vertical",
+              background: G.dim, border: `1px solid ${G.border}`, color: G.text,
+              fontSize: 13.5, outline: "none", boxSizing: "border-box", fontFamily: "inherit",
+            }}/>
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <Button onClick={saveInfo} style={{ flex: 1 }}>Save</Button>
+              <Button variant="ghost" onClick={() => setEditingInfo(false)} style={{ flex: 1 }}>Cancel</Button>
+            </div>
+          </div>
+        ) : (
+          <div style={{ marginBottom: 14 }}>
+            {chat.description && (
+              <div style={{ fontSize: 13.5, color: G.text, marginBottom: 8, lineHeight: 1.45 }}>
+                {chat.description}
+              </div>
+            )}
+            {canManage && (
+              <SRow icon={I.edit(G.accent, 18)} label="Edit group info" sub="Name and description"
+                    onClick={() => { setInfoForm({ name: chat.name || "", description: chat.description || "" }); setEditingInfo(true); }}/>
+            )}
+          </div>
+        )
+      )}
 
       {isDm && (
         editingContact ? (
@@ -4648,6 +4898,54 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
         </div>
       )}
 
+      {chat.type === "group" && canManage && (
+        <div style={{
+          padding: "14px 4px", borderTop: `1px solid ${G.border}`,
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+        }}>
+          <div>
+            <div style={{ fontSize: 13.5 }}>Only admins can send messages</div>
+            <div style={{ fontSize: 11.5, color: G.muted }}>
+              Members can read but not post
+            </div>
+          </div>
+          <Toggle on={adminsOnlySend} onChange={async (value) => {
+            setAdminsOnlySend(value);
+            try {
+              await Chats.setSendPolicy(chat.id, value);
+              onChanged?.();
+            } catch (problem) {
+              setAdminsOnlySend(!value);
+              toast(problem.message || "Could not update send policy");
+            }
+          }}/>
+        </div>
+      )}
+
+      {["channel", "community"].includes(chat.type) && canManage && (
+        <div style={{
+          padding: "14px 4px", borderTop: `1px solid ${G.border}`,
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+        }}>
+          <div>
+            <div style={{ fontSize: 13.5 }}>Discussion (comments)</div>
+            <div style={{ fontSize: 11.5, color: G.muted }}>
+              Let people comment on your posts
+            </div>
+          </div>
+          <Toggle on={commentsOn} onChange={async (value) => {
+            setCommentsOn(value);
+            try {
+              await Chats.setCommentsPolicy(chat.id, value);
+              onChanged?.();
+            } catch (problem) {
+              setCommentsOn(!value);
+              toast(problem.message || "Could not update comments");
+            }
+          }}/>
+        </div>
+      )}
+
       {chat.type === "channel" && canManage && (
         <div style={{ padding: "14px 4px", borderTop: `1px solid ${G.border}` }}>
           <div style={{ fontSize: 13.5, marginBottom: 4 }}>Public link</div>
@@ -4777,34 +5075,65 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
 
           {!full && <Spinner small/>}
           {full?.members.filter((m) => m.name.toLowerCase().includes(memberQuery.toLowerCase())).map((member) => (
-            <div key={member.id} style={{
-              display: "flex", alignItems: "center", gap: 10, padding: "7px 4px",
-              borderBottom: `1px solid ${G.border}`,
-            }}>
-              <Av av={member.avatar_letter} color={member.color} size={30} photoId={member.avatar_attachment_id}/>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13.5 }}>
-                  {member.name}{member.id === me.id ? " (you)" : ""}
+            <div key={member.id} style={{ borderBottom: `1px solid ${G.border}` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 4px" }}>
+                <Av av={member.avatar_letter} color={member.color} size={30} photoId={member.avatar_attachment_id}/>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13.5 }}>
+                    {member.name}{member.id === me.id ? " (you)" : ""}
+                  </div>
+                  <div style={{ fontSize: 11, color: G.muted, textTransform: "capitalize" }}>
+                    {member.role}
+                    {member.role === "admin" && member.permissions
+                      && member.permissions.length < ADMIN_PERMISSIONS.length
+                      && ` · ${member.permissions.length} rights`}
+                  </div>
                 </div>
-                <div style={{ fontSize: 11, color: G.muted, textTransform: "capitalize" }}>
-                  {member.role}
-                </div>
+
+                {/* Only the owner grants/revokes admin. Nobody manages the owner
+                    from here — that only changes by them leaving. */}
+                {myRole === "owner" && member.role === "member" && member.id !== me.id && (
+                  <Button variant="ghost" style={{ padding: "5px 10px", fontSize: 11 }}
+                          onClick={() => openPermEditor(member)}>Make admin</Button>
+                )}
+                {myRole === "owner" && member.role === "admin" && (
+                  <>
+                    <Button variant="ghost" style={{ padding: "5px 8px", fontSize: 11 }}
+                            onClick={() => openPermEditor(member)}>Rights</Button>
+                    <Button variant="ghost" style={{ padding: "5px 8px", fontSize: 11 }}
+                            onClick={() => setRole(member.id, "member")}>Remove admin</Button>
+                  </>
+                )}
+                {canManage && member.role !== "owner" && member.id !== me.id &&
+                 (myRole === "owner" || member.role !== "admin") && (
+                  <Button variant="danger" style={{ padding: "5px 8px", fontSize: 11 }}
+                          onClick={() => removeMember(member.id)}>Remove</Button>
+                )}
               </div>
 
-              {/* Only the owner grants/revokes admin. Nobody manages the owner
-                  from here — that only changes by them leaving. */}
-              {myRole === "owner" && member.role === "member" && (
-                <Button variant="ghost" style={{ padding: "5px 10px", fontSize: 11 }}
-                        onClick={() => setRole(member.id, "admin")}>Make admin</Button>
-              )}
-              {myRole === "owner" && member.role === "admin" && (
-                <Button variant="ghost" style={{ padding: "5px 10px", fontSize: 11 }}
-                        onClick={() => setRole(member.id, "member")}>Remove admin</Button>
-              )}
-              {canManage && member.role !== "owner" && member.id !== me.id &&
-               (myRole === "owner" || member.role !== "admin") && (
-                <Button variant="danger" style={{ padding: "5px 10px", fontSize: 11 }}
-                        onClick={() => removeMember(member.id)}>Remove</Button>
+              {/* Granular admin-rights editor — owner picks exactly what this
+                  admin may do (post / edit / delete / pin / add members). */}
+              {permEditFor === member.id && (
+                <div style={{ padding: "4px 4px 12px" }}>
+                  {ADMIN_PERMISSIONS.map((perm) => (
+                    <label key={perm} style={{
+                      display: "flex", alignItems: "center", gap: 8, padding: "5px 2px",
+                      fontSize: 12.5, cursor: "pointer",
+                    }}>
+                      <input type="checkbox" checked={permDraft.includes(perm)}
+                             onChange={() => togglePerm(perm)}/>
+                      {PERMISSION_LABELS[perm]}
+                    </label>
+                  ))}
+                  <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                    <Button style={{ flex: 1, padding: "6px", fontSize: 12 }}
+                            onClick={() => setRole(member.id, "admin", permDraft)}>
+                      Save rights
+                    </Button>
+                    <Button variant="ghost" style={{ flex: 1, padding: "6px", fontSize: 12 }}
+                            onClick={() => setPermEditFor(null)}>Cancel</Button>
+                  </div>
+                </div>
               )}
             </div>
           ))}
