@@ -411,8 +411,12 @@ export default function App() {
       return;
     }
 
-    // Anything that changes a chat's last message or unread count.
-    if (["message", "message_deleted", "message_expired", "read"].includes(event.type)) {
+    // Anything that changes a chat's last message or unread count — plus a
+    // rename / new photo / owner change / membership change, so the open chat's
+    // header (name & photo come from the chats list) updates live instead of
+    // only on reopen.
+    if (["message", "message_deleted", "message_expired", "read",
+         "chat_updated", "chat_owner_changed", "members_changed"].includes(event.type)) {
       reloadChatsSoon();
     }
 

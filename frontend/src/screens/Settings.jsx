@@ -849,7 +849,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
                 onClick={() => setHelpView("blog")}/>
           <SRow icon={I.shield(G.accent, 18)} label="Terms and privacy"
                 sub="How TalkEx handles your data"
-                onClick={() => window.open(`${window.location.origin}/privacy`, "_blank")}/>
+                onClick={() => setHelpView("privacy")}/>
 
           <div style={{ marginTop: 14, marginBottom: 6, fontSize: 13, fontWeight: 700, color: G.sub }}>
             More from CoreAxis
@@ -869,6 +869,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
 
       {helpView === "feedback" && <FeedbackForm onClose={() => setHelpView(null)} toast={toast}/>}
       {helpView === "blog" && <BlogSheet onClose={() => setHelpView(null)}/>}
+      {helpView === "privacy" && <PrivacySheet onClose={() => setHelpView(null)}/>}
 
       <Section id="account" icon={I.logOut(G.accent, 20)} title="Account" sub={me.phone || "Sign out, deactivate or delete"}
                activeSection={activeSection} onOpen={setActiveSection}
@@ -2353,6 +2354,73 @@ function BlogSheet({ onClose }) {
         ))}
         <div style={{ fontSize: 12, color: G.muted, textAlign: "center", marginTop: 16 }}>
           More stories coming soon — TalkEx, made from Bihar 💙💚
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Terms & privacy ──────────────────────────────────────────────────────────
+
+const PRIVACY_SECTIONS = [
+  {
+    title: "The short version",
+    body: "TalkEx is a messenger built by CoreAxis. We collect only what the app needs to work — your account details and the messages, calls and media you choose to send. Your chats and calls are end-to-end encrypted, and we never sell your data.",
+  },
+  {
+    title: "What we collect",
+    body: "Your phone number and profile details (name, photo, bio, links) that you provide; the messages, media, status updates and call records you create in the app; and basic technical data such as your last-seen time and device connection needed to deliver messages.",
+  },
+  {
+    title: "How your messages are protected",
+    body: "Messages and calls are end-to-end encrypted — only you and the people in the conversation can read or hear them. We can't read your message content. Media you send is stored only to deliver it and is removed when no longer needed.",
+  },
+  {
+    title: "What we never do",
+    body: "We do not sell your personal data, we do not share it with advertisers, and we do not read your private messages. Your contacts are used only to help you find people who are already on TalkEx.",
+  },
+  {
+    title: "Your choices",
+    body: "You control your privacy from Settings → Privacy: turn last-seen and read receipts on or off, hide your phone number, and control who can call you. You can deactivate or permanently delete your account at any time from Settings → Account.",
+  },
+  {
+    title: "Terms of use",
+    body: "TalkEx is provided as-is for personal and business communication. Don't use it to send spam, harass others, or share illegal content. Accounts that break these rules may be limited or removed. Using TalkEx means you agree to these terms.",
+  },
+  {
+    title: "Contact",
+    body: "Questions about your data or these terms? Email support@coreaxis.cloud. TalkEx is a product of CoreAxis (coreaxis.cloud).",
+  },
+];
+
+function PrivacySheet({ onClose }) {
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "#000000aa", zIndex: 60,
+      display: "flex", alignItems: "flex-end", justifyContent: "center",
+    }}>
+      <div onClick={(event) => event.stopPropagation()} style={{
+        width: "100%", maxWidth: 430, background: G.surface, padding: 20,
+        borderTopLeftRadius: 22, borderTopRightRadius: 22,
+        maxHeight: "85vh", overflowY: "auto",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+          <div style={{ fontSize: 18, fontWeight: 800 }}>Terms and privacy</div>
+          <div onClick={onClose} style={{ cursor: "pointer", color: G.muted, fontSize: 20 }}>✕</div>
+        </div>
+        <div style={{ fontSize: 11.5, color: G.muted, marginBottom: 10 }}>
+          Last updated 2026 · TalkEx by CoreAxis
+        </div>
+        {PRIVACY_SECTIONS.map((section) => (
+          <div key={section.title} style={{
+            padding: "14px 0", borderBottom: `1px solid ${G.border}`,
+          }}>
+            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>{section.title}</div>
+            <div style={{ fontSize: 13.5, color: G.text, lineHeight: 1.55 }}>{section.body}</div>
+          </div>
+        ))}
+        <div style={{ fontSize: 12, color: G.muted, textAlign: "center", marginTop: 16 }}>
+          TalkEx — Made from Bihar, connecting the world 💙💚
         </div>
       </div>
     </div>

@@ -618,7 +618,8 @@ def test_a_moderator_cannot_unsend_someone_elses_message_only_delete_it_visibly(
     assert allowed.status_code == 200
 
     view = client.get(f"/chats/{group['id']}/messages", headers=bob).json()
-    assert view[0]["deleted_at"] is not None
+    deleted = next(m for m in view if m["id"] == message["id"])
+    assert deleted["deleted_at"] is not None
 
 
 def test_delete_mode_must_be_valid(client):
@@ -1006,7 +1007,10 @@ def test_scheduled_message_fails_if_sender_left_the_chat(client):
 
     run_tick(send_at + 1)
 
-    assert client.get(f"/chats/{group_id}/messages", headers=bob).json() == []
+    # Only the group's own activity notes remain — the scheduled "still here?"
+    # was never posted (the sender had left).
+    posted = client.get(f"/chats/{group_id}/messages", headers=bob).json()
+    assert [m for m in posted if m["kind"] != "system"] == []
     failed = next(s for s in client.get("/scheduled", headers=alice).json()
                   if s["id"] == item["id"])
     assert failed["status"] == "failed"
@@ -3566,6 +3570,22 @@ def make_group(client, owner_headers, member_ids, name="Team"):
                        json={"name": name, "member_ids": member_ids}).json()["id"]
 
 
+# Frames that legitimately interleave with call signalling on a real socket but
+# aren't part of the call handshake: a group now carries activity/system
+# messages, so a peer connecting triggers a delivery-backfill "delivered" frame,
+# and presence/typing flow independently. Call tests skip past these to assert
+# on the next actual call frame — exactly what the frontend does by switching on
+# event type.
+_NON_CALL_FRAMES = {"delivered", "message", "read", "typing", "presence"}
+
+
+def recv_call(socket):
+    while True:
+        frame = socket.receive_json()
+        if frame["type"] not in _NON_CALL_FRAMES:
+            return frame
+
+
 def test_starting_a_group_call_rings_other_members(client):
     alice, alice_id, alice_name = make_user(client, "Alice")
     bob, bob_id, bob_name = make_user(client, "Bob")
@@ -3578,11 +3598,11 @@ def test_starting_a_group_call_rings_other_members(client):
             alice_socket.send_json({
                 "type": "group_call_start", "chat_id": chat_id, "call_kind": "voice",
             })
-            roster = alice_socket.receive_json()
+            roster = recv_call(alice_socket)
             assert roster["type"] == "group_call_roster"
             assert roster["participants"] == []   # Alice is first in
 
-            invite = bob_socket.receive_json()
+            invite = recv_call(bob_socket)
             assert invite["type"] == "group_call_invite"
             assert invite["user_id"] == alice_id
             assert invite["call_kind"] == "voice"
@@ -3598,17 +3618,17 @@ def test_joining_an_existing_group_call_gets_the_roster(client):
             assert alice_socket.receive_json()["type"] == "presence"
 
             alice_socket.send_json({"type": "group_call_start", "chat_id": chat_id, "call_kind": "video"})
-            assert alice_socket.receive_json()["type"] == "group_call_roster"
+            assert recv_call(alice_socket)["type"] == "group_call_roster"
             # Bob was already connected and listening, so Alice starting the
             # call rings him — that arrives before anything he sends himself.
-            assert bob_socket.receive_json()["type"] == "group_call_invite"
+            assert recv_call(bob_socket)["type"] == "group_call_invite"
 
             bob_socket.send_json({"type": "group_call_start", "chat_id": chat_id, "call_kind": "video"})
-            roster = bob_socket.receive_json()
+            roster = recv_call(bob_socket)
             assert roster["type"] == "group_call_roster"
             assert [p["user_id"] for p in roster["participants"]] == [alice_id]
 
-            joined = alice_socket.receive_json()
+            joined = recv_call(alice_socket)
             assert joined["type"] == "group_call_participant_joined"
             assert joined["user_id"] == bob_id
 
@@ -3622,31 +3642,31 @@ def test_group_call_signaling_relay(client):
         with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket:
             assert alice_socket.receive_json()["type"] == "presence"
             alice_socket.send_json({"type": "group_call_start", "chat_id": chat_id, "call_kind": "voice"})
-            alice_socket.receive_json()  # group_call_roster
-            assert bob_socket.receive_json()["type"] == "group_call_invite"
+            recv_call(alice_socket)  # group_call_roster
+            assert recv_call(bob_socket)["type"] == "group_call_invite"
             bob_socket.send_json({"type": "group_call_start", "chat_id": chat_id, "call_kind": "voice"})
-            bob_socket.receive_json()  # group_call_roster
-            alice_socket.receive_json()  # group_call_participant_joined
+            recv_call(bob_socket)  # group_call_roster
+            recv_call(alice_socket)  # group_call_participant_joined
 
             bob_socket.send_json({
                 "type": "group_call_offer", "chat_id": chat_id, "to": alice_id,
                 "sdp": {"type": "offer", "sdp": "v=0..."},
             })
-            offer = alice_socket.receive_json()
+            offer = recv_call(alice_socket)
             assert offer["type"] == "group_call_offer" and offer["from"] == bob_id
 
             alice_socket.send_json({
                 "type": "group_call_answer", "chat_id": chat_id, "to": bob_id,
                 "sdp": {"type": "answer", "sdp": "v=0..."},
             })
-            answer = bob_socket.receive_json()
+            answer = recv_call(bob_socket)
             assert answer["type"] == "group_call_answer" and answer["from"] == alice_id
 
             bob_socket.send_json({
                 "type": "group_call_ice", "chat_id": chat_id, "to": alice_id,
                 "candidate": {"candidate": "candidate:1 1 UDP 1 1.2.3.4 5000 typ host"},
             })
-            ice = alice_socket.receive_json()
+            ice = recv_call(alice_socket)
             assert ice["type"] == "group_call_ice" and ice["from"] == bob_id
 
 
@@ -3659,14 +3679,14 @@ def test_leaving_a_group_call_notifies_remaining_participants(client):
         with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket:
             assert alice_socket.receive_json()["type"] == "presence"
             alice_socket.send_json({"type": "group_call_start", "chat_id": chat_id, "call_kind": "voice"})
-            alice_socket.receive_json()  # group_call_roster
-            assert bob_socket.receive_json()["type"] == "group_call_invite"
+            recv_call(alice_socket)  # group_call_roster
+            assert recv_call(bob_socket)["type"] == "group_call_invite"
             bob_socket.send_json({"type": "group_call_start", "chat_id": chat_id, "call_kind": "voice"})
-            bob_socket.receive_json()  # group_call_roster
-            alice_socket.receive_json()  # group_call_participant_joined
+            recv_call(bob_socket)  # group_call_roster
+            recv_call(alice_socket)  # group_call_participant_joined
 
             bob_socket.send_json({"type": "group_call_leave", "chat_id": chat_id})
-            left = alice_socket.receive_json()
+            left = recv_call(alice_socket)
             assert left["type"] == "group_call_participant_left" and left["user_id"] == bob_id
 
 
@@ -3684,20 +3704,19 @@ def test_disconnecting_mid_call_removes_the_participant_after_the_grace_window(c
         with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket:
             assert alice_socket.receive_json()["type"] == "presence"
             alice_socket.send_json({"type": "group_call_start", "chat_id": chat_id, "call_kind": "voice"})
-            alice_socket.receive_json()  # group_call_roster
-            assert bob_socket.receive_json()["type"] == "group_call_invite"
+            recv_call(alice_socket)  # group_call_roster
+            assert recv_call(bob_socket)["type"] == "group_call_invite"
             bob_socket.send_json({"type": "group_call_start", "chat_id": chat_id, "call_kind": "voice"})
-            bob_socket.receive_json()  # group_call_roster
-            alice_socket.receive_json()  # group_call_participant_joined
+            recv_call(bob_socket)  # group_call_roster
+            recv_call(alice_socket)  # group_call_participant_joined
 
         # Bob's socket just closed (the `with` block exited) without an
         # explicit group_call_leave. The ordinary online/offline presence
-        # update fires immediately (unrelated to the call-specific grace
-        # window — see the finally block in websocket_endpoint); drain that
-        # first before the call's own disconnect cleanup catches up, once
-        # the (here, near-instant) grace window has passed.
-        assert alice_socket.receive_json()["type"] == "presence"
-        left = alice_socket.receive_json()
+        # update and delivery-backfill frames fire immediately (unrelated to the
+        # call-specific grace window — see the finally block in
+        # websocket_endpoint); recv_call skips past them to the call's own
+        # disconnect cleanup, once the (here, near-instant) grace window passes.
+        left = recv_call(alice_socket)
         assert left["type"] == "group_call_participant_left" and left["user_id"] == bob_id
 
 
@@ -3714,13 +3733,13 @@ def test_a_quick_reconnect_mid_call_resumes_silently_within_the_grace_window(cli
 
     with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
         alice_socket.send_json({"type": "group_call_start", "chat_id": chat_id, "call_kind": "voice"})
-        alice_socket.receive_json()  # group_call_roster
+        recv_call(alice_socket)  # group_call_roster
 
         with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket:
             assert alice_socket.receive_json()["type"] == "presence"
             bob_socket.send_json({"type": "group_call_start", "chat_id": chat_id, "call_kind": "voice"})
-            bob_socket.receive_json()  # group_call_roster
-            alice_socket.receive_json()  # group_call_participant_joined
+            recv_call(bob_socket)  # group_call_roster
+            recv_call(alice_socket)  # group_call_participant_joined
 
         # Bob's socket dropped — the ordinary online/offline presence
         # update fires immediately (see the finally block in
@@ -3731,16 +3750,18 @@ def test_a_quick_reconnect_mid_call_resumes_silently_within_the_grace_window(cli
         with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}") as bob_socket_2:
             assert alice_socket.receive_json()["type"] == "presence"  # bob's back online
             bob_socket_2.send_json({"type": "group_call_start", "chat_id": chat_id, "call_kind": "voice"})
-            resumed_roster = bob_socket_2.receive_json()
+            resumed_roster = recv_call(bob_socket_2)
             assert resumed_roster["type"] == "group_call_roster"
             # Alice, not Bob's own stale entry from before the drop.
             assert [p["user_id"] for p in resumed_roster["participants"]] == [alice_id]
 
             # Alice was never told Bob left, and the reconnect itself isn't
             # re-announced as a fresh join either — nothing group-call
-            # related should be waiting on her socket at all.
+            # related should be waiting on her socket at all. recv_call skips
+            # the benign delivery-backfill frame but NOT a stray call frame, so
+            # a real leaked participant_left would still fail this.
             alice_socket.send_json({"type": "ping"})
-            next_event = alice_socket.receive_json()
+            next_event = recv_call(alice_socket)
             assert next_event["type"] == "pong"
 
 
@@ -4781,6 +4802,70 @@ def test_setting_and_removing_a_profile_photo(client):
     removed = client.delete("/me/avatar", headers=alice)
     assert removed.status_code == 200
     assert removed.json()["avatar_attachment_id"] is None
+
+
+def test_group_activity_generates_system_messages(client):
+    owner, owner_id, _ = make_user(client, "Owner")
+    bob, bob_id, _ = make_user(client, "Bob")
+    carol, carol_id, _ = make_user(client, "Carol")
+
+    group_id = client.post("/chats/group", headers=owner,
+                           json={"name": "Team", "member_ids": [bob_id]}).json()["id"]
+
+    def system_texts():
+        msgs = client.get(f"/chats/{group_id}/messages", headers=owner).json()
+        return [m["text"] for m in msgs if m["kind"] == "system"]
+
+    texts = system_texts()
+    assert any("created this group" in t for t in texts)
+    assert any("added Bob" in t for t in texts)
+
+    client.post(f"/chats/{group_id}/members", headers=owner, json={"user_ids": [carol_id]})
+    client.put(f"/chats/{group_id}/info", headers=owner, json={"name": "Team Rocket"})
+    client.delete(f"/chats/{group_id}/members/{bob_id}", headers=owner)
+
+    texts = system_texts()
+    assert any("added Carol" in t for t in texts)
+    assert any('changed the group name to "Team Rocket"' in t for t in texts)
+    assert any("removed Bob" in t for t in texts)
+
+    # Leaving announces it too.
+    client.post(f"/chats/{group_id}/leave", headers=carol)
+    assert any("Carol left" in t for t in system_texts())
+
+
+def test_ownership_can_be_transferred_by_the_owner_only(client):
+    owner, owner_id, _ = make_user(client, "Owner")
+    bob, bob_id, _ = make_user(client, "Bob")
+    group_id = client.post("/chats/group", headers=owner,
+                           json={"name": "Team", "member_ids": [bob_id]}).json()["id"]
+
+    # A member can't seize ownership.
+    assert client.post(f"/chats/{group_id}/members/{owner_id}/make-owner",
+                       headers=bob).status_code == 403
+
+    # The owner hands it to Bob; Bob is owner, the old owner is now an admin.
+    r = client.post(f"/chats/{group_id}/members/{bob_id}/make-owner", headers=owner)
+    assert r.status_code == 200
+    members = {m["id"]: m for m in client.get(f"/chats/{group_id}", headers=bob).json()["members"]}
+    assert members[bob_id]["role"] == "owner"
+    assert members[owner_id]["role"] == "admin"
+
+
+def test_common_groups_lists_shared_groups(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    carol, carol_id, _ = make_user(client, "Carol")
+
+    shared = client.post("/chats/group", headers=alice,
+                         json={"name": "Shared", "member_ids": [bob_id]}).json()["id"]
+    client.post("/chats/group", headers=alice,
+                json={"name": "Alice+Carol", "member_ids": [carol_id]})
+
+    common = client.get(f"/users/{bob_id}/common-groups", headers=alice).json()
+    ids = [c["id"] for c in common]
+    assert shared in ids
+    assert len(ids) == 1  # only the group they actually share
 
 
 def test_ephemeral_call_room_is_created_but_hidden_from_chat_lists(client):

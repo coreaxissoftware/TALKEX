@@ -2043,6 +2043,8 @@ async def set_chat_avatar(chat_id: str, file: UploadFile = File(...),
         uploads.delete(previous_id)
     await hub.send_to_chat(chat_id, {"type": "chat_updated", "chat_id": chat_id})
     await hub.send_to_chat(chat_id, {"type": "members_changed", "chat_id": chat_id})
+    if not chat["ephemeral"]:
+        await post_system_message(chat_id, user["id"], f"{user['name']} changed the group photo")
     return get_chat(chat_id, user)
 
 
@@ -2740,7 +2742,7 @@ def create_dm(other_user_id: str, user: dict = Depends(current_user)):
 
 
 @app.post("/chats/group")
-def create_group(request: CreateGroupRequest, user: dict = Depends(current_user)):
+async def create_group(request: CreateGroupRequest, user: dict = Depends(current_user)):
     member_ids = set(request.member_ids) - {user["id"]}
     if len(member_ids) + 1 > MAX_GROUP_MEMBERS:  # +1 for the owner
         raise HTTPException(400, f"A group can have at most {MAX_GROUP_MEMBERS} members")
@@ -2769,6 +2771,12 @@ def create_group(request: CreateGroupRequest, user: dict = Depends(current_user)
                 (chat_id, member_id, now),
             )
 
+    await post_system_message(chat_id, user["id"], f"{user['name']} created this group")
+    if member_ids:
+        names = _display_names(list(member_ids))
+        if names:
+            await post_system_message(
+                chat_id, user["id"], f"{user['name']} added {_join_names(names)}")
     return get_chat(chat_id, user)
 
 
@@ -3228,7 +3236,11 @@ def deny_join_request(chat_id: str, req_user_id: str, user: dict = Depends(curre
 
 @app.post("/chats/{chat_id}/leave")
 async def leave_chat(chat_id: str, user: dict = Depends(current_user)):
-    require_member(chat_id, user["id"])
+    chat = require_member(chat_id, user["id"])
+    # Announce the departure BEFORE removing the row, so the leaver is still a
+    # member the broadcast reaches and the note lands for everyone.
+    if chat["type"] in ("group", "channel", "community") and not chat["ephemeral"]:
+        await post_system_message(chat_id, user["id"], f"{user['name']} left")
     db.execute("DELETE FROM chat_members WHERE chat_id = ? AND user_id = ?", (chat_id, user["id"]))
 
     # If the person leaving ran the chat, someone has to take over — otherwise
@@ -3323,6 +3335,41 @@ def require_permission(chat_id: str, user_id: str, perm: str, message: str):
         raise HTTPException(403, message)
 
 
+async def post_system_message(chat_id: str, actor_id: str, text: str):
+    """
+    Write and broadcast an inline "activity" message — the centred grey notes
+    WhatsApp/Telegram show for group events ("Alice added Bob", "Carol changed
+    the group name", "Dan left"). Stored as an ordinary message with kind
+    'system' and silent=True so it never triggers a push; the frozen text is
+    computed at the moment of the event.
+    """
+    message, _ = chatstore.insert_message(
+        chat_id=chat_id, sender_id=actor_id, kind="system", text=text, silent=True)
+    await hub.send_to_chat(chat_id, {"type": "message", "message": message})
+    return message
+
+
+def _display_names(user_ids: list[str]) -> list[str]:
+    """Names for a set of user ids, for composing an activity line."""
+    if not user_ids:
+        return []
+    rows = db.query_all(
+        "SELECT id, name FROM users WHERE id IN ({})".format(",".join("?" for _ in user_ids)),
+        tuple(user_ids),
+    )
+    by_id = {row["id"]: row["name"] for row in rows}
+    return [by_id[uid] for uid in user_ids if uid in by_id]
+
+
+def _join_names(names: list[str]) -> str:
+    """"Alice", "Alice and Bob", "Alice, Bob and Carol"."""
+    if len(names) <= 1:
+        return names[0] if names else ""
+    if len(names) == 2:
+        return f"{names[0]} and {names[1]}"
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
 @app.post("/chats/{chat_id}/members")
 async def add_members(chat_id: str, request: AddMembersRequest,
                       user: dict = Depends(current_user)):
@@ -3364,6 +3411,11 @@ async def add_members(chat_id: str, request: AddMembersRequest,
 
     if added:
         await hub.send_to_chat(chat_id, {"type": "members_changed", "chat_id": chat_id})
+        if chat["type"] in ("group", "channel", "community") and not chat["ephemeral"]:
+            names = _display_names(added)
+            if names:
+                await post_system_message(
+                    chat_id, user["id"], f"{user['name']} added {_join_names(names)}")
     return {"added": added}
 
 
@@ -3389,6 +3441,11 @@ async def remove_member(chat_id: str, target_id: str, user: dict = Depends(curre
     db.execute("DELETE FROM chat_members WHERE chat_id = ? AND user_id = ?", (chat_id, target_id))
     await hub.send_to_chat(chat_id, {"type": "members_changed", "chat_id": chat_id})
     await hub.send_to_user(target_id, {"type": "removed_from_chat", "chat_id": chat_id})
+    chat = require_member(chat_id, user["id"])
+    if chat["type"] in ("group", "channel", "community") and not chat["ephemeral"]:
+        names = _display_names([target_id])
+        if names:
+            await post_system_message(chat_id, user["id"], f"{user['name']} removed {names[0]}")
     return {"removed": True}
 
 
@@ -3425,6 +3482,58 @@ async def set_member_role(chat_id: str, target_id: str, request: SetRoleRequest,
             "permissions": sorted(chatstore.member_permissions(chat_id, target_id))}
 
 
+@app.post("/chats/{chat_id}/members/{target_id}/make-owner")
+async def transfer_ownership(chat_id: str, target_id: str, user: dict = Depends(current_user)):
+    """
+    Deliberately hand the group over to another member — WhatsApp's "Make group
+    admin" → transfer. Only the current owner may do it. The target becomes
+    owner; the old owner steps down to admin (keeping full rights) rather than
+    losing all control at once.
+    """
+    chat = require_member(chat_id, user["id"])
+    if chat["type"] not in ("group", "channel", "community"):
+        raise HTTPException(400, "This chat type has no transferable ownership")
+    if chat["owner_id"] != user["id"]:
+        raise HTTPException(403, "Only the owner can transfer ownership")
+    if target_id == user["id"]:
+        raise HTTPException(400, "You already own this chat")
+    if chatstore.member_role(chat_id, target_id) is None:
+        raise HTTPException(404, "Not a member of this chat")
+
+    with db.transaction() as conn:
+        conn.execute("UPDATE chat_members SET role = 'owner', permissions = '' "
+                     "WHERE chat_id = ? AND user_id = ?", (chat_id, target_id))
+        conn.execute("UPDATE chat_members SET role = 'admin', permissions = '' "
+                     "WHERE chat_id = ? AND user_id = ?", (chat_id, user["id"]))
+        conn.execute("UPDATE chats SET owner_id = ? WHERE id = ?", (target_id, chat_id))
+
+    await hub.send_to_chat(chat_id, {"type": "chat_owner_changed", "chat_id": chat_id, "owner_id": target_id})
+    await hub.send_to_chat(chat_id, {"type": "members_changed", "chat_id": chat_id})
+    if not chat["ephemeral"]:
+        names = _display_names([target_id])
+        if names:
+            await post_system_message(chat_id, user["id"], f"{user['name']} made {names[0]} the group owner")
+    return {"owner_id": target_id}
+
+
+@app.get("/users/{other_id}/common-groups")
+def common_groups(other_id: str, user: dict = Depends(current_user)):
+    """Groups (and communities) that both you and `other_id` belong to — the
+    "N groups in common" list WhatsApp shows on a contact's profile."""
+    rows = db.query_all(
+        """
+        SELECT c.id, c.name, c.type, c.color, c.avatar_letter, c.avatar_attachment_id
+        FROM chats c
+        JOIN chat_members m1 ON m1.chat_id = c.id AND m1.user_id = ?
+        JOIN chat_members m2 ON m2.chat_id = c.id AND m2.user_id = ?
+        WHERE c.type IN ('group', 'community') AND COALESCE(c.ephemeral, 0) = 0
+        ORDER BY c.name COLLATE NOCASE
+        """,
+        (user["id"], other_id),
+    )
+    return [dict(row) for row in rows]
+
+
 @app.put("/chats/{chat_id}/info")
 async def update_chat_info(chat_id: str, request: UpdateChatInfoRequest,
                           user: dict = Depends(current_user)):
@@ -3455,6 +3564,13 @@ async def update_chat_info(chat_id: str, request: UpdateChatInfoRequest,
     # Everyone with the chat or its info sheet open refreshes to the new name.
     await hub.send_to_chat(chat_id, {"type": "chat_updated", "chat_id": chat_id})
     await hub.send_to_chat(chat_id, {"type": "members_changed", "chat_id": chat_id})
+    if not chat["ephemeral"]:
+        if "name" in fields:
+            await post_system_message(
+                chat_id, user["id"], f"{user['name']} changed the group name to \"{fields['name']}\"")
+        elif "description" in fields:
+            await post_system_message(
+                chat_id, user["id"], f"{user['name']} changed the group description")
     return get_chat(chat_id, user)
 
 

@@ -1134,6 +1134,15 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
           </div>
         )}
         {loading ? <Spinner/> : messages.map((message) => (
+          message.kind === "system" ? (
+            <div key={message.id} style={{ textAlign: "center", margin: "8px 0" }}>
+              <span style={{
+                display: "inline-block", padding: "5px 12px", borderRadius: 10,
+                background: `${G.accent}12`, color: G.muted, fontSize: 12, lineHeight: 1.4,
+                maxWidth: "80%",
+              }}>{message.text}</span>
+            </div>
+          ) : (
           <div key={message.id} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
             {selectMode && (
               <div onClick={() => setSelectedMsgIds((prev) => {
@@ -1184,6 +1193,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
                       onCallAgain={(kind) => onStartCall(kind)} onJoinMeeting={joinMeeting} toast={toast}/>
             </div>
           </div>
+          )
         ))}
         <div ref={bottom}/>
         </div>
@@ -2847,7 +2857,15 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
   const mentionQuery = mentionMatch ? mentionMatch[1].toLowerCase() : null;
   const mentionCandidates = mentionQuery === null || members.length === 0
     ? []
-    : members.filter((m) => m.username.toLowerCase().startsWith(mentionQuery)).slice(0, 5);
+    : (() => {
+        // @all / @everyone pings the whole group — offered first whenever the
+        // typed prefix could be leading toward it (including an empty "@").
+        const all = ("all".startsWith(mentionQuery) || "everyone".startsWith(mentionQuery))
+          ? [{ id: "all", name: "Everyone", username: "all", avatar_letter: "@", color: G.accent }]
+          : [];
+        const people = members.filter((m) => m.username.toLowerCase().startsWith(mentionQuery));
+        return [...all, ...people].slice(0, 5);
+      })();
 
   function pickMention(member) {
     onChange(value.slice(0, value.length - mentionMatch[0].length) + `@${member.username} `);
@@ -4431,6 +4449,7 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
   const [inviteSheet, setInviteSheet] = useState(false);
   const [mutedUntil, setMutedUntil] = useState(chat.muted_until || 0);
   const [memberQuery, setMemberQuery] = useState("");
+  const [membersShown, setMembersShown] = useState(50); // grows on "Show more" for huge groups
   const [slowModeSecs, setSlowModeSecs] = useState(chat.slow_mode_secs || 0);
   const [reactionsOn, setReactionsOn] = useState(chat.reactions_enabled !== 0);
   const [commentsOn, setCommentsOn] = useState(chat.comments_enabled !== 0);
@@ -4459,12 +4478,15 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
   const contactFullPhone = contactCountry.dial + contactForm.phone;
   const contactPhoneValid = contactForm.phone.length === contactCountry.len;
 
+  const [commonGroups, setCommonGroups] = useState([]);
+
   useEffect(() => {
     if (!isDm || !chat.peer_id) return;
     Promise.all([Users.get(chat.peer_id), Contacts.list()]).then(([user, contacts]) => {
       setPeerProfile(user);
       setContact(contacts.find((entry) => entry.user?.id === chat.peer_id) || null);
     }).catch(() => {});
+    Chats.commonGroups(chat.peer_id).then(setCommonGroups).catch(() => setCommonGroups([]));
   }, [isDm, chat.peer_id]);
 
   function startEditContact() {
@@ -4572,6 +4594,18 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
       reloadFull();
     } catch (problem) {
       toast(problem.message || "Could not change role");
+    }
+  }
+
+  async function makeOwner(member) {
+    if (!confirm(`Make ${member.name} the group owner? You will become an admin.`)) return;
+    try {
+      await Chats.makeOwner(chat.id, member.id);
+      reloadFull();
+      onChanged();
+      toast(`${member.name} is now the owner`);
+    } catch (problem) {
+      toast(problem.message || "Could not transfer ownership");
     }
   }
 
@@ -4707,6 +4741,25 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
 
       {/* The peer's social links, same brand chips their own profile shows. */}
       {isDm && <SocialLinks profile={peerProfile} style={{ marginBottom: 14 }}/>}
+
+      {/* Groups you and this person are both in. */}
+      {isDm && commonGroups.length > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 12, color: G.sub, marginBottom: 6 }}>
+            {commonGroups.length} group{commonGroups.length > 1 ? "s" : ""} in common
+          </div>
+          {commonGroups.map((group) => (
+            <div key={group.id} onClick={() => onOpenChat?.(group)} style={{
+              display: "flex", alignItems: "center", gap: 10, padding: "7px 4px",
+              cursor: onOpenChat ? "pointer" : "default",
+            }}>
+              <Av av={group.avatar_letter} color={group.color} size={30}
+                  photoId={group.avatar_attachment_id}/>
+              <div style={{ fontSize: 13.5 }}>{group.name}</div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* E2EE badge in info sheet */}
       <div style={{
@@ -5118,7 +5171,11 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
           )}
 
           {!full && <Spinner small/>}
-          {full?.members.filter((m) => m.name.toLowerCase().includes(memberQuery.toLowerCase())).map((member) => (
+          {(() => {
+            const matched = (full?.members || [])
+              .filter((m) => m.name.toLowerCase().includes(memberQuery.toLowerCase()));
+            const visible = matched.slice(0, membersShown);
+            return <>{visible.map((member) => (
             <div key={member.id} style={{ borderBottom: `1px solid ${G.border}` }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 4px" }}>
                 <Av av={member.avatar_letter} color={member.color} size={30} photoId={member.avatar_attachment_id}/>
@@ -5147,6 +5204,11 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
                     <Button variant="ghost" style={{ padding: "5px 8px", fontSize: 11 }}
                             onClick={() => setRole(member.id, "member")}>Remove admin</Button>
                   </>
+                )}
+                {myRole === "owner" && member.role !== "owner" && member.id !== me.id
+                  && ["group", "community"].includes(chat.type) && (
+                  <Button variant="ghost" style={{ padding: "5px 8px", fontSize: 11 }}
+                          onClick={() => makeOwner(member)}>Make owner</Button>
                 )}
                 {canManage && member.role !== "owner" && member.id !== me.id &&
                  (myRole === "owner" || member.role !== "admin") && (
@@ -5181,6 +5243,15 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
               )}
             </div>
           ))}
+          {matched.length > visible.length && (
+            <div onClick={() => setMembersShown((n) => n + 100)} style={{
+              textAlign: "center", padding: "10px 4px", fontSize: 12.5, fontWeight: 600,
+              color: G.accentText, cursor: "pointer",
+            }}>
+              Show more ({matched.length - visible.length})
+            </div>
+          )}</>;
+          })()}
         </div>
       )}
 

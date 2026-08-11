@@ -445,6 +445,10 @@ export const Chats = {
   removeAvatar: (chatId) => remove(`/chats/${chatId}/avatar`),
   // WhatsApp's "Only admins can send messages" group switch.
   setSendPolicy: (chatId, adminsOnly) => put(`/chats/${chatId}/send-policy?admins_only=${adminsOnly}`),
+  // Hand the group over to another member (owner only).
+  makeOwner: (chatId, userId) => post(`/chats/${chatId}/members/${userId}/make-owner`, {}),
+  // Groups both you and another user belong to.
+  commonGroups: (otherId) => get(`/users/${otherId}/common-groups`),
 
   // Discussion comments on channel/community posts.
   comments: (messageId) => get(`/messages/${messageId}/comments`),
