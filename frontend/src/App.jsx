@@ -710,6 +710,7 @@ export default function App() {
         onSignedOut={() => { setMe(null); setChats([]); setTab("chats"); }}
         realtime={realtime} events={events} reconnectedAt={reconnectedAt}
         call={call} groupCall={groupCall} toastText={toastText}
+        onAddParticipant={addParticipantToCall}
         discoverOpen={discoverOpen} onDiscoverOpen={() => setDiscoverOpen(true)}
         onDiscoverClose={() => setDiscoverOpen(false)} plannerCount={plannerCount}
         missedCalls={missedCalls} onLogout={signOut} tabs={tabs}
@@ -1220,6 +1221,7 @@ function DesktopShell({
   onUnlockChat, onRelockChat, reloadChats, toast, searchResults, onSearchResultsChange,
   me, onMeUpdated, theme, onThemeChange, accent, onAccentChange, onSignedOut,
   realtime, events, reconnectedAt, call, groupCall, toastText,
+  onAddParticipant: addParticipantToCall,
   discoverOpen, onDiscoverOpen, onDiscoverClose, plannerCount, missedCalls, onLogout, tabs,
   chatListMenuPos, onChatListMenuPos, newCallOpen, onNewCallOpen, onNewCallClose,
   callsMenuPos, onCallsMenuPos,
