@@ -21,6 +21,8 @@ const ASPECTS = [
   { key: "portrait", label: "4:5", ratio: 4 / 5 },
   { key: "wide", label: "16:9", ratio: 16 / 9 },
   { key: "story", label: "9:16", ratio: 9 / 16 },
+  // A wide banner ratio for profile cover photos.
+  { key: "cover", label: "Cover", ratio: 3 },
 ];
 
 const DRAW_COLORS = ["#ffffff", "#ef4444", "#f59e0b", "#22c55e", "#38bdf8", "#a855f7", "#ec4899", "#000000"];
@@ -189,11 +191,14 @@ const TOOL_ICON_MAP = {
  *
  * Pinch-to-zoom replaces the zoom slider.
  */
-export default function PhotoEditor({ file, onCancel, onDone }) {
+export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey }) {
   const [rotatedSrc, setRotatedSrc] = useState(null);
   const [rotation, setRotation] = useState(0);
   const [flipped, setFlipped] = useState(false);
-  const [aspect, setAspect] = useState(ASPECTS[0]);
+  // Opening the editor for a fixed target (e.g. a cover photo) starts it locked
+  // to that aspect and on the crop tool, so the user lands straight on framing.
+  const [aspect, setAspect] = useState(
+    () => ASPECTS.find((a) => a.key === initialAspectKey) || ASPECTS[0]);
   const [filter, setFilter] = useState(FILTERS[0]);
   const [enhanced, setEnhanced] = useState(false);
   const [hd, setHd] = useState(false);
@@ -209,7 +214,7 @@ export default function PhotoEditor({ file, onCancel, onDone }) {
   const [saturation, setSaturation] = useState(100);
 
   const [marks, setMarks] = useState([]);
-  const [tool, setTool] = useState(null);
+  const [tool, setTool] = useState(initialAspectKey ? "crop" : null);
   const [activeTab, setActiveTab] = useState("adjust");
   const [drawColor, setDrawColor] = useState(DRAW_COLORS[0]);
   const [drawSize, setDrawSize] = useState(3);

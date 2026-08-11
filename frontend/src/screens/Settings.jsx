@@ -7,6 +7,7 @@ import { ACCENTS, Av, BUSINESS_CATEGORIES, Button, CoverImage, Field, G, I, SRow
          SocialLinks, Spinner, Toggle,
          clockTime, whenLabel, getStoredEnterToSend, saveEnterToSend, useInstallPrompt } from "../ui.jsx";
 import QrView from "../QrView.jsx";
+import PhotoEditor from "../PhotoEditor.jsx";
 import { disablePush, enablePush, getPushSubscription, isPushSupported } from "../push.js";
 import { getAutoDownload, setAutoDownload } from "../mediaPrefs.js";
 import {
@@ -81,6 +82,8 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
   const [coverMenu, setCoverMenu] = useState(false);
   const [coverBusy, setCoverBusy] = useState(false);
   const [viewingCover, setViewingCover] = useState(false);
+  const [coverEditFile, setCoverEditFile] = useState(null); // pending crop before upload
+  const [businessOpen, setBusinessOpen] = useState(false);   // business-category dropdown
   const avatarInputRef = useRef(null);
   const cameraInputRef = useRef(null);   // capture="user" → opens the camera on mobile
   const coverInputRef = useRef(null);
@@ -144,10 +147,17 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
     }
   }
 
-  async function onCoverFileChosen(event) {
+  // A cover always goes through the crop editor first (locked to the wide cover
+  // ratio) so the user can frame a photo that isn't already banner-shaped.
+  function onCoverFileChosen(event) {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
+    setCoverEditFile(file);
+  }
+
+  async function uploadCover(file) {
+    setCoverEditFile(null);
     setCoverBusy(true);
     try {
       onUpdated(await Me.setCover(file));
@@ -487,20 +497,57 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
                 Business / Services / Designation
               </div>
               <div style={{ fontSize: 11.5, color: G.muted, marginBottom: 8 }}>
-                Tap to select any that apply — they show on your profile.
+                Choose any that apply — they show on your profile.
               </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginBottom: 4 }}>
-                {BUSINESS_CATEGORIES.map((cat) => {
-                  const on = form.business.includes(cat);
-                  return (
-                    <span key={cat} onClick={() => toggleBusiness(cat)} style={{
-                      padding: "6px 12px", borderRadius: 16, fontSize: 12.5, cursor: "pointer",
-                      background: on ? G.accent : G.dim,
-                      color: on ? G.accentText : G.text,
-                      border: `1px solid ${on ? G.accent : G.border}`,
-                    }}>{cat}</span>
-                  );
-                })}
+
+              {/* Selected items shown as removable chips above the dropdown. */}
+              {form.business.length > 0 && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginBottom: 8 }}>
+                  {form.business.map((cat) => (
+                    <span key={cat} onClick={() => toggleBusiness(cat)} title="Remove" style={{
+                      display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
+                      padding: "6px 10px", borderRadius: 16, fontSize: 12.5,
+                      background: G.accent, color: G.accentText, border: `1px solid ${G.accent}`,
+                    }}>{cat} <span style={{ fontSize: 13, opacity: 0.8 }}>✕</span></span>
+                  ))}
+                </div>
+              )}
+
+              {/* Collapsed dropdown — opens a scrollable checklist. */}
+              <div style={{ position: "relative", marginBottom: 4 }}>
+                <div onClick={() => setBusinessOpen((v) => !v)} style={{
+                  display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
+                  padding: "10px 12px", borderRadius: 10, cursor: "pointer",
+                  background: G.dim, border: `1px solid ${businessOpen ? G.accent : G.border}`,
+                  fontSize: 13.5, color: form.business.length ? G.text : G.muted,
+                }}>
+                  <span>{form.business.length ? `${form.business.length} selected` : "Select category…"}</span>
+                  <span style={{ transform: businessOpen ? "rotate(180deg)" : "none", transition: "transform .15s" }}>
+                    {I.chevronDown ? I.chevronDown(G.sub, 16) : "▾"}
+                  </span>
+                </div>
+                {businessOpen && (
+                  <div style={{
+                    marginTop: 6, borderRadius: 10, border: `1px solid ${G.border}`,
+                    background: G.surface, maxHeight: 240, overflowY: "auto",
+                  }}>
+                    {BUSINESS_CATEGORIES.map((cat) => {
+                      const on = form.business.includes(cat);
+                      return (
+                        <div key={cat} onClick={() => toggleBusiness(cat)} style={{
+                          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
+                          padding: "9px 12px", cursor: "pointer", fontSize: 13.5,
+                          color: on ? G.accentText : G.text,
+                          borderBottom: `1px solid ${G.border}`,
+                          background: on ? `${G.accent}14` : "transparent",
+                        }}>
+                          <span>{cat}</span>
+                          {on && <span>{I.check ? I.check(G.accent, 15) : "✓"}</span>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               <div style={{ marginTop: 14, marginBottom: 6, fontSize: 13, fontWeight: 700, color: G.sub }}>
@@ -526,7 +573,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
               </div>
             </div>
           ) : (
-            <SRow icon={I.edit(G.accent, 18)} label="Edit profile" sub="Name, bio and social links"
+            <SRow icon={I.edit(G.text, 18)} label="Edit profile" sub="Name, bio and social links"
                   onClick={() => setEditing(true)}/>
           )}
         </>
@@ -544,6 +591,11 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
             position: "absolute", top: 18, right: 20, color: "#fff", fontSize: 26, cursor: "pointer",
           }}>✕</div>
         </div>
+      )}
+
+      {coverEditFile && (
+        <PhotoEditor file={coverEditFile} initialAspectKey="cover"
+                     onCancel={() => setCoverEditFile(null)} onDone={uploadCover}/>
       )}
 
       {viewingCover && me.cover_attachment_id && (
@@ -613,7 +665,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
         );
       })()}
 
-      <Section id="myqr" icon={I.search(G.accent, 20)} title="My QR code"
+      <Section id="myqr" icon={I.search(G.text, 20)} title="My QR code"
                sub="Let people scan to add you"
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
@@ -634,14 +686,14 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
         </div>
       </Section>
 
-      <Section id="invite" icon={I.share(G.accent, 20)} title="Invite a friend"
+      <Section id="invite" icon={I.share(G.text, 20)} title="Invite a friend"
                sub="Share TalkEx with your contacts"
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
         <InviteFriend me={me} toast={toast}/>
       </Section>
 
-      <Section id="appearance" icon={I.palette(G.accent, 20)} title="Appearance" sub="Theme and color"
+      <Section id="appearance" icon={I.palette(G.text, 20)} title="Appearance" sub="Theme and color"
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
         <div style={{ padding: "4px 20px 18px" }}>
@@ -765,10 +817,10 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
         </div>
       </Section>
 
-      <Section id="notifications" icon={I.bell(G.accent, 20)} title="Notifications" sub="Push alerts"
+      <Section id="notifications" icon={I.bell(G.text, 20)} title="Notifications" sub="Push alerts"
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
-        <SRow icon={I.bell(G.accent, 18)} label="Push notifications"
+        <SRow icon={I.bell(G.text, 18)} label="Push notifications"
               sub={isPushSupported()
                 ? "Get notified even when this tab isn't open"
                 : "Not supported in this browser"}
@@ -777,7 +829,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
                 : null}/>
       </Section>
 
-      <Section id="data" icon={I.wifi(G.accent, 20)} title="Data usage" sub="Auto-download media"
+      <Section id="data" icon={I.wifi(G.text, 20)} title="Data usage" sub="Auto-download media"
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
         <div style={{ padding: "0 20px 14px", fontSize: 12.5, color: G.muted }}>
@@ -798,51 +850,51 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
         </div>
       </Section>
 
-      <Section id="privacy" icon={I.eye(G.accent, 20)} title="Privacy" sub="Last seen and read receipts"
+      <Section id="privacy" icon={I.eye(G.text, 20)} title="Privacy" sub="Last seen and read receipts"
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
-        <SRow icon={I.eye(G.accent, 18)} label="Last seen and online"
+        <SRow icon={I.eye(G.text, 18)} label="Last seen and online"
               sub="When off, nobody is told when you come or go"
               right={<Toggle on={Boolean(me.show_last_seen)}
                              onChange={(value) => togglePrivacy("show_last_seen", value)}/>}/>
 
-        <SRow icon={I.checkDouble(G.accent, 18)} label="Read receipts"
+        <SRow icon={I.checkDouble(G.text, 18)} label="Read receipts"
               sub="When off, you stop sending them"
               right={<Toggle on={Boolean(me.show_read_receipts)}
                              onChange={(value) => togglePrivacy("show_read_receipts", value)}/>}/>
 
-        <SRow icon={I.phoneOff(G.accent, 18)} label="Hide phone number"
+        <SRow icon={I.phoneOff(G.text, 18)} label="Hide phone number"
               sub="When on, others can't see your number — only your name and username"
               right={<Toggle on={!Boolean(me.show_phone_number)}
                              onChange={(hideOn) => togglePrivacy("show_phone_number", !hideOn)}/>}/>
 
-        <SRow icon={I.phone(G.accent, 18)} label="Calling"
+        <SRow icon={I.phone(G.text, 18)} label="Calling"
               sub="When off, you can't be called and can't call anyone — scheduled meetings still work"
               right={<Toggle on={Boolean(me.calling_enabled)}
                              onChange={(value) => togglePrivacy("calling_enabled", value)}/>}/>
       </Section>
 
-      <Section id="livelocation" icon={I.mapPin(G.accent, 20)} title="Live Location" sub="Who's sharing, and with you"
+      <Section id="livelocation" icon={I.mapPin(G.text, 20)} title="Live Location" sub="Who's sharing, and with you"
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
         <LiveLocationList toast={toast}/>
       </Section>
 
-      <Section id="storage" icon={I.barChart(G.accent, 20)} title="Storage and data" sub="See what's using space, chat by chat"
+      <Section id="storage" icon={I.barChart(G.text, 20)} title="Storage and data" sub="See what's using space, chat by chat"
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
         <StorageUsage/>
       </Section>
 
-      <Section id="security" icon={I.shield(G.accent, 20)} title="Security" sub="Two-step verification"
+      <Section id="security" icon={I.shield(G.text, 20)} title="Security" sub="Two-step verification"
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
-        <SRow icon={I.shield(G.accent, 18)} label="Two-step verification"
+        <SRow icon={I.shield(G.text, 18)} label="Two-step verification"
               sub={twoStep ? (twoStep.enabled ? "On — a PIN is asked for at login" : "Off")
                             : "Loading…"}
               onClick={() => setTwoStepSheet(true)}/>
 
-        <SRow icon={I.lock(G.accent, 18)} label="App lock"
+        <SRow icon={I.lock(G.text, 18)} label="App lock"
               sub={appLockOn ? "On — a PIN is asked for when you reopen the app" : "Off"}
               right={<Toggle on={appLockOn} onChange={(value) => {
                 if (value) { setAppLockSheet(true); return; }
@@ -852,7 +904,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
               }}/>}/>
       </Section>
 
-      <Section id="api" icon={I.bolt(G.accent, 20)} title="Business & Automation" sub={`${apiKeys.length} API key${apiKeys.length === 1 ? "" : "s"}`}
+      <Section id="api" icon={I.bolt(G.text, 20)} title="Business & Automation" sub={`${apiKeys.length} API key${apiKeys.length === 1 ? "" : "s"}`}
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
         <div style={{ padding: "0 20px 8px", fontSize: 12.5, color: G.muted }}>
@@ -861,11 +913,11 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
           change your profile, or sign in as you.
         </div>
 
-        <SRow icon={I.key(G.accent, 18)} label={creatingKey ? "Creating…" : "New API key"}
+        <SRow icon={I.key(G.text, 18)} label={creatingKey ? "Creating…" : "New API key"}
               onClick={creatingKey ? undefined : createApiKey}/>
 
         {apiKeys.map((key) => (
-          <SRow key={key.id} icon={I.key(G.accent, 18)} label={key.label}
+          <SRow key={key.id} icon={I.key(G.text, 18)} label={key.label}
                 sub={`${key.prefix}… · Created ${whenLabel(key.created_at)}` +
                      (key.last_used_at ? ` · Last used ${whenLabel(key.last_used_at)}` : " · Never used")}
                 right={
@@ -890,7 +942,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
           </Button>
         </div>
         {webhooks.map((hook) => (
-          <SRow key={hook.id} icon={I.link(G.accent, 18)} label={hook.url}
+          <SRow key={hook.id} icon={I.link(G.text, 18)} label={hook.url}
                 sub={hook.last_triggered_at
                   ? `Last ${hook.last_status} · ${whenLabel(hook.last_triggered_at)}`
                   : "Never triggered yet"}
@@ -903,7 +955,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
         <div style={{ fontSize: 12, fontWeight: 700, color: G.sub, margin: "18px 20px 4px" }}>
           Away message
         </div>
-        <SRow icon={I.moon(G.accent, 18)} label="Auto-reply when someone DMs you"
+        <SRow icon={I.moon(G.text, 18)} label="Auto-reply when someone DMs you"
               sub={me.away_enabled ? "On" : "Off"}
               right={<Toggle on={Boolean(me.away_enabled)} onChange={toggleAway}/>}/>
         <div style={{ padding: "0 20px 14px", display: "flex", gap: 8 }}>
@@ -934,7 +986,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
           </div>
         </div>
         {cannedReplies.map((reply) => (
-          <SRow key={reply.id} icon={I.checkDouble(G.accent, 18)} label={reply.label} sub={reply.text}
+          <SRow key={reply.id} icon={I.checkDouble(G.text, 18)} label={reply.label} sub={reply.text}
                 right={
                   <Button variant="danger" style={{ padding: "6px 12px", fontSize: 12 }}
                           onClick={() => deleteCannedReply(reply.id)}>Remove</Button>
@@ -963,7 +1015,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
           </div>
         </div>
         {templates.map((template) => (
-          <SRow key={template.id} icon={I.doc(G.accent, 18)} label={template.name}
+          <SRow key={template.id} icon={I.doc(G.text, 18)} label={template.name}
                 sub={`${template.content} · ${template.status}`}
                 right={
                   <Button variant="danger" style={{ padding: "6px 12px", fontSize: 12 }}
@@ -972,10 +1024,10 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
         ))}
       </Section>
 
-      <Section id="devices" icon={I.monitor(G.accent, 20)} title="Linked devices" sub={`${sessions.length} device${sessions.length === 1 ? "" : "s"}`}
+      <Section id="devices" icon={I.monitor(G.text, 20)} title="Linked devices" sub={`${sessions.length} device${sessions.length === 1 ? "" : "s"}`}
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
-        <SRow icon={I.link(G.accent, 18)} label="Link a device" sub="Approve a sign-in using a code from another device"
+        <SRow icon={I.link(G.text, 18)} label="Link a device" sub="Approve a sign-in using a code from another device"
               onClick={() => setLinkingDevice(true)}/>
 
         {sessions.map((session) => (
@@ -1002,7 +1054,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
         ))}
       </Section>
 
-      <Section id="blocked" icon={I.ban(G.accent, 20)} title="Blocked" sub={`${blocked.length} blocked`}
+      <Section id="blocked" icon={I.ban(G.text, 20)} title="Blocked" sub={`${blocked.length} blocked`}
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
         {blocked.length === 0 ? (
@@ -1010,7 +1062,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
             Nobody is blocked.
           </div>
         ) : blocked.map((person) => (
-          <SRow key={person.id} icon={I.user(G.accent, 18)} label={person.name} sub={`@${person.username}`}
+          <SRow key={person.id} icon={I.user(G.text, 18)} label={person.name} sub={`@${person.username}`}
                 right={
                   <Button variant="ghost" style={{ padding: "6px 12px", fontSize: 12 }}
                           onClick={async () => {
@@ -1022,24 +1074,24 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
         ))}
       </Section>
 
-      <Section id="help" icon={I.info(G.accent, 20)} title="Help and feedback"
+      <Section id="help" icon={I.info(G.text, 20)} title="Help and feedback"
                sub="Contact support, app info"
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
         <div style={{ padding: "8px 20px 18px" }}>
-          <SRow icon={I.mail(G.accent, 18)} label="Contact support"
+          <SRow icon={I.mail(G.text, 18)} label="Contact support"
                 sub="Questions, bugs or feedback"
                 onClick={() => {
                   const subject = encodeURIComponent("TalkEx feedback");
                   window.location.href = `mailto:support@coreaxis.cloud?subject=${subject}`;
                 }}/>
-          <SRow icon={I.star(G.accent, 18)} label="Send feedback"
+          <SRow icon={I.star(G.text, 18)} label="Send feedback"
                 sub="Answer a few quick questions"
                 onClick={() => setHelpView("feedback")}/>
-          <SRow icon={I.info(G.accent, 18)} label="TalkEx Blog"
+          <SRow icon={I.info(G.text, 18)} label="TalkEx Blog"
                 sub="News, tips and updates"
                 onClick={() => setHelpView("blog")}/>
-          <SRow icon={I.shield(G.accent, 18)} label="Terms and privacy"
+          <SRow icon={I.shield(G.text, 18)} label="Terms and privacy"
                 sub="How TalkEx handles your data"
                 onClick={() => setHelpView("privacy")}/>
 
@@ -1063,7 +1115,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
       {helpView === "blog" && <BlogSheet onClose={() => setHelpView(null)}/>}
       {helpView === "privacy" && <PrivacySheet onClose={() => setHelpView(null)}/>}
 
-      <Section id="account" icon={I.logOut(G.accent, 20)} title="Account" sub={me.phone || "Sign out, deactivate or delete"}
+      <Section id="account" icon={I.logOut(G.text, 20)} title="Account" sub={me.phone || "Sign out, deactivate or delete"}
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
         {savedAccounts.filter((account) => account.userId !== me.id).map((account) => (
@@ -1078,7 +1130,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
                   </Button>
                 }/>
         ))}
-        <SRow icon={I.user(G.accent, 18)} label="Add another account"
+        <SRow icon={I.user(G.text, 18)} label="Add another account"
               sub="Switch between accounts on this device"
               onClick={() => {
                 // Guarantees this account is in the switcher even if it was
@@ -1087,12 +1139,12 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
                 rememberAccount(me, getToken());
                 setAddingAccount(true);
               }}/>
-        <SRow icon={I.phone(G.accent, 18)} label="Change phone number" sub={me.phone || "Not set"}
+        <SRow icon={I.phone(G.text, 18)} label="Change phone number" sub={me.phone || "Not set"}
               onClick={() => setChangingPhone(true)}/>
-        <SRow icon={I.lock(G.accent, 18)} label="Set password"
+        <SRow icon={I.lock(G.text, 18)} label="Set password"
               sub="For signing in with a username, without a phone code"
               onClick={() => setSettingPassword(true)}/>
-        <SRow icon={I.mail(G.accent, 18)} label="Email address"
+        <SRow icon={I.mail(G.text, 18)} label="Email address"
               sub={me.email_verified_at ? `${me.email} · verified` : "Not connected — used to recover a forgotten PIN"}
               onClick={() => setConnectingEmail(true)}/>
         <SRow icon={I.logOut(G.red, 18)} label="Sign out" danger onClick={signOut}/>
@@ -1731,7 +1783,7 @@ function LiveLocationList({ toast }) {
         <>
           <div style={{ padding: "12px 20px 4px", fontSize: 12, color: G.sub }}>You're sharing</div>
           {mine.map((share) => (
-            <SRow key={share.id} icon={I.mapPin(G.accent, 18)} label={share.chat_name}
+            <SRow key={share.id} icon={I.mapPin(G.text, 18)} label={share.chat_name}
                   sub={`Until ${clockTime(share.payload.live_until)}`}
                   right={
                     <div onClick={(event) => { event.stopPropagation(); stop(share); }} style={{
@@ -1746,7 +1798,7 @@ function LiveLocationList({ toast }) {
         <>
           <div style={{ padding: "12px 20px 4px", fontSize: 12, color: G.sub }}>Shared with you</div>
           {others.map((share) => (
-            <SRow key={share.id} icon={I.mapPin(G.accent, 18)}
+            <SRow key={share.id} icon={I.mapPin(G.text, 18)}
                   label={share.chat_type === "dm" ? share.chat_name : share.sender_name}
                   sub={share.chat_type === "dm" ? `Until ${clockTime(share.payload.live_until)}`
                        : `In ${share.chat_name} · until ${clockTime(share.payload.live_until)}`}/>
@@ -2157,8 +2209,8 @@ function TwoStepSheet({ enabled, onClose, onChanged, toast }) {
           A PIN is asked for after your password, the next time this account
           signs in anywhere.
         </div>
-        <SRow icon={I.key(G.accent, 18)} label="Change PIN" onClick={() => setAction("change")}/>
-        <SRow icon={I.key(G.accent, 18)} label="View new recovery codes"
+        <SRow icon={I.key(G.text, 18)} label="Change PIN" onClick={() => setAction("change")}/>
+        <SRow icon={I.key(G.text, 18)} label="View new recovery codes"
               sub="Replaces the old ones — they stop working"
               onClick={() => setAction("recover")}/>
         <SRow icon={I.ban(G.red, 18)} label="Turn off" danger onClick={() => setAction("remove")}/>
