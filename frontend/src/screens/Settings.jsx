@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Auth, Contacts, Me, Messages, Templates, Users, clearToken, forgetAccount, getToken,
+  Auth, Chats, Contacts, Me, Messages, Templates, Users, clearToken, forgetAccount, getToken,
   listSavedAccounts, rememberAccount, switchToAccount,
 } from "../api.js";
 import { ACCENTS, Av, BUSINESS_CATEGORIES, Button, CoverImage, Field, G, I, SRow, SOCIAL_PLATFORMS,
@@ -26,7 +26,7 @@ import { COUNTRY_CODES, flagFor, samplePlaceholder, splitPhone } from "../countr
  * and with read receipts off it stops broadcasting your read marker. v1 had
  * these toggles wired to nothing.
  */
-export default function Settings({ me, onUpdated, onSignedOut, toast,
+export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat,
                                     theme, onThemeChange, accent, onAccentChange }) {
   const [editing, setEditing] = useState(false);
   const [helpView, setHelpView] = useState(null); // 'blog' | 'feedback' | null
@@ -84,6 +84,27 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
   const [viewingCover, setViewingCover] = useState(false);
   const [coverEditFile, setCoverEditFile] = useState(null); // pending crop before upload
   const [businessOpen, setBusinessOpen] = useState(false);   // business-category dropdown
+  const [qrScanOpen, setQrScanOpen] = useState(false);       // scan someone's QR to open their chat
+
+  // A scanned TalkEx QR is either a full profile URL (…/?user=username) or a
+  // bare username. Resolve it and open a DM straight away.
+  async function onUserQrScanned(decoded) {
+    setQrScanOpen(false);
+    let username = (decoded || "").trim();
+    try { username = new URL(decoded).searchParams.get("user") || username; } catch { /* not a URL */ }
+    username = username.replace(/^@/, "").trim();
+    if (!username) { toast("That's not a TalkEx code"); return; }
+    if (username.toLowerCase() === me.username?.toLowerCase()) { toast("That's your own code"); return; }
+    try {
+      const matches = await Users.list(username);
+      const person = (matches || []).find((u) => u.username?.toLowerCase() === username.toLowerCase());
+      if (!person) { toast("No TalkEx account for that code"); return; }
+      const chat = await Chats.dm(person.id);
+      onOpenChat?.(chat);
+    } catch (problem) {
+      toast(problem.message || "Could not open that chat");
+    }
+  }
   const avatarInputRef = useRef(null);
   const cameraInputRef = useRef(null);   // capture="user" → opens the camera on mobile
   const coverInputRef = useRef(null);
@@ -594,7 +615,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
       )}
 
       {coverEditFile && (
-        <PhotoEditor file={coverEditFile} initialAspectKey="cover"
+        <PhotoEditor file={coverEditFile} initialTool="crop"
                      onCancel={() => setCoverEditFile(null)} onDone={uploadCover}/>
       )}
 
@@ -680,6 +701,24 @@ export default function Settings({ me, onUpdated, onSignedOut, toast,
             if (navigator.share) { try { await navigator.share({ title: me.name, url }); } catch { /* cancelled */ } }
             else { navigator.clipboard?.writeText(url); toast("Profile link copied"); }
           }}>Share my code</Button>
+
+          {/* Scan someone else's code to open a chat with them (WhatsApp's
+              "Scan code" tab). */}
+          {qrScanOpen ? (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontSize: 12.5, color: G.muted, marginBottom: 10 }}>
+                Point the camera at someone's TalkEx QR code.
+              </div>
+              <QrScanner onDecode={onUserQrScanned}
+                         onError={(message) => { setQrScanOpen(false); toast(message || "Camera error"); }}/>
+              <Button variant="ghost" style={{ width: "100%", marginTop: 10 }}
+                      onClick={() => setQrScanOpen(false)}>Cancel</Button>
+            </div>
+          ) : (
+            <Button variant="ghost" style={{ width: "100%", marginBottom: 8 }}
+                    onClick={() => setQrScanOpen(true)}>Scan a code</Button>
+          )}
+
           <div style={{ fontSize: 11.5, color: G.muted }}>
             Scanning this opens a chat with you.
           </div>

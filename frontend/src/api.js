@@ -865,11 +865,14 @@ export const Stories = {
   // a Unix timestamp to queue it.
   create: ({ text, emoji, background, kind = "text", attachmentId = null,
              linkUrl = null, publishAt = null, font = "system", fontSize = "medium",
-             allowShare = false }) =>
+             allowShare = false, music = null }) =>
     post("/stories", {
       text, emoji, background, kind,
       attachment_id: attachmentId, link_url: linkUrl, publish_at: publishAt,
       font, font_size: fontSize, allow_share: allowShare,
+      music_url: music?.previewUrl || null, music_title: music?.title || null,
+      music_artist: music?.artist || null,
+      music_artwork: music?.artworkLarge || music?.artwork || null,
     }),
 
   list: () => get("/stories"),

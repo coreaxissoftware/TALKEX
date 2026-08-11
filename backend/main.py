@@ -5312,12 +5312,15 @@ def create_story(request: StoryRequest, user: dict = Depends(current_user)):
         """
         INSERT INTO stories (id, user_id, text, emoji, background,
                              created_at, expires_at, status, publish_at,
-                             kind, link_url, font, font_size, allow_share)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             kind, link_url, font, font_size, allow_share,
+                             music_url, music_title, music_artist, music_artwork)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (story_id, user["id"], request.text, request.emoji, request.background,
          now, expires_at, status, publish_at, request.kind, link_url,
-         request.font, request.font_size, request.allow_share),
+         request.font, request.font_size, request.allow_share,
+         (request.music_url or "").strip(), (request.music_title or "").strip(),
+         (request.music_artist or "").strip(), (request.music_artwork or "").strip()),
     )
 
     if request.kind in ("photo", "video", "audio"):

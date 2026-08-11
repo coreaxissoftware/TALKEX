@@ -476,34 +476,36 @@ const THEMES = {
 // caused the original switch away from orange in the first place.
 export const ACCENTS = {
   skyblue: {
-    label: "Sky Blue", accent: "#38bdf8", accentD: "#2563eb", accentGlow: "#38bdf833",
+    // Deeper, saturated shades (500/600) so the sent chat bubble reads richly
+    // against white text instead of the washed-out pastel it used to be.
+    label: "Sky Blue", accent: "#0ea5e9", accentD: "#0369a1", accentGlow: "#0ea5e933",
     light: { accentSoft: "#e6f5fe", accentText: "#0369a1" },
-    dark: { accentSoft: "#38bdf81f", accentText: "#7dd3fc" },
+    dark: { accentSoft: "#0ea5e922", accentText: "#7dd3fc" },
   },
   violet: {
-    label: "Violet", accent: "#a78bfa", accentD: "#7c3aed", accentGlow: "#a78bfa33",
+    label: "Violet", accent: "#7c3aed", accentD: "#5b21b6", accentGlow: "#7c3aed33",
     light: { accentSoft: "#f1ecfe", accentText: "#6d28d9" },
-    dark: { accentSoft: "#a78bfa1f", accentText: "#c4b5fd" },
+    dark: { accentSoft: "#7c3aed22", accentText: "#c4b5fd" },
   },
   emerald: {
-    label: "Emerald", accent: "#34d399", accentD: "#059669", accentGlow: "#34d39933",
+    label: "Emerald", accent: "#059669", accentD: "#047857", accentGlow: "#05966933",
     light: { accentSoft: "#e3faf1", accentText: "#047857" },
-    dark: { accentSoft: "#34d3991f", accentText: "#6ee7b7" },
+    dark: { accentSoft: "#05966922", accentText: "#6ee7b7" },
   },
   rose: {
-    label: "Rose", accent: "#fb7185", accentD: "#e11d48", accentGlow: "#fb718533",
+    label: "Rose", accent: "#e11d48", accentD: "#be123c", accentGlow: "#e11d4833",
     light: { accentSoft: "#feecee", accentText: "#be123c" },
-    dark: { accentSoft: "#fb71851f", accentText: "#fda4af" },
+    dark: { accentSoft: "#e11d4822", accentText: "#fda4af" },
   },
   amber: {
-    label: "Amber", accent: "#fbbf24", accentD: "#d97706", accentGlow: "#fbbf2433",
+    label: "Amber", accent: "#d97706", accentD: "#b45309", accentGlow: "#d9770633",
     light: { accentSoft: "#fff6e0", accentText: "#b45309" },
-    dark: { accentSoft: "#fbbf241f", accentText: "#fcd34d" },
+    dark: { accentSoft: "#d9770622", accentText: "#fcd34d" },
   },
   teal: {
-    label: "Teal", accent: "#2dd4bf", accentD: "#0d9488", accentGlow: "#2dd4bf33",
+    label: "Teal", accent: "#0d9488", accentD: "#0f766e", accentGlow: "#0d948833",
     light: { accentSoft: "#e1faf7", accentText: "#0f766e" },
-    dark: { accentSoft: "#2dd4bf1f", accentText: "#5eead4" },
+    dark: { accentSoft: "#0d948822", accentText: "#5eead4" },
   },
   darkblue: {
     label: "Dark Blue", accent: "#3b82f6", accentD: "#1e3a5f", accentGlow: "#3b82f633",
@@ -910,17 +912,39 @@ function loadAvatarUrl(photoId) {
   return pending;
 }
 
+/**
+ * Load an avatar/cover blob URL into a React state setter, retrying through a
+ * backend cold start. The Render free tier sleeps and can take 30-60s to wake,
+ * so a single quick retry left photos stuck on the letter fallback "aksar"
+ * (often). This keeps trying with growing backoff (~1.5s → 24s, capped) until
+ * it succeeds or the component unmounts.
+ */
+function useImageBlob(photoId, setUrl) {
+  useEffect(() => {
+    if (!photoId) { setUrl(null); return; }
+    let cancelled = false;
+    let timer = null;
+    const DELAYS = [1500, 3000, 6000, 12000, 24000]; // ~46s total — a cold start
+    const attempt = (i) => {
+      loadAvatarUrl(photoId)
+        .then((url) => { if (!cancelled) setUrl(url); })
+        .catch(() => {
+          if (cancelled) return;
+          setUrl(null);
+          if (i < DELAYS.length) timer = setTimeout(() => attempt(i + 1), DELAYS[i]);
+        });
+    };
+    attempt(0);
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, [photoId]); // eslint-disable-line react-hooks/exhaustive-deps
+}
+
 /** A wide cover/banner image fetched by attachment id (auth'd blob, same as
  *  Av). Falls back to a soft accent gradient when there's no cover. `children`
  *  render on top (e.g. an edit button). */
 export function CoverImage({ coverId, height = 130, children, style }) {
   const [url, setUrl] = useState(null);
-  useEffect(() => {
-    if (!coverId) { setUrl(null); return; }
-    let cancelled = false;
-    loadAvatarUrl(coverId).then((u) => { if (!cancelled) setUrl(u); }).catch(() => { if (!cancelled) setUrl(null); });
-    return () => { cancelled = true; };
-  }, [coverId]);
+  useImageBlob(coverId, setUrl);
   return (
     <div style={{
       height, width: "100%", position: "relative", flexShrink: 0,
@@ -937,24 +961,7 @@ export function Av({ av, color, size = 44, online, hasStory, isMe, photoId }) {
   // can't send, so a real profile photo is fetched as a blob URL — same
   // pattern used for chat attachments and story media.
   const [photoUrl, setPhotoUrl] = useState(null);
-  useEffect(() => {
-    if (!photoId) { setPhotoUrl(null); return; }
-    let cancelled = false;
-    let retryTimer = null;
-    const attempt = (retriesLeft) => {
-      loadAvatarUrl(photoId)
-        .then((url) => { if (!cancelled) setPhotoUrl(url); })
-        .catch(() => {
-          if (cancelled) return;
-          setPhotoUrl(null);
-          // One delayed retry covers the common transient case (a cold-started
-          // backend that answers a second or two later) without hammering.
-          if (retriesLeft > 0) retryTimer = setTimeout(() => attempt(retriesLeft - 1), 1500);
-        });
-    };
-    attempt(1);
-    return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer); };
-  }, [photoId]);
+  useImageBlob(photoId, setPhotoUrl);
 
   return (
     <div style={{ position: "relative", flexShrink: 0 }}>

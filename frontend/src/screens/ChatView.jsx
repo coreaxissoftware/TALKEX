@@ -924,7 +924,12 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   const dragEnterCount = useRef(0);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh", position: "relative" }}
+    // --app-height (kept live by useViewportHeightVar) is the height ABOVE the
+    // on-screen keyboard on mobile; 100vh is the fallback. Using a plain 100vh
+    // here was the typing bug: the container stayed full-height when the iOS
+    // keyboard opened, so the composer sat underneath it and Safari scrolled
+    // the whole view to try to reveal it, breaking the layout.
+    <div style={{ display: "flex", flexDirection: "column", height: "var(--app-height, 100vh)", position: "relative" }}
       onDragEnter={(event) => {
         if (!event.dataTransfer?.types?.includes("Files")) return;
         event.preventDefault();
@@ -5665,9 +5670,17 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
     return () => window.removeEventListener("keydown", onKey);
   }, [index, items.length, onIndexChange, onClose]);
 
+  // Resolve the sender from the roster (or `me`) so their real profile PHOTO
+  // shows in the viewer header — the raw message rarely carries the avatar id.
+  const senderPerson = !current ? null
+    : current.sender_id === me.id ? me
+    : members.find((m) => m.id === current.sender_id) || null;
   const senderName = !current ? "" : current.sender_id === me.id
     ? "You"
-    : (members.find((m) => m.id === current.sender_id)?.name || current.sender_name || "");
+    : (senderPerson?.name || current.sender_name || "");
+  const senderPhoto = senderPerson?.avatar_attachment_id || current?.sender_avatar_attachment_id;
+  const senderColor = senderPerson?.color || current?.sender_color || G.accent;
+  const senderLetter = senderPerson?.avatar_letter || (senderName || "?")[0];
 
   function download() {
     if (!blobUrl) return;
@@ -5707,15 +5720,27 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
     setZoom((z) => Math.min(6, Math.max(1, z * factor)));
   }
   function onImgPointerDown(event) {
-    if (zoom <= 1) return;
-    dragRef.current = { x: event.clientX, y: event.clientY, pan };
+    // Zoomed in → drag to pan. At normal zoom → arm a horizontal swipe that
+    // flips to the previous/next media (WhatsApp-style).
+    dragRef.current = { x: event.clientX, y: event.clientY, pan, swipe: zoom <= 1 };
     event.currentTarget.setPointerCapture?.(event.pointerId);
   }
   function onImgPointerMove(event) {
-    if (!dragRef.current) return;
+    if (!dragRef.current || dragRef.current.swipe) return;
     setPan({ x: dragRef.current.pan.x + (event.clientX - dragRef.current.x), y: dragRef.current.pan.y + (event.clientY - dragRef.current.y) });
   }
-  function onImgPointerUp() { dragRef.current = null; }
+  function onImgPointerUp(event) {
+    const drag = dragRef.current;
+    dragRef.current = null;
+    if (drag?.swipe) {
+      const dx = event.clientX - drag.x;
+      const dy = event.clientY - drag.y;
+      if (Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy)) {
+        if (dx > 0 && index > 0) onIndexChange(index - 1);
+        else if (dx < 0 && index < items.length - 1) onIndexChange(index + 1);
+      }
+    }
+  }
 
   if (editing && editFile) {
     return <PhotoEditor file={editFile} onCancel={() => setEditing(false)} onDone={saveEdited}/>;
@@ -5727,8 +5752,7 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
       <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 16px", flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, color: "#fff" }}>
           {current && (
-            <Av av={(senderName || "?")[0]} color={current.sender_color || G.accent} size={36}
-                photoId={current.sender_avatar_attachment_id}/>
+            <Av av={senderLetter} color={senderColor} size={36} photoId={senderPhoto}/>
           )}
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>

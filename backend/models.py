@@ -437,6 +437,13 @@ class StoryRequest(BaseModel):
     attachment_id: Optional[str] = None
     link_url: Optional[str] = Field(default=None, max_length=2000)
 
+    # Optional background music (an iTunes preview clip) attached to any status —
+    # the previewable audio URL plus title/artist/artwork for the now-playing chip.
+    music_url: Optional[str] = Field(default=None, max_length=2000)
+    music_title: Optional[str] = Field(default=None, max_length=200)
+    music_artist: Optional[str] = Field(default=None, max_length=200)
+    music_artwork: Optional[str] = Field(default=None, max_length=2000)
+
     # Leave unset to post immediately. Set it to queue the status for later —
     # the 24-hour lifetime then starts when it publishes, not when you wrote it.
     publish_at: Optional[float] = None

@@ -702,6 +702,8 @@ function Compose({ initialKind, onClose, onDone, toast }) {
         attachmentId: upload?.attachmentId || null,
         linkUrl: kind === "link" ? trimmedLink : null,
         publishAt, font, fontSize, allowShare,
+        // Background music (iTunes preview) attached to any status kind.
+        music: selectedMusic || null,
       });
       toast(later ? "Status queued" : "Status posted");
       onDone();
@@ -1141,14 +1143,14 @@ function StoryViewer({ story, author, me, toast, allAuthors, onClose, onStoryCha
   const STORY_DURATION = 6000; // 6s per story
 
   useEffect(() => {
-    if (isMedia) return; // don't auto-advance media
-    progressTimerRef.current = setTimeout(() => {
-      if (currentIndex < stories.length - 1) {
-        onStoryChange(stories[currentIndex + 1], author);
-      }
-    }, STORY_DURATION);
+    // Auto-advance like WhatsApp. Photo / text / link move on after a fixed
+    // beat; video & audio instead advance when the clip finishes (StoryMedia's
+    // onEnded), so they aren't cut off — with a long safety timer as a fallback
+    // in case the media never fires "ended" (e.g. a failed load).
+    const isTimed = story.kind === "video" || story.kind === "audio";
+    progressTimerRef.current = setTimeout(goNext, isTimed ? 60000 : STORY_DURATION);
     return () => clearTimeout(progressTimerRef.current);
-  }, [story.id, isMedia]);
+  }, [story.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!isAuthor) return;
@@ -1334,6 +1336,36 @@ function StoryViewer({ story, author, me, toast, allAuthors, onClose, onStoryCha
         position: "absolute", right: 0, top: 60, bottom: 80, width: "30%", zIndex: 1,
       }}/>
 
+      {/* Background music for this status (an iTunes preview clip). Muted the
+          audio element already inside a video story to avoid two audio tracks
+          fighting each other. */}
+      {story.music_url && story.kind !== "video" && story.kind !== "audio" && (
+        <StoryMusic src={story.music_url} onEnded={goNext}/>
+      )}
+      {story.music_url && (story.music_title || story.music_artist) && (
+        <div style={{
+          position: "absolute", top: 66, left: 12, right: 12, zIndex: 3,
+          display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderRadius: 24,
+          background: "#00000088", backdropFilter: "blur(6px)", color: "#fff",
+        }}>
+          {story.music_artwork
+            ? <img src={story.music_artwork} alt="" referrerPolicy="no-referrer" style={{
+                width: 30, height: 30, borderRadius: 6, flexShrink: 0, objectFit: "cover",
+              }}/>
+            : <div style={{ flexShrink: 0 }}>{I.musicNote("#fff", 20)}</div>}
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{
+              fontSize: 12.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            }}>{story.music_title || "Music"}</div>
+            {story.music_artist && (
+              <div style={{
+                fontSize: 11, opacity: 0.85, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              }}>{story.music_artist}</div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Story content */}
       <div style={{
         flex: 1, display: "flex", flexDirection: "column",
@@ -1341,7 +1373,7 @@ function StoryViewer({ story, author, me, toast, allAuthors, onClose, onStoryCha
         background: isMedia ? "#000" : (story.background || G.bg),
       }}>
         {(story.kind === "photo" || story.kind === "video") && (
-          <StoryMedia story={story}/>
+          <StoryMedia story={story} onEnded={goNext}/>
         )}
         {story.kind === "audio" && (
           <div style={{ width: "100%", maxWidth: 340, textAlign: "center", color: "#fff" }}>
@@ -1349,7 +1381,7 @@ function StoryViewer({ story, author, me, toast, allAuthors, onClose, onStoryCha
               width: 80, height: 80, borderRadius: "50%", background: `${G.accent}22`,
               display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px",
             }}>{I.musicNote(G.accent, 36)}</div>
-            <StoryMedia story={story}/>
+            <StoryMedia story={story} onEnded={goNext}/>
           </div>
         )}
         {story.kind === "link" && (
@@ -1588,9 +1620,10 @@ function StoryActivitySheet({ activity, onClose }) {
   );
 }
 
-function StoryMedia({ story }) {
+function StoryMedia({ story, onEnded }) {
   const [blobUrl, setBlobUrl] = useState(null);
   const [error, setError] = useState(false);
+  const mediaRef = useRef(null);
 
   useEffect(() => {
     if (!story.attachment_id) return;
@@ -1611,6 +1644,18 @@ function StoryMedia({ story }) {
     };
   }, [story.attachment_id]);
 
+  // Kick off playback explicitly once the blob is in — the element is created
+  // AFTER the async fetch (outside the opening tap's gesture window), so some
+  // mobile browsers won't honour the `autoPlay` attribute on its own. If sound
+  // is still blocked, retry muted so at least a video keeps playing.
+  useEffect(() => {
+    const el = mediaRef.current;
+    if (!el || !blobUrl) return;
+    el.play?.().catch(() => {
+      if (story.kind === "video") { el.muted = true; el.play?.().catch(() => {}); }
+    });
+  }, [blobUrl, story.kind]);
+
   if (error) return <div style={{ color: "#fff", fontSize: 14 }}>Could not load file</div>;
   if (!blobUrl) return <Spinner/>;
 
@@ -1619,8 +1664,24 @@ function StoryMedia({ story }) {
                 style={{ maxWidth: "100%", maxHeight: "60vh", borderRadius: 12, objectFit: "contain" }}/>;
   }
   if (story.kind === "video") {
-    return <video src={blobUrl} controls autoPlay
+    return <video ref={mediaRef} src={blobUrl} controls autoPlay playsInline onEnded={onEnded}
                   style={{ maxWidth: "100%", maxHeight: "60vh", borderRadius: 12 }}/>;
   }
-  return <audio src={blobUrl} controls autoPlay style={{ width: "100%", marginTop: 14 }}/>;
+  return <audio ref={mediaRef} src={blobUrl} controls autoPlay onEnded={onEnded}
+                style={{ width: "100%", marginTop: 14 }}/>;
+}
+
+/** Background music (iTunes preview URL) attached to a status. Kick off play
+ *  explicitly, since the element mounts after the tap gesture that opened the
+ *  viewer; if the browser still refuses sound, silently give up rather than
+ *  showing a controls bar over the status. */
+function StoryMusic({ src, onEnded }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.play?.().catch(() => {});
+  }, [src]);
+  return <audio ref={ref} src={src} autoPlay preload="auto" onEnded={onEnded}
+                style={{ display: "none" }}/>;
 }

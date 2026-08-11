@@ -831,6 +831,7 @@ export default function App() {
             <Settings me={me} onUpdated={setMe} toast={toast}
                       theme={theme} onThemeChange={setTheme}
                       accent={accent} onAccentChange={setAccent}
+                      onOpenChat={(chat) => { reloadChats(); setOpenChat(chat); }}
                       onSignedOut={() => { setMe(null); setChats([]); setTab("chats"); }}/>
           )}
           {tab === "admin" && me.is_superadmin && <AdminPanel toast={toast}/>}
@@ -1232,7 +1233,7 @@ function DesktopShell({
 
   return (
     <div style={{
-      height: "100vh", overflow: "hidden", background: G.bg,
+      height: "var(--app-height, 100vh)", overflow: "hidden", background: G.bg,
       fontFamily: "'SF Pro Text',-apple-system,sans-serif", color: G.text,
       display: "flex",
     }}>
@@ -1289,6 +1290,7 @@ function DesktopShell({
               <Settings me={me} onUpdated={onMeUpdated} toast={toast}
                         theme={theme} onThemeChange={onThemeChange}
                         accent={accent} onAccentChange={onAccentChange}
+                        onOpenChat={onOpenChat}
                         onSignedOut={onSignedOut}/>
             )}
             {tab === "admin" && me.is_superadmin && <AdminPanel toast={toast}/>}

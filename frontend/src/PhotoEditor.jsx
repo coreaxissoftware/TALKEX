@@ -191,12 +191,14 @@ const TOOL_ICON_MAP = {
  *
  * Pinch-to-zoom replaces the zoom slider.
  */
-export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey }) {
+export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, initialTool }) {
   const [rotatedSrc, setRotatedSrc] = useState(null);
   const [rotation, setRotation] = useState(0);
   const [flipped, setFlipped] = useState(false);
-  // Opening the editor for a fixed target (e.g. a cover photo) starts it locked
-  // to that aspect and on the crop tool, so the user lands straight on framing.
+  // Opening the editor for framing (e.g. a cover photo) starts on the crop tool.
+  // `initialAspectKey` is optional — omit it to start on FREE crop with the
+  // fully draggable/resizable crop box (the flexible mode), which the user can
+  // still switch to any fixed ratio (including "Cover") from the aspect pills.
   const [aspect, setAspect] = useState(
     () => ASPECTS.find((a) => a.key === initialAspectKey) || ASPECTS[0]);
   const [filter, setFilter] = useState(FILTERS[0]);
@@ -214,7 +216,7 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey }
   const [saturation, setSaturation] = useState(100);
 
   const [marks, setMarks] = useState([]);
-  const [tool, setTool] = useState(initialAspectKey ? "crop" : null);
+  const [tool, setTool] = useState((initialTool || initialAspectKey) ? "crop" : null);
   const [activeTab, setActiveTab] = useState("adjust");
   const [drawColor, setDrawColor] = useState(DRAW_COLORS[0]);
   const [drawSize, setDrawSize] = useState(3);

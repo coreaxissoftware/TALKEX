@@ -941,6 +941,13 @@ COLUMNS_ADDED_LATER = [
     ("attachments", "story_id", "TEXT"),
     ("stories", "font", "TEXT NOT NULL DEFAULT 'system'"),
     ("stories", "font_size", "TEXT NOT NULL DEFAULT 'medium'"),
+    # Optional background music attached to a status (an iTunes preview clip):
+    # the previewable audio URL plus its title/artist/artwork for the now-playing
+    # chip. Empty when the status has no music.
+    ("stories", "music_url", "TEXT NOT NULL DEFAULT ''"),
+    ("stories", "music_title", "TEXT NOT NULL DEFAULT ''"),
+    ("stories", "music_artist", "TEXT NOT NULL DEFAULT ''"),
+    ("stories", "music_artwork", "TEXT NOT NULL DEFAULT ''"),
     ("chats", "slow_mode_secs", "INTEGER NOT NULL DEFAULT 0"),
     # Channel/group posts allow reactions by default; an admin can switch them
     # off (see /chats/{id}/reactions-policy).
