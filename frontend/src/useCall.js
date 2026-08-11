@@ -122,22 +122,43 @@ export function useCall(events, send, toast) {
   const ringTimerRef = useRef(null);
   const durationTimerRef = useRef(null);
   const lastApplied = useRef(0);
+  // The camera-effects canvas pipeline, when an effect is active:
+  // { raf, video, canvas, rawTrack, filter }. rawTrack is the genuine camera
+  // feed; the sender/preview run off the filtered canvas capture instead.
+  const effectRef = useRef(null);
 
   const sendRef = useRef(send);
   sendRef.current = send;
   const toastRef = useRef(toast);
   toastRef.current = toast;
 
+  // Tear down the camera-effects canvas loop, returning the raw camera track
+  // it was fed from (so a caller can restore or stop it). Safe to call when no
+  // effect is running.
+  const stopEffectPipeline = useCallback(() => {
+    const eff = effectRef.current;
+    if (!eff) return null;
+    cancelAnimationFrame(eff.raf);
+    if (eff.video) eff.video.srcObject = null;
+    effectRef.current = null;
+    return eff.rawTrack;
+  }, []);
+
   const teardown = useCallback(() => {
     clearTimeout(ringTimerRef.current);
     clearInterval(durationTimerRef.current);
     pcRef.current?.close();
     pcRef.current = null;
+    // Stop the effects pipeline and its raw camera track — the raw track lives
+    // outside localStream while an effect is active, so it wouldn't be stopped
+    // by the loop below on its own.
+    const rawTrack = stopEffectPipeline();
+    rawTrack?.stop();
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
     localStreamRef.current = null;
     pendingOfferRef.current = null;
     pendingCandidatesRef.current = [];
-  }, []);
+  }, [stopEffectPipeline]);
 
   const logOutcome = useCallback((snapshot, status, durationSecs = 0) => {
     Messages.send({
@@ -411,7 +432,12 @@ export function useCall(events, send, toast) {
     const pc = pcRef.current;
     const current = callRef.current;
     if (!pc || !current?.localStream || current.sharingScreen) return;
-    const existingTrack = current.localStream.getVideoTracks()[0];
+    // An active camera effect means the localStream carries the CANVAS track,
+    // not the real camera — flip from the genuine camera track and tear the
+    // effect down (it can be re-enabled after the flip). Otherwise flip from
+    // whatever's live.
+    const effectRaw = stopEffectPipeline();
+    const existingTrack = effectRaw || current.localStream.getVideoTracks()[0];
     if (!existingTrack) return; // voice-only call — nothing to flip
 
     const nextFacing = current.facingMode === "environment" ? "user" : "environment";
@@ -440,8 +466,71 @@ export function useCall(events, send, toast) {
     existingTrack.stop();
     localStreamRef.current = newLocal;
 
-    setCall((c) => (c ? { ...c, localStream: newLocal, facingMode: nextFacing } : c));
-  }, []);
+    setCall((c) => (c ? { ...c, localStream: newLocal, facingMode: nextFacing, videoEffect: "none" } : c));
+  }, [stopEffectPipeline]);
+
+  // Applies a live camera effect (a CSS-style filter) to the OUTGOING video —
+  // not just the local preview — by piping the raw camera through a hidden
+  // canvas that redraws each frame with ctx.filter set, then sending the
+  // canvas's captureStream in place of the camera. Passing "none" restores the
+  // untouched camera. Video calls only, and not while sharing the screen.
+  const setVideoEffect = useCallback(async (filter) => {
+    const pc = pcRef.current;
+    const current = callRef.current;
+    if (!pc || !current?.localStream || current.callKind !== "video" || current.sharingScreen) return;
+    const sender = pc.getSenders().find((s) => s.track?.kind === "video");
+    if (!sender) return;
+
+    const rawTrack = effectRef.current?.rawTrack || current.localStream.getVideoTracks()[0];
+    if (!rawTrack) return;
+
+    if (!filter || filter === "none") {
+      stopEffectPipeline();
+      await sender.replaceTrack(rawTrack).catch(() => {});
+      const restored = new MediaStream();
+      current.localStream.getAudioTracks().forEach((t) => restored.addTrack(t));
+      restored.addTrack(rawTrack);
+      localStreamRef.current = restored;
+      setCall((c) => (c ? { ...c, localStream: restored, videoEffect: "none" } : c));
+      return;
+    }
+
+    // Already running — just change the filter; the draw loop reads it live.
+    if (effectRef.current) {
+      effectRef.current.filter = filter;
+      setCall((c) => (c ? { ...c, videoEffect: filter } : c));
+      return;
+    }
+
+    const settings = rawTrack.getSettings?.() || {};
+    const w = settings.width || 640;
+    const h = settings.height || 480;
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = new MediaStream([rawTrack]);
+    await video.play().catch(() => {});
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    const eff = { video, canvas, rawTrack, filter, raf: 0 };
+    const draw = () => {
+      ctx.filter = eff.filter;
+      try { ctx.drawImage(video, 0, 0, w, h); } catch { /* frame not ready yet */ }
+      eff.raf = requestAnimationFrame(draw);
+    };
+    eff.raf = requestAnimationFrame(draw);
+    effectRef.current = eff;
+
+    const canvasTrack = canvas.captureStream(24).getVideoTracks()[0];
+    await sender.replaceTrack(canvasTrack).catch(() => {});
+    const filtered = new MediaStream();
+    current.localStream.getAudioTracks().forEach((t) => filtered.addTrack(t));
+    filtered.addTrack(canvasTrack);
+    localStreamRef.current = filtered;
+    setCall((c) => (c ? { ...c, localStream: filtered, videoEffect: filter } : c));
+  }, [stopEffectPipeline]);
 
   // Swaps the outgoing video track for a screen-capture track via
   // RTCRtpSender.replaceTrack — no renegotiation needed because it's the
@@ -473,9 +562,13 @@ export function useCall(events, send, toast) {
       return; // the person cancelled the OS share picker — not an error
     }
     const screenTrack = screenStream.getVideoTracks()[0];
-    const cameraTrack = current.localStream.getVideoTracks()[0];
+    // If a camera effect is running, restore to the RAW camera track for the
+    // swap-back (the canvas track would be a frozen, orphaned feed once the
+    // pipeline stops). Turning the effect off here keeps screen-share simple.
+    const effectRaw = stopEffectPipeline();
+    const cameraTrack = effectRaw || current.localStream.getVideoTracks()[0];
     await sender.replaceTrack(screenTrack);
-    setCall((c) => (c ? { ...c, sharingScreen: true } : c));
+    setCall((c) => (c ? { ...c, sharingScreen: true, videoEffect: "none" } : c));
 
     // The browser's own "Stop sharing" control (not any button of ours) is
     // how most people end a share — this is the only reliable way to hear
@@ -486,7 +579,7 @@ export function useCall(events, send, toast) {
       }
       setCall((c) => (c ? { ...c, sharingScreen: false } : c));
     };
-  }, []);
+  }, [stopEffectPipeline]);
 
   const stopSharingScreen = useCallback(() => {
     const current = callRef.current;
@@ -603,6 +696,6 @@ export function useCall(events, send, toast) {
 
   return {
     call, startCall, acceptIncoming, rejectIncoming, endCall, toggleMute, toggleCamera, switchCamera,
-    shareScreen, stopSharingScreen,
+    shareScreen, stopSharingScreen, setVideoEffect,
   };
 }

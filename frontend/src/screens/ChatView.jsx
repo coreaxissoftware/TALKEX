@@ -2767,7 +2767,7 @@ function Banner({ label, onClear }) {
   );
 }
 
-const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES = 256 * 1024 * 1024;
 
 function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
                     disappearSecs, editing, members, toast, viewOnce, onToggleViewOnce,
@@ -4617,6 +4617,31 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
     onChanged();
   }
 
+  const avatarInputRef = useRef(null);
+  async function changeAvatar(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      await Chats.setAvatar(chat.id, file);
+      reloadFull();
+      onChanged();
+      toast("Photo updated");
+    } catch (problem) {
+      toast(problem.message || "Could not update photo");
+    }
+  }
+  async function removeAvatar() {
+    try {
+      await Chats.removeAvatar(chat.id);
+      reloadFull();
+      onChanged();
+      toast("Photo removed");
+    } catch (problem) {
+      toast(problem.message || "Could not remove photo");
+    }
+  }
+
   async function saveInfo() {
     if (!infoForm.name.trim()) { toast("Name cannot be empty"); return; }
     try {
@@ -4648,7 +4673,22 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
   return (
     <Sheet title={chat.name || "Chat info"} onClose={onClose} side="right">
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
-        <Av av={chat.avatar_letter} color={chat.color} size={52} photoId={chat.avatar_attachment_id}/>
+        {MANAGED_TYPES.includes(chat.type) && canManage ? (
+          <div style={{ position: "relative", cursor: "pointer" }}
+               onClick={() => avatarInputRef.current?.click()}
+               title="Change photo">
+            <Av av={chat.avatar_letter} color={chat.color} size={52} photoId={chat.avatar_attachment_id}/>
+            <div style={{
+              position: "absolute", bottom: -2, right: -2, width: 22, height: 22, borderRadius: "50%",
+              background: G.accent, border: `2px solid ${G.surface}`,
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>{I.camera("#fff", 12)}</div>
+            <input ref={avatarInputRef} type="file" accept="image/*" style={{ display: "none" }}
+                   onChange={changeAvatar}/>
+          </div>
+        ) : (
+          <Av av={chat.avatar_letter} color={chat.color} size={52} photoId={chat.avatar_attachment_id}/>
+        )}
         <div>
           <div style={{ fontSize: 16, fontWeight: 700, display: "flex", alignItems: "center", gap: 5 }}>
             {chat.name || "Direct message"} {chat.peer_blue_tick && I.blueTick(14)}
@@ -4700,6 +4740,10 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
               <Button onClick={saveInfo} style={{ flex: 1 }}>Save</Button>
               <Button variant="ghost" onClick={() => setEditingInfo(false)} style={{ flex: 1 }}>Cancel</Button>
             </div>
+            {chat.avatar_attachment_id && (
+              <Button variant="ghost" onClick={removeAvatar}
+                      style={{ width: "100%", marginTop: 8, color: G.red }}>Remove photo</Button>
+            )}
           </div>
         ) : (
           <div style={{ marginBottom: 14 }}>

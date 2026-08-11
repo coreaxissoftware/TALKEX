@@ -1072,6 +1072,18 @@ COLUMNS_ADDED_LATER = [
     # admins can send messages" switch. Channels are admin-post-only regardless;
     # this is the knob groups didn't have.
     ("chats", "send_policy", "TEXT NOT NULL DEFAULT 'all'"),
+    # A group/channel/community's own photo, mirroring users.avatar_attachment_id.
+    # NULL falls back to the coloured letter avatar.
+    ("chats", "avatar_attachment_id", "TEXT"),
+    # Binds an upload as a chat's photo — the chat counterpart to
+    # avatar_of_user_id. Both must be excluded from orphan cleanup (below) or a
+    # freshly-set group photo would be swept within the hour.
+    ("attachments", "avatar_of_chat_id", "TEXT"),
+    # An ephemeral "call room": a group created only to host a multi-party call
+    # started by adding a participant to a 1:1 call. It hosts the ordinary
+    # group-call mesh but is hidden from every chat list, so it behaves like an
+    # ad-hoc call rather than a persistent group you have to clean up later.
+    ("chats", "ephemeral", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -1096,7 +1108,8 @@ def _add_missing_columns(conn: sqlite3.Connection):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_users_referred_by ON users (referred_by)")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_attachments_orphans ON attachments (created_at) "
-            "WHERE message_id IS NULL AND story_id IS NULL AND avatar_of_user_id IS NULL"
+            "WHERE message_id IS NULL AND story_id IS NULL AND avatar_of_user_id IS NULL "
+            "AND avatar_of_chat_id IS NULL"
         )
         conn.commit()
 

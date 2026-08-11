@@ -40,7 +40,7 @@ import db
 # Where the files go. Kept beside the database so one mounted disk covers both.
 UPLOAD_DIR = os.path.join(db.DATA_DIR, "uploads")
 
-MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 25 * 1024 * 1024))  # 25 MB
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 256 * 1024 * 1024))  # 256 MB
 
 # Read in chunks so memory use does not scale with the size of the upload.
 CHUNK_BYTES = 64 * 1024
@@ -219,6 +219,26 @@ def attach_to_avatar(attachment_id: str, user_id: str) -> dict | None:
     return dict(db.query_one("SELECT * FROM attachments WHERE id = ?", (attachment_id,)))
 
 
+def attach_to_chat_avatar(attachment_id: str, chat_id: str, uploader_id: str) -> dict | None:
+    """
+    Bind an upload as a chat's (group/channel/community) photo — the chat
+    counterpart to attach_to_avatar. The caller (main.py) has already checked
+    the uploader is an admin of the chat; here we only enforce that the upload
+    is theirs and still unbound, so it can't be stolen from another purpose.
+    """
+    changed = db.execute(
+        """
+        UPDATE attachments SET avatar_of_chat_id = ?
+        WHERE id = ? AND uploader_id = ? AND message_id IS NULL AND story_id IS NULL
+          AND avatar_of_user_id IS NULL AND avatar_of_chat_id IS NULL
+        """,
+        (chat_id, attachment_id, uploader_id),
+    )
+    if changed.rowcount == 0:
+        return None
+    return dict(db.query_one("SELECT * FROM attachments WHERE id = ?", (attachment_id,)))
+
+
 def duplicate_for_message(attachment_id: str, new_message_id: str) -> str | None:
     """
     Copy an attachment's file to a new id, bound directly to a different
@@ -284,7 +304,7 @@ def sweep_orphans(older_than_seconds: float = 3600) -> int:
     cutoff = time.time() - older_than_seconds
     orphans = db.query_all(
         "SELECT id FROM attachments WHERE message_id IS NULL AND story_id IS NULL "
-        "AND avatar_of_user_id IS NULL AND created_at < ?",
+        "AND avatar_of_user_id IS NULL AND avatar_of_chat_id IS NULL AND created_at < ?",
         (cutoff,),
     )
     for orphan in orphans:

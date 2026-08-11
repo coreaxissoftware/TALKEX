@@ -510,6 +510,22 @@ export default function App() {
   const call = useCall(events, realtime.send, toast);
   const groupCall = useGroupCall(events, realtime.send, toast, reconnectedAt);
 
+  // "Add participant" during a 1:1 call: spin up a hidden ephemeral call room
+  // holding the current peer + whoever's being added, end the 1:1, and start a
+  // group call there — everyone gets rung by the usual group_call flow.
+  const addParticipantToCall = useCallback(async (userIds) => {
+    const active = call.call;
+    if (!active?.peerId) return;
+    const kind = active.callKind || "video";
+    try {
+      const room = await Chats.createCallRoom([active.peerId, ...userIds], "Group call");
+      call.endCall();
+      await groupCall.join(room.id, kind);
+    } catch (problem) {
+      toast(problem.message || "Could not add participant");
+    }
+  }, [call, groupCall, toast]);
+
   // The composer fires this instead of importing the connection directly, so
   // typing signals do not force the socket through the component tree.
   useEffect(() => {
@@ -736,7 +752,7 @@ export default function App() {
         <Toast text={toastText}/>
         <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
                      onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
-                     onSwitchCamera={call.switchCamera}
+                     onSwitchCamera={call.switchCamera} onEffect={call.setVideoEffect} onAddParticipant={addParticipantToCall}
                      onShareScreen={call.shareScreen}/>
         <GroupCallOverlay call={groupCall.call} myUserId={me?.id}
                           onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
@@ -823,7 +839,7 @@ export default function App() {
       <Toast text={toastText}/>
       <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
                    onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
-                     onSwitchCamera={call.switchCamera}
+                     onSwitchCamera={call.switchCamera} onEffect={call.setVideoEffect} onAddParticipant={addParticipantToCall}
                    onShareScreen={call.shareScreen}/>
       <GroupCallOverlay call={groupCall.call} myUserId={me?.id}
                         onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
@@ -1303,7 +1319,7 @@ function DesktopShell({
       <Toast text={toastText}/>
       <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
                    onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
-                     onSwitchCamera={call.switchCamera}
+                     onSwitchCamera={call.switchCamera} onEffect={call.setVideoEffect} onAddParticipant={addParticipantToCall}
                    onShareScreen={call.shareScreen}/>
       <GroupCallOverlay call={groupCall.call} myUserId={me?.id}
                         onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}

@@ -420,8 +420,29 @@ export const Chats = {
   // Admin toggle: whether messages/posts in this channel or group can be reacted to.
   setReactionsPolicy: (chatId, enabled) => put(`/chats/${chatId}/reactions-policy?enabled=${enabled}`),
 
+  // An ephemeral, chat-list-hidden group that hosts an ad-hoc multi-party
+  // call (what "add participant" during a 1:1 call creates).
+  createCallRoom: (memberIds, name = "Group call") =>
+    post("/call-rooms", { name, member_ids: memberIds }),
+
   // Edit a group/channel/community's own name & description (admin action).
   updateInfo: (chatId, fields) => put(`/chats/${chatId}/info`, fields),
+  // Group/channel photo — one call sets it, mirroring Me.setAvatar.
+  async setAvatar(chatId, file) {
+    const body = new FormData();
+    body.append("file", file);
+    const response = await fetch(`${BASE}/chats/${chatId}/avatar`, {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body,
+    });
+    if (!response.ok) {
+      const problem = await response.json().catch(() => ({}));
+      throw new ApiError(response.status, problem.detail);
+    }
+    return response.json();
+  },
+  removeAvatar: (chatId) => remove(`/chats/${chatId}/avatar`),
   // WhatsApp's "Only admins can send messages" group switch.
   setSendPolicy: (chatId, adminsOnly) => put(`/chats/${chatId}/send-policy?admins_only=${adminsOnly}`),
 

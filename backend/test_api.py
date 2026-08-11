@@ -2322,8 +2322,11 @@ def test_html_and_svg_uploads_are_refused(client):
                   "image/svg+xml").status_code == 415
 
 
-def test_oversized_upload_is_refused(client):
+def test_oversized_upload_is_refused(client, monkeypatch):
     alice, _, _ = make_user(client, "Alice")
+    # Temporarily shrink the cap so we don't have to allocate and stream the
+    # real 256 MB limit + 1 byte just to prove the refusal path works.
+    monkeypatch.setattr(main.uploads, "MAX_UPLOAD_BYTES", 1 * 1024 * 1024)
     too_big = b"x" * (main.uploads.MAX_UPLOAD_BYTES + 1024)
 
     response = upload(client, alice, "big.bin", too_big, "application/octet-stream")
@@ -4776,6 +4779,64 @@ def test_setting_and_removing_a_profile_photo(client):
     assert me["avatar_attachment_id"] == attachment_id
 
     removed = client.delete("/me/avatar", headers=alice)
+    assert removed.status_code == 200
+    assert removed.json()["avatar_attachment_id"] is None
+
+
+def test_ephemeral_call_room_is_created_but_hidden_from_chat_lists(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    carol, carol_id, _ = make_user(client, "Carol")
+
+    # Alice is on a 1:1 with Bob and "adds" Carol → an ephemeral call room with
+    # all three.
+    room = client.post("/call-rooms", headers=alice,
+                       json={"name": "Group call", "member_ids": [bob_id, carol_id]})
+    assert room.status_code == 200, room.text
+    room_id = room.json()["id"]
+    assert {m["id"] for m in room.json()["members"]} == {alice_id, bob_id, carol_id}
+
+    # It hosts a call but must NOT clutter anyone's chat list.
+    for headers in (alice, bob, carol):
+        ids = [c["id"] for c in client.get("/chats", headers=headers).json()]
+        assert room_id not in ids
+
+    # It's still openable directly by its members (so the call UI can load it).
+    assert client.get(f"/chats/{room_id}", headers=carol).status_code == 200
+    # A non-member can't.
+    stranger, _, _ = make_user(client, "Stranger")
+    assert client.get(f"/chats/{room_id}", headers=stranger).status_code == 404
+
+    # Needs at least one other person.
+    assert client.post("/call-rooms", headers=alice,
+                       json={"name": "x", "member_ids": []}).status_code == 400
+
+
+def test_group_photo_can_be_set_by_admin_and_viewed_by_members(client):
+    owner, owner_id, _ = make_user(client, "Owner")
+    member, member_id, _ = make_user(client, "Member")
+    group_id = client.post("/chats/group", headers=owner,
+                           json={"name": "Squad", "member_ids": [member_id]}).json()["id"]
+
+    # A plain member can't set the photo.
+    denied = client.post(f"/chats/{group_id}/avatar", headers=member,
+                         files={"file": ("g.png", b"\x89PNG fake", "image/png")})
+    assert denied.status_code == 403
+
+    # The owner (admin) can — it shows up on the chat for everyone.
+    uploaded = client.post(f"/chats/{group_id}/avatar", headers=owner,
+                           files={"file": ("g.png", b"\x89PNG fake", "image/png")})
+    assert uploaded.status_code == 200, uploaded.text
+    attachment_id = uploaded.json()["avatar_attachment_id"]
+    assert attachment_id
+    fetched = client.get(f"/chats/{group_id}", headers=member).json()
+    assert fetched["avatar_attachment_id"] == attachment_id
+
+    # Any member can download the photo file.
+    assert client.get(f"/uploads/{attachment_id}", headers=member).status_code == 200
+
+    # Removing it falls back to the letter avatar.
+    removed = client.delete(f"/chats/{group_id}/avatar", headers=owner)
     assert removed.status_code == 200
     assert removed.json()["avatar_attachment_id"] is None
 

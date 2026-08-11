@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Contacts } from "../api.js";
 import { Av, G, I, useCallLayout } from "../ui.jsx";
 
 export function mmss(totalSeconds) {
@@ -286,7 +287,8 @@ export function MoreMenu({ items, onClose }) {
  * property of the chat screen, it can interrupt anything.
  */
 export default function CallOverlay({
-  call, onAccept, onReject, onEnd, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen,
+  call, onAccept, onReject, onEnd, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen, onEffect,
+  onAddParticipant,
 }) {
   const [sinkId, setSinkId] = useState(undefined);
   const [minimized, setMinimized] = useState(false);
@@ -348,7 +350,8 @@ export default function CallOverlay({
       {call.phase === "active" && (
         <ActiveCall call={call} onEnd={onEnd} onToggleMute={onToggleMute} onToggleCamera={onToggleCamera}
                     onSwitchCamera={onSwitchCamera} onMinimize={() => setMinimized(true)}
-                    onShareScreen={onShareScreen} sinkId={sinkId} onSinkId={setSinkId}
+                    onShareScreen={onShareScreen} onEffect={onEffect} onAddParticipant={onAddParticipant}
+                    sinkId={sinkId} onSinkId={setSinkId}
                     isLandscape={isLandscape}/>
       )}
     </div>
@@ -498,9 +501,21 @@ function OutgoingCall({ call, onEnd }) {
   );
 }
 
-function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen, onMinimize, sinkId, onSinkId, isLandscape }) {
+const VIDEO_EFFECTS = [
+  { key: "none", label: "None", filter: "none" },
+  { key: "blur", label: "Blur", filter: "blur(6px)" },
+  { key: "bright", label: "Bright", filter: "brightness(1.25) contrast(1.05)" },
+  { key: "warm", label: "Warm", filter: "sepia(0.35) saturate(1.3)" },
+  { key: "cool", label: "Cool", filter: "hue-rotate(-15deg) saturate(1.2) brightness(1.05)" },
+  { key: "mono", label: "Mono", filter: "grayscale(1) contrast(1.1)" },
+  { key: "vivid", label: "Vivid", filter: "saturate(1.8) contrast(1.1)" },
+];
+
+function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen, onEffect, onAddParticipant, onMinimize, sinkId, onSinkId, isLandscape }) {
   const [showSpeakerPicker, setShowSpeakerPicker] = useState(false);
   const [showMore, setShowMore] = useState(false);
+  const [showEffects, setShowEffects] = useState(false);
+  const [showAdd, setShowAdd] = useState(false);
   // Tap the small self/peer tile to swap which feed is the big one — the
   // WhatsApp "tap to make my camera the main view" gesture. Pure local UI.
   const [swapped, setSwapped] = useState(false);
@@ -638,6 +653,13 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
       )}
       {showMore && (
         <MoreMenu onClose={() => setShowMore(false)} items={[
+          ...(onAddParticipant ? [{
+            // Add someone to the call → migrates this 1:1 into an ad-hoc
+            // group call in a hidden call room.
+            label: "Add participant",
+            icon: I.userPlus ? I.userPlus("#fff", 18) : I.user("#fff", 18),
+            onClick: () => { setShowMore(false); setShowAdd(true); },
+          }] : []),
           {
             // Minimize back to the conversation — WhatsApp's in-call "chat"
             // button: the call shrinks to the floating window and the chat
@@ -645,6 +667,14 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
             label: "Chat / minimize",
             icon: I.chat("#fff", 18),
             onClick: () => { setShowMore(false); onMinimize?.(); },
+          },
+          {
+            label: "Effects",
+            sub: call.callKind !== "video" ? "Turn your camera on first"
+              : call.sharingScreen ? "Not while sharing screen" : undefined,
+            icon: I.sparkles ? I.sparkles("#fff", 18) : I.star("#fff", 18),
+            disabled: call.callKind !== "video" || call.sharingScreen,
+            onClick: () => { setShowMore(false); setShowEffects(true); },
           },
           {
             label: call.sharingScreen ? "Stop sharing screen" : "Share screen",
@@ -655,7 +685,124 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
           },
         ]}/>
       )}
+
+      {showAdd && (
+        <AddParticipantSheet
+          onClose={() => setShowAdd(false)}
+          onAdd={(ids) => { setShowAdd(false); onAddParticipant?.(ids); }}/>
+      )}
+
+      {showEffects && (
+        <div onClick={() => setShowEffects(false)} style={{
+          position: "absolute", inset: 0, zIndex: 3, background: "#00000055",
+          display: "flex", alignItems: "flex-end", justifyContent: "center",
+        }}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            width: "100%", maxWidth: 430, background: "#111a2b", color: "#fff",
+            borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: "16px 16px 28px",
+          }}>
+            <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Camera effects</div>
+            <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 4 }}>
+              {VIDEO_EFFECTS.map((effect) => {
+                const active = (call.videoEffect || "none") === effect.filter
+                  || (effect.key === "none" && !call.videoEffect);
+                return (
+                  <button key={effect.key} onClick={() => { onEffect?.(effect.filter); }} style={{
+                    flexShrink: 0, padding: "10px 16px", borderRadius: 12, cursor: "pointer",
+                    border: `2px solid ${active ? "#3b82f6" : "#ffffff22"}`,
+                    background: active ? "#3b82f633" : "#ffffff10", color: "#fff",
+                    fontSize: 12.5, fontWeight: 600,
+                  }}>{effect.label}</button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
     </>
+  );
+}
+
+/**
+ * Picks people to pull into the call from the caller's saved TalkEx contacts.
+ * Multi-select; "Add" hands the chosen ids up, where the 1:1 call is migrated
+ * into an ad-hoc group call in a hidden call room.
+ */
+function AddParticipantSheet({ onClose, onAdd }) {
+  const [contacts, setContacts] = useState(null);
+  const [selected, setSelected] = useState(() => new Set());
+  const [query, setQuery] = useState("");
+
+  useEffect(() => {
+    Contacts.list()
+      .then((all) => setContacts((all || []).filter((c) => c.user)))
+      .catch(() => setContacts([]));
+  }, []);
+
+  const filtered = (contacts || []).filter((c) =>
+    !query.trim() || c.name.toLowerCase().includes(query.trim().toLowerCase()));
+
+  function toggle(userId) {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(userId)) next.delete(userId); else next.add(userId);
+      return next;
+    });
+  }
+
+  return (
+    <div onClick={onClose} style={{
+      position: "absolute", inset: 0, zIndex: 3, background: "#00000066",
+      display: "flex", alignItems: "flex-end", justifyContent: "center",
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: "100%", maxWidth: 430, background: "#111a2b", color: "#fff",
+        borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: "16px 16px 24px",
+        maxHeight: "70vh", display: "flex", flexDirection: "column",
+      }}>
+        <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>Add to call</div>
+        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search contacts"
+               style={{
+                 width: "100%", padding: "9px 12px", borderRadius: 10, marginBottom: 10,
+                 background: "#ffffff12", border: "1px solid #ffffff22", color: "#fff",
+                 fontSize: 13.5, outline: "none", boxSizing: "border-box",
+               }}/>
+        <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
+          {contacts === null && <div style={{ color: "#ffffff99", fontSize: 13, padding: 16, textAlign: "center" }}>Loading…</div>}
+          {contacts?.length === 0 && (
+            <div style={{ color: "#ffffff99", fontSize: 13, padding: 16, textAlign: "center" }}>
+              No TalkEx contacts to add.
+            </div>
+          )}
+          {filtered.map((contact) => {
+            const on = selected.has(contact.user.id);
+            return (
+              <div key={contact.id} onClick={() => toggle(contact.user.id)} style={{
+                display: "flex", alignItems: "center", gap: 12, padding: "9px 4px", cursor: "pointer",
+              }}>
+                <Av av={contact.user.avatar_letter} color={contact.user.color} size={38}
+                    photoId={contact.user.avatar_attachment_id}/>
+                <div style={{ flex: 1, fontSize: 14 }}>{contact.name}</div>
+                <div style={{
+                  width: 20, height: 20, borderRadius: "50%",
+                  border: `2px solid ${on ? "#3b82f6" : "#ffffff44"}`,
+                  background: on ? "#3b82f6" : "transparent",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 12, fontWeight: 700, color: "#fff",
+                }}>{on ? "✓" : ""}</div>
+              </div>
+            );
+          })}
+        </div>
+        <button disabled={selected.size === 0} onClick={() => onAdd([...selected])} style={{
+          marginTop: 12, padding: "12px", borderRadius: 12, border: "none",
+          background: selected.size ? "#3b82f6" : "#ffffff22", color: "#fff",
+          fontSize: 14.5, fontWeight: 700, cursor: selected.size ? "pointer" : "default",
+        }}>
+          Add{selected.size ? ` (${selected.size})` : ""}
+        </button>
+      </div>
+    </div>
   );
 }
 

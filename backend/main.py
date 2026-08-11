@@ -2014,6 +2014,53 @@ def remove_avatar(user: dict = Depends(current_user)):
     return public_user(db.query_one("SELECT * FROM users WHERE id = ?", (user["id"],)), viewer_id=user["id"])
 
 
+@app.post("/chats/{chat_id}/avatar")
+async def set_chat_avatar(chat_id: str, file: UploadFile = File(...),
+                          user: dict = Depends(current_user)):
+    """Upload and set a group/channel/community photo (admin only). Mirrors
+    /me/avatar: a single upload-and-set call, old photo deleted once the new
+    one is in place."""
+    chat = require_member(chat_id, user["id"])
+    if chat["type"] in ("dm", "saved"):
+        raise HTTPException(400, "This chat can't have a photo")
+    require_manager(chat_id, user["id"])
+    try:
+        attachment = await uploads.store(file, user["id"])
+    except uploads.UploadTooLarge as error:
+        raise HTTPException(413, str(error))
+    except uploads.UploadTypeRefused as error:
+        raise HTTPException(415, str(error))
+
+    bound = uploads.attach_to_chat_avatar(attachment["id"], chat_id, user["id"])
+    if bound is None:
+        uploads.delete(attachment["id"])
+        raise HTTPException(500, "Could not set the chat photo")
+
+    previous_id = db.query_one("SELECT avatar_attachment_id FROM chats WHERE id = ?",
+                               (chat_id,))["avatar_attachment_id"]
+    db.execute("UPDATE chats SET avatar_attachment_id = ? WHERE id = ?", (attachment["id"], chat_id))
+    if previous_id:
+        uploads.delete(previous_id)
+    await hub.send_to_chat(chat_id, {"type": "chat_updated", "chat_id": chat_id})
+    await hub.send_to_chat(chat_id, {"type": "members_changed", "chat_id": chat_id})
+    return get_chat(chat_id, user)
+
+
+@app.delete("/chats/{chat_id}/avatar")
+async def remove_chat_avatar(chat_id: str, user: dict = Depends(current_user)):
+    """Back to the coloured letter avatar (admin only)."""
+    chat = require_member(chat_id, user["id"])
+    require_manager(chat_id, user["id"])
+    previous_id = db.query_one("SELECT avatar_attachment_id FROM chats WHERE id = ?",
+                               (chat_id,))["avatar_attachment_id"]
+    db.execute("UPDATE chats SET avatar_attachment_id = NULL WHERE id = ?", (chat_id,))
+    if previous_id:
+        uploads.delete(previous_id)
+    await hub.send_to_chat(chat_id, {"type": "chat_updated", "chat_id": chat_id})
+    await hub.send_to_chat(chat_id, {"type": "members_changed", "chat_id": chat_id})
+    return get_chat(chat_id, user)
+
+
 @app.post("/me/deactivate")
 def deactivate_account(user: dict = Depends(current_user)):
     """
@@ -2519,7 +2566,7 @@ def list_chats(user: dict = Depends(current_user),
             MAX(c.last_seq - m.last_read_seq, 0) AS unread
         FROM chat_members AS m
         JOIN chats AS c ON c.id = m.chat_id
-        WHERE m.user_id = ?
+        WHERE m.user_id = ? AND COALESCE(c.ephemeral, 0) = 0
         -- Newest ACTIVITY first, not highest seq: last_seq is a per-chat
         -- counter, so ordering by it floated an old chat with many messages
         -- above a brand-new chat with only a couple. The last message's
@@ -2722,6 +2769,43 @@ def create_group(request: CreateGroupRequest, user: dict = Depends(current_user)
                 (chat_id, member_id, now),
             )
 
+    return get_chat(chat_id, user)
+
+
+@app.post("/call-rooms")
+def create_call_room(request: CreateGroupRequest, user: dict = Depends(current_user)):
+    """
+    Create an EPHEMERAL group that only exists to host a multi-party call —
+    what "add participant" during a 1:1 call lands in. It's an ordinary group
+    under the hood (so the whole group-call mesh, ring/accept and overlay work
+    unchanged) but flagged ephemeral, so it never shows up in anyone's chat
+    list. The caller is the owner; the current call peer plus whoever they're
+    adding come in as members and get rung by the usual group_call_invite.
+    """
+    member_ids = set(request.member_ids) - {user["id"]}
+    if len(member_ids) < 1:
+        raise HTTPException(400, "A call room needs at least one other person")
+    if len(member_ids) + 1 > MAX_GROUP_MEMBERS:
+        raise HTTPException(400, f"A call can have at most {MAX_GROUP_MEMBERS} people")
+
+    chat_id = new_id("callroom")
+    now = time.time()
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO chats (id, type, name, color, avatar_letter, owner_id, created_at, ephemeral) "
+            "VALUES (?, 'group', ?, '#6366f1', ?, ?, ?, 1)",
+            (chat_id, request.name or "Group call", (request.name or "C")[0].upper(), user["id"], now),
+        )
+        conn.execute(
+            "INSERT INTO chat_members (chat_id, user_id, role, joined_at) VALUES (?, ?, 'owner', ?)",
+            (chat_id, user["id"], now),
+        )
+        for member_id in member_ids:
+            conn.execute(
+                "INSERT OR IGNORE INTO chat_members (chat_id, user_id, role, joined_at) "
+                "VALUES (?, ?, 'member', ?)",
+                (chat_id, member_id, now),
+            )
     return get_chat(chat_id, user)
 
 
@@ -4378,11 +4462,12 @@ def download_file(attachment_id: str, user: dict = Depends(current_user)):
         )
         if story is None or not (is_author or visible):
             raise HTTPException(404, "File not found")
-    elif attachment["avatar_of_user_id"]:
-        # A profile photo is meant to be visible to anyone in the app who can
-        # see the profile at all — unlike a chat/story attachment there is no
-        # membership or contact check, just "signed in." current_user() above
-        # already established that.
+    elif attachment["avatar_of_user_id"] or attachment["avatar_of_chat_id"]:
+        # A profile / group photo is meant to be visible to anyone in the app
+        # who can see the profile or chat at all — unlike a chat/story
+        # attachment there is no membership check, just "signed in."
+        # current_user() above already established that. (Attachment ids are
+        # unguessable UUIDs, same as user avatars.)
         pass
     elif attachment["uploader_id"] != user["id"]:
         # Not yet sent, so only the person who uploaded it can see it.
