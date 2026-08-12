@@ -10,6 +10,11 @@ export default defineConfig({
   // config, so TalkEx runs on its own pair of ports.
   server: { port: 3020 },
   build: {
+    // Human-readable output: the bundle is left un-minified and line-wrapped
+    // so the shipped JS/CSS can actually be read. Trade-off (accepted): the
+    // files are larger than a minified build.
+    minify: false,
+    cssMinify: false,
     rollupOptions: {
       output: {
         // The whole app was one ~900KB JS file, so every screen (chat,
@@ -23,6 +28,14 @@ export default defineConfig({
         manualChunks: {
           vendor: ['react', 'react-dom'],
         },
+        // Fixed, hash-free filenames (index.js, vendor.js, PdfDoc.js,
+        // index.css, pdf.worker.min.mjs) instead of Vite's content-hashed
+        // names. NOTE: this removes automatic cache-busting — the
+        // service-worker cache version (SHELL_CACHE in service-worker.js) MUST
+        // be bumped on every deploy or browsers can serve the old files.
+        entryFileNames: 'assets/[name].js',
+        chunkFileNames: 'assets/[name].js',
+        assetFileNames: 'assets/[name][extname]',
       },
     },
   },
