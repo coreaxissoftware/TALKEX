@@ -1,7 +1,7 @@
 {
   "name": "talkex-desktop",
   "productName": "TalkEx",
-  "version": "1.0.7",
+  "version": "1.0.0",
   "description": "TalkEx — desktop app",
   "author": "CoreAxis",
   "main": "main.js",
