@@ -14,7 +14,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
-import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+// The non-minified worker (pdf.worker.mjs, not .min) so this shipped file is
+// human-readable too, consistent with the rest of the un-minified build.
+import workerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
 import { canvasesToPdfBlob } from "./imageToPdf.js";
 import { G, I } from "./ui.jsx";
 
