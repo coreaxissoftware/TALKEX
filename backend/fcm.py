@@ -71,19 +71,35 @@ def send(token: str, title: str, body: str, data: dict | None = None) -> str:
 
     # Every value in an FCM `data` payload must be a string.
     str_data = {str(k): str(v) for k, v in (data or {}).items()}
-    message = {
-        "message": {
-            "token": token,
-            "notification": {"title": title, "body": body},
-            "data": str_data,
-            # High priority + a default sound/channel so it wakes a sleeping
-            # device — important for calls, which are time-sensitive.
-            "android": {
-                "priority": "high",
-                "notification": {"sound": "default", "channel_id": "talkex_default"},
-            },
+    is_call = str(str_data.get("incoming_call", "")).lower() == "true"
+
+    if is_call:
+        # Calls go DATA-ONLY (no `notification` block): that forces
+        # onMessageReceived to run in the native service even when the app is
+        # killed, so it can raise the full-screen Accept/Decline call UI itself.
+        # Title/body ride along in data as a fallback for the notification text.
+        str_data.setdefault("title", title)
+        str_data.setdefault("body", body)
+        message = {
+            "message": {
+                "token": token,
+                "data": str_data,
+                "android": {"priority": "high"},
+            }
         }
-    }
+    else:
+        message = {
+            "message": {
+                "token": token,
+                "notification": {"title": title, "body": body},
+                "data": str_data,
+                # High priority + default sound/channel so it wakes a sleeping device.
+                "android": {
+                    "priority": "high",
+                    "notification": {"sound": "default", "channel_id": "talkex_default"},
+                },
+            }
+        }
     url = f"https://fcm.googleapis.com/v1/projects/{_project_id}/messages:send"
     try:
         resp = requests.post(

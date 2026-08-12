@@ -98,6 +98,9 @@ const RING_TIMEOUT_MS = 30000;
 const CALL_EVENT_TYPES = new Set([
   "call_invite", "call_answer", "call_ice", "call_reject", "call_end", "call_busy", "call_error",
   "call_upgrade_offer", "call_upgrade_answer", "call_ringing", "call_media_state",
+  // Callee (opened from a call notification) asking the caller to re-send the
+  // offer — the caller answers this by re-emitting call_invite.
+  "call_reoffer_request",
 ]);
 
 /**
@@ -119,6 +122,12 @@ export function useCall(events, send, toast) {
   const localStreamRef = useRef(null);
   const pendingOfferRef = useRef(null);
   const pendingCandidatesRef = useRef([]);
+  // The outgoing SDP offer, kept so the caller can re-send it if the callee
+  // opens the app from a call notification and asks for it again.
+  const outgoingOfferRef = useRef(null);
+  // Set when the app is opened by tapping "Accept" on a call notification:
+  // { fromId } — the next matching call_invite is auto-answered.
+  const autoAcceptRef = useRef(null);
   const ringTimerRef = useRef(null);
   const durationTimerRef = useRef(null);
   const lastApplied = useRef(0);
@@ -158,6 +167,7 @@ export function useCall(events, send, toast) {
     localStreamRef.current = null;
     pendingOfferRef.current = null;
     pendingCandidatesRef.current = [];
+    outgoingOfferRef.current = null;
   }, [stopEffectPipeline]);
 
   const logOutcome = useCallback((snapshot, status, durationSecs = 0) => {
@@ -250,6 +260,7 @@ export function useCall(events, send, toast) {
     // surface it as a real error and give up immediately: send() also
     // kicks a reconnect internally, so the next attempt has a fresh
     // socket to work with.
+    outgoingOfferRef.current = { peerId, chatId: chat.id, callKind, sdp: offer };
     const sent = sendRef.current({
       type: "call_invite", to: peerId, chat_id: chat.id, call_kind: callKind, sdp: offer,
     });
@@ -618,12 +629,29 @@ export function useCall(events, send, toast) {
           localStream: null, remoteStream: null, muted: false, cameraOff: false, facingMode: "user",
           startedAt: null, duration: 0,
         });
+        // Opened from a call notification's Accept → answer this (re-sent) offer
+        // automatically instead of making the user tap Accept a second time.
+        if (autoAcceptRef.current && autoAcceptRef.current.fromId === event.from) {
+          autoAcceptRef.current = null;
+          setTimeout(() => { acceptIncoming(); }, 0); // callRef is set by the render this triggers
+        }
         continue;
       }
 
       if (!current || event.from !== current.peerId) continue;
 
-      if (event.type === "call_ringing" && current.phase === "outgoing") {
+      if (event.type === "call_reoffer_request") {
+        // The callee opened the app from our call notification and needs the
+        // offer again (they never got the first one). Re-send it if we're still
+        // trying to reach them.
+        const o = outgoingOfferRef.current;
+        if (o && o.peerId === event.from && current.phase === "outgoing") {
+          sendRef.current({
+            type: "call_invite", to: o.peerId, chat_id: o.chatId,
+            call_kind: o.callKind, sdp: o.sdp,
+          });
+        }
+      } else if (event.type === "call_ringing" && current.phase === "outgoing") {
         setCall((c) => (c ? { ...c, ringConfirmed: true } : c));
       } else if (event.type === "call_answer" && current.phase === "outgoing") {
         clearTimeout(ringTimerRef.current);
@@ -693,6 +721,28 @@ export function useCall(events, send, toast) {
   }, [events, logOutcome, teardown]);
 
   useEffect(() => teardown, [teardown]);
+
+  // Bridge the native (Android) call notification's "Accept" to the web app:
+  // MainActivity calls window.talkexAcceptCall(chatId, fromId) via
+  // evaluateJavascript. We ask the caller to re-send the offer (the killed app
+  // never got the first one) and arm auto-accept for the invite that follows.
+  useEffect(() => {
+    window.talkexAcceptCall = (chatId, fromId) => {
+      if (!fromId) return;
+      autoAcceptRef.current = { fromId };   // auto-answer the invite that follows
+      sendRef.current({ type: "call_reoffer_request", to: fromId, chat_id: chatId });
+    };
+    // Tapping the notification body / full-screen: just bring the ringing UI up
+    // (request the offer again) and let the user choose Accept/Decline in-app.
+    window.talkexShowCall = (chatId, fromId) => {
+      if (!fromId) return;
+      sendRef.current({ type: "call_reoffer_request", to: fromId, chat_id: chatId });
+    };
+    return () => {
+      if (window.talkexAcceptCall) delete window.talkexAcceptCall;
+      if (window.talkexShowCall) delete window.talkexShowCall;
+    };
+  }, []);
 
   return {
     call, startCall, acceptIncoming, rejectIncoming, endCall, toggleMute, toggleCamera, switchCamera,

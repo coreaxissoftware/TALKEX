@@ -1623,7 +1623,8 @@ async def notify_offline_members(chat_id: str, sender_id: str, title: str, body:
     await push_to_users(offline_ids, title, body, {"chat_id": chat_id})
 
 
-async def notify_incoming_call(user_id: str, chat_id: str, caller_name: str, call_kind: str):
+async def notify_incoming_call(user_id: str, chat_id: str, caller_name: str, call_kind: str,
+                               caller_id: str = ""):
     """
     A call/meeting invite has exactly one delivery path — the live
     WebSocket relay in the "call_invite"/"group_call_start" handlers — with
@@ -1652,7 +1653,11 @@ async def notify_incoming_call(user_id: str, chat_id: str, caller_name: str, cal
     verb = "Video call" if call_kind == "video" else "Voice call"
     await push_to_users(
         [user_id], f"{verb} from {caller_name}", "Tap to open TalkEx and answer",
-        {"chat_id": chat_id, "incoming_call": True},
+        # `from`/`call_kind`/`caller_name` let the native Android service build a
+        # full-screen incoming-call notification with Accept/Decline, and let the
+        # app ask the caller to re-send the offer when answered from cold start.
+        {"chat_id": chat_id, "incoming_call": True, "from": caller_id,
+         "call_kind": call_kind, "caller_name": caller_name},
     )
 
 
@@ -6132,6 +6137,11 @@ CALL_SIGNAL_TYPES = {
     # on your tile — WhatsApp's in-call indicators. Carries no SDP/ICE, just
     # two booleans; it's a pure relay like the rest, gated the same way.
     "call_media_state",
+    # Callee → caller: "I just opened the app from your call notification —
+    # please re-send your offer." Needed because the original offer is only a
+    # live WS relay; a callee whose app was killed never received it, so
+    # answering from the notification requires the caller to offer again.
+    "call_reoffer_request",
 }
 
 # One-to-many relay types for a mesh group call: each new joiner connects
@@ -6564,7 +6574,8 @@ async def websocket_endpoint(
                         })
                     else:
                         print(f"[CALL] target NOT focused → push notification fallback")
-                        await notify_incoming_call(to_user_id, chat_id, relay["from_name"], call_kind)
+                        await notify_incoming_call(to_user_id, chat_id, relay["from_name"], call_kind,
+                                                   caller_id=user_id)
 
             elif kind == "group_call_start":
                 # "Start" and "join" are the same message — whoever sends this
