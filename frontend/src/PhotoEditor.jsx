@@ -312,14 +312,15 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
     const el = viewportRef.current;
     if (!el) return;
     function handleWheel(event) {
-      if (cropActive) return;
+      // Scroll-to-zoom the image works even while cropping now, so the user can
+      // frame it (pinch/scroll to zoom, drag to move) behind the crop box.
       event.preventDefault();
       const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
       setZoom((z) => Math.min(5, Math.max(1, z * factor)));
     }
     el.addEventListener("wheel", handleWheel, { passive: false });
     return () => el.removeEventListener("wheel", handleWheel);
-  }, [cropActive]);
+  }, []);
 
   // Reset crop when aspect changes
   useEffect(() => {
@@ -402,18 +403,34 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
     const handle = getCropHandle(px, py);
-    if (!handle) return;
-    cropDragRef.current = {
-      type: handle,
-      startRect: { ...cropRect },
-      startX: e.clientX,
-      startY: e.clientY,
-    };
+    // A corner/edge handle resizes the crop box. Anything else (the interior or
+    // the dark area around it) pans the IMAGE behind the box — so the user
+    // frames by moving/zooming the photo, WhatsApp/Instagram-style.
+    if (handle && handle !== "move") {
+      cropDragRef.current = {
+        type: handle,
+        startRect: { ...cropRect },
+        startX: e.clientX,
+        startY: e.clientY,
+      };
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+      e.stopPropagation();
+      return;
+    }
+    if (pinchRef.current) return; // two-finger pinch owns the gesture
+    dragRef.current = { startX: e.clientX, startY: e.clientY, startPan: pan };
     e.currentTarget.setPointerCapture?.(e.pointerId);
-    e.stopPropagation();
   }
 
   function onCropPointerMove(e) {
+    // Panning the image behind the crop box.
+    if (dragRef.current && !cropDragRef.current) {
+      if (pinchRef.current) return;
+      const dx = e.clientX - dragRef.current.startX;
+      const dy = e.clientY - dragRef.current.startY;
+      setPan(clampPan({ x: dragRef.current.startPan.x + dx, y: dragRef.current.startPan.y + dy }));
+      return;
+    }
     if (!cropDragRef.current) return;
     const { type, startRect, startX, startY } = cropDragRef.current;
     const dx = (e.clientX - startX) / viewportW;
@@ -450,6 +467,7 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
 
   function onCropPointerUp() {
     cropDragRef.current = null;
+    dragRef.current = null;
   }
 
   // --- Drawing / pan interaction ---
@@ -807,6 +825,9 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
         onPointerMove={onCropPointerMove}
         onPointerUp={onCropPointerUp}
         onPointerLeave={onCropPointerUp}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
       >
         {/* Dark overlay outside crop */}
         {/* Top */}
