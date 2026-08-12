@@ -371,6 +371,12 @@ class PushUnsubscribeRequest(BaseModel):
     endpoint: str = Field(min_length=1, max_length=2048)
 
 
+class FcmTokenRequest(BaseModel):
+    """A native device's FCM registration token (Android/Capacitor)."""
+    token: str = Field(min_length=1, max_length=4096)
+    platform: Optional[str] = Field(default="android", max_length=16)
+
+
 class ReactRequest(BaseModel):
     emoji: str = Field(min_length=1, max_length=16)
 

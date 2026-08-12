@@ -55,6 +55,7 @@ import chatstore
 import db
 import email_delivery
 import push
+import fcm
 import qr
 import scheduler
 import sms
@@ -69,7 +70,7 @@ from models import (
     EditMessageRequest, FeedbackRequest, ForwardRequest, ForwardStoryRequest,
     LiveLocationUpdateRequest, LoginRequest,
     MatchContactsRequest,
-    PushSubscribeRequest, PushUnsubscribeRequest, ReactRequest, ReadRequest,
+    FcmTokenRequest, PushSubscribeRequest, PushUnsubscribeRequest, ReactRequest, ReadRequest,
     RegisterRequest, RemoveTwoStepRequest, RequestEmailOtpRequest, RequestOtpRequest,
     ReportRequest, RescheduleRequest, RsvpRequest,
     ScheduleRequest, SendMessageRequest, SetPasswordRequest, SetPinRequest, SetRoleRequest,
@@ -1524,6 +1525,33 @@ def unsubscribe_from_push(request: PushUnsubscribeRequest, user: dict = Depends(
     return {"subscribed": False}
 
 
+@app.post("/push/fcm-token")
+def register_fcm_token(request: FcmTokenRequest, user: dict = Depends(current_user)):
+    """
+    Register (or move) this native device's FCM token to the current account.
+
+    Keyed by `token`, which is unique per app-install: re-registering the same
+    token (app relaunch, or a different account signing in on the same device)
+    just re-points it at whoever is signed in now, so a device never pushes to
+    a stale account.
+    """
+    db.execute(
+        "INSERT INTO device_tokens (token, user_id, platform, created_at) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(token) DO UPDATE SET user_id = excluded.user_id, "
+        "platform = excluded.platform, created_at = excluded.created_at",
+        (request.token, user["id"], request.platform or "android", time.time()),
+    )
+    return {"registered": True}
+
+
+@app.delete("/push/fcm-token")
+def unregister_fcm_token(request: FcmTokenRequest, user: dict = Depends(current_user)):
+    """Drop this device's token — e.g. on sign-out, so it stops receiving push."""
+    db.execute("DELETE FROM device_tokens WHERE token = ? AND user_id = ?",
+              (request.token, user["id"]))
+    return {"registered": False}
+
+
 def push_preview_text(kind: str, text: str, payload: dict) -> str:
     """The same kind-based fallback labels the chat list preview uses, so a
     push notification reads the same as the app would have shown it."""
@@ -1563,6 +1591,18 @@ async def push_to_users(user_ids: list[str], title: str, body: str, data: dict):
         result = await asyncio.to_thread(push.send, subscription_info, title, body, data)
         if result == "gone":
             db.execute("DELETE FROM push_subscriptions WHERE id = ?", (sub["id"],))
+
+    # Native (FCM) devices for the same set of users — the Android app can't
+    # receive the Web Push above. No-op when FCM isn't configured.
+    if fcm.is_configured():
+        tokens = db.query_all(
+            f"SELECT token FROM device_tokens WHERE user_id IN ({placeholders})",
+            tuple(user_ids),
+        )
+        for row in tokens:
+            result = await asyncio.to_thread(fcm.send, row["token"], title, body, data)
+            if result == "gone":
+                db.execute("DELETE FROM device_tokens WHERE token = ?", (row["token"],))
 
 
 async def notify_offline_members(chat_id: str, sender_id: str, title: str, body: str):

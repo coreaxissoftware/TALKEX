@@ -26,3 +26,8 @@ qrcode>=7.4,<9.0
 # Sends Web Push notifications (VAPID + the browser Push API), so a message
 # can reach someone whose tab isn't open, not just whoever has a live socket.
 pywebpush>=2.0,<3.0
+
+# Mints the short-lived OAuth token the FCM HTTP v1 API needs from the
+# service-account key, so the backend can push to native (Android) devices —
+# the Capacitor app's WebView can't receive Web Push, only FCM.
+google-auth>=2.0,<3.0

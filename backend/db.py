@@ -860,6 +860,20 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
 CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions (user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_push_endpoint ON push_subscriptions (endpoint);
 
+-- Native (FCM) device tokens — the Capacitor Android app's WebView can't
+-- receive Web Push (push_subscriptions above), so it registers an FCM token
+-- here instead and the backend pushes to it via the FCM HTTP v1 API. `token`
+-- is unique (one row per device); re-registering the same token just updates
+-- its owner/timestamp.
+CREATE TABLE IF NOT EXISTS device_tokens (
+    token      TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    platform   TEXT NOT NULL DEFAULT 'android',
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_tokens_user ON device_tokens (user_id);
+
 -- The exception/inclusion set behind users.story_audience — only meaningful
 -- when that mode is 'except' or 'only'; a plain 'contacts' user has no rows
 -- here at all. One shared table for both modes since a row is never read

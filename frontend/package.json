@@ -11,6 +11,7 @@
     "@capacitor/android": "^6.2.1",
     "@capacitor/cli": "^6.2.1",
     "@capacitor/core": "^6.2.1",
+    "@capacitor/push-notifications": "^6.0.5",
     "jsqr": "^1.4.0",
     "leaflet": "^1.9.4",
     "pdfjs-dist": "^4.10.38",

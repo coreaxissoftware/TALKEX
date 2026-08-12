@@ -4,6 +4,7 @@ import {
   clearToken, flushEverything, getToken, rememberAccount,
 } from "./api.js";
 import { initE2EE, clearE2EEKeys } from "./e2ee.js";
+import { initNativePush, stopNativePush } from "./pushNative.js";
 import { useRealtime } from "./useRealtime.js";
 import { useCall } from "./useCall.js";
 import { useGroupCall } from "./useGroupCall.js";
@@ -148,6 +149,7 @@ export default function App() {
   // Account — same real sign-out (revokes the session server-side first),
   // just one click away instead of three.
   const signOut = useCallback(async () => {
+    await stopNativePush(); // stop this device receiving FCM push
     try { await Auth.logout(); } catch { /* the token is going away regardless */ }
     clearToken();
     setMe(null);
@@ -156,6 +158,16 @@ export default function App() {
   }, []);
 
   // ── Session ────────────────────────────────────────────────────────────────
+
+  // Native (Android) FCM push: register once signed in. Tapping a push opens
+  // that chat. No-op on web (which uses the Web Push path).
+  useEffect(() => {
+    if (!me?.id) return;
+    initNativePush(async (chatId) => {
+      setTab("chats");
+      try { const chat = await Chats.get(chatId); if (chat) setOpenChat(chat); } catch { /* ignore */ }
+    });
+  }, [me?.id]);
 
   // Initialize E2EE after user is loaded
   useEffect(() => {

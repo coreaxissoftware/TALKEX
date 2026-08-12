@@ -766,6 +766,9 @@ export const Push = {
   vapidPublicKey: () => get("/push/vapid-public-key"),
   subscribe: (subscription) => post("/push/subscribe", subscription),
   unsubscribe: (endpoint) => remove("/push/subscribe", { endpoint }),
+  // Native (FCM) device token for the Capacitor Android app.
+  registerFcmToken: (token, platform = "android") => post("/push/fcm-token", { token, platform }),
+  unregisterFcmToken: (token) => remove("/push/fcm-token", { token }),
 };
 
 // ── Uploads ──────────────────────────────────────────────────────────────────

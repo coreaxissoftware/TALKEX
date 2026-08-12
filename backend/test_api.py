@@ -4926,6 +4926,27 @@ def test_group_photo_can_be_set_by_admin_and_viewed_by_members(client):
     assert removed.json()["avatar_attachment_id"] is None
 
 
+def test_fcm_device_token_register_and_unregister(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+
+    r = client.post("/push/fcm-token", headers=alice, json={"token": "tok-abc", "platform": "android"})
+    assert r.status_code == 200 and r.json()["registered"] is True
+    assert main.db.query_one("SELECT user_id FROM device_tokens WHERE token = ?",
+                             ("tok-abc",))["user_id"] == alice_id
+
+    # Re-registering the same token on another account moves it (one device,
+    # whoever is signed in now).
+    bob, bob_id, _ = make_user(client, "Bob")
+    client.post("/push/fcm-token", headers=bob, json={"token": "tok-abc"})
+    assert main.db.query_one("SELECT user_id FROM device_tokens WHERE token = ?",
+                             ("tok-abc",))["user_id"] == bob_id
+
+    # Unregister on sign-out.
+    assert client.request("DELETE", "/push/fcm-token", headers=bob,
+                          json={"token": "tok-abc"}).status_code == 200
+    assert main.db.query_one("SELECT 1 FROM device_tokens WHERE token = ?", ("tok-abc",)) is None
+
+
 def test_cover_photo_and_business_category(client):
     alice, alice_id, _ = make_user(client, "Alice")
     bob, _, _ = make_user(client, "Bob")
