@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+const canTranscribe = typeof window !== "undefined"
+  && Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
+
 /**
  * Records a voice note with MediaRecorder.
  *
@@ -8,6 +11,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
  * (`getUserMedia` leaves the mic's in-use indicator lit otherwise), and that
  * has to happen on stop, on cancel, AND on unmount if the component goes away
  * mid-recording.
+ *
+ * `onFinished(blob, transcript)` — transcript is a best-effort live
+ * transcription of the SAME recording, run via the Web Speech API in
+ * parallel with MediaRecorder (both listening to the mic the browser
+ * granted access to, the same trick GroupCallOverlay's LiveCaptions uses
+ * for calls). There is no way to transcribe an already-recorded audio blob
+ * client-side — Web Speech only ever listens to a live microphone — so this
+ * is the only feasible client-only capture point; transcript is "" wherever
+ * the browser doesn't support SpeechRecognition at all.
  */
 export function useVoiceRecorder(onFinished) {
   const [state, setState] = useState("idle");   // idle | recording | error
@@ -18,6 +30,8 @@ export function useVoiceRecorder(onFinished) {
   const chunks = useRef([]);
   const stream = useRef(null);
   const timer = useRef(null);
+  const recognition = useRef(null);
+  const transcriptParts = useRef([]);
   // Set by cancel() so onstop knows to discard. A plain "clear chunks before
   // stop()" is NOT enough: stop() flushes one last ondataavailable BEFORE
   // onstop fires, which repopulates the buffer — that final chunk is exactly
@@ -30,6 +44,11 @@ export function useVoiceRecorder(onFinished) {
     stream.current?.getTracks().forEach((track) => track.stop());
     stream.current = null;
     clearInterval(timer.current);
+    if (recognition.current) {
+      const current = recognition.current;
+      recognition.current = null; // cleared first so its own onend doesn't try to restart it
+      current.stop();
+    }
   }, []);
 
   const start = useCallback(async () => {
@@ -43,6 +62,7 @@ export function useVoiceRecorder(onFinished) {
       const media = await navigator.mediaDevices.getUserMedia({ audio: true });
       stream.current = media;
       chunks.current = [];
+      transcriptParts.current = [];
 
       const instance = new MediaRecorder(media);
       instance.ondataavailable = (event) => {
@@ -50,14 +70,16 @@ export function useVoiceRecorder(onFinished) {
         if (event.data.size > 0) chunks.current.push(event.data);
       };
       instance.onstop = () => {
+        const transcript = transcriptParts.current.join(" ").trim();
         releaseStream();
         // Only hand the blob to the caller when this wasn't a cancel — the
         // flag is the source of truth, not the buffer length (see cancelled).
         if (!cancelled.current && chunks.current.length > 0) {
           const blob = new Blob(chunks.current, { type: instance.mimeType || "audio/webm" });
-          onFinishedRef.current?.(blob);
+          onFinishedRef.current?.(blob, transcript);
         }
         chunks.current = [];
+        transcriptParts.current = [];
         cancelled.current = false;
         setState("idle");
         setSeconds(0);
@@ -69,6 +91,26 @@ export function useVoiceRecorder(onFinished) {
       setState("recording");
       setSeconds(0);
       timer.current = setInterval(() => setSeconds((current) => current + 1), 1000);
+
+      if (canTranscribe) {
+        const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+        const rec = new SpeechRecognitionCtor();
+        rec.continuous = true;
+        rec.interimResults = false;
+        rec.onresult = (event) => {
+          const result = event.results[event.results.length - 1];
+          if (result.isFinal) transcriptParts.current.push(result[0].transcript.trim());
+        };
+        rec.onend = () => {
+          // Same restart-on-Chrome's-own-timeout dance LiveCaptions uses —
+          // only while this is still the live instance for an ongoing recording.
+          if (recognition.current === rec) {
+            try { rec.start(); } catch { /* already starting */ }
+          }
+        };
+        rec.onerror = () => {};
+        try { rec.start(); recognition.current = rec; } catch { /* mic prompt already in flight, etc. */ }
+      }
     } catch (problem) {
       // Covers both "permission denied" and "no microphone" — getUserMedia
       // throws the same DOMException shape for either.

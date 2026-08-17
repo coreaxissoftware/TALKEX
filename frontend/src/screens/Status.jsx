@@ -154,6 +154,7 @@ export default function Status({ me, toast }) {
   const [feed, setFeed] = useState([]);
   const [mine, setMine] = useState([]);
   const [muted, setMuted] = useState([]);
+  const [highlights, setHighlights] = useState([]);
   const [loading, setLoading] = useState(true);
   const [composing, setComposing] = useState(false);
   const [viewing, setViewing] = useState(null);
@@ -165,8 +166,10 @@ export default function Status({ me, toast }) {
 
   function reload() {
     setLoading(true);
-    Promise.all([Stories.list(), Stories.mine(), Stories.mutedStatuses()])
-      .then(([theirs, ours, mutedList]) => { setFeed(theirs); setMine(ours); setMuted(mutedList); })
+    Promise.all([Stories.list(), Stories.mine(), Stories.mutedStatuses(), Stories.highlights(me.id)])
+      .then(([theirs, ours, mutedList, myHighlights]) => {
+        setFeed(theirs); setMine(ours); setMuted(mutedList); setHighlights(myHighlights);
+      })
       .catch(() => {})
       .finally(() => setLoading(false));
   }
@@ -253,6 +256,30 @@ export default function Status({ me, toast }) {
           {I.lock(G.sub, 16)}
         </div>
       </div>
+
+      {highlights.length > 0 && (
+        <>
+          <SectionLabel>Highlights</SectionLabel>
+          <div style={{ display: "flex", gap: 14, overflowX: "auto", padding: "2px 16px 14px" }}>
+            {highlights.map((story) => (
+              <div key={story.id} onClick={() => open(story)} style={{
+                display: "flex", flexDirection: "column", alignItems: "center", gap: 5,
+                cursor: "pointer", flexShrink: 0, width: 58,
+              }}>
+                <div style={{
+                  width: 54, height: 54, borderRadius: "50%", background: story.background || G.dim,
+                  border: `1.5px solid ${G.border}`, display: "flex", alignItems: "center",
+                  justifyContent: "center", overflow: "hidden",
+                }}>{kindGlyph(story, G.text) || I.image(G.text, 20)}</div>
+                <div style={{
+                  fontSize: 11, color: G.sub, textAlign: "center", width: "100%",
+                  whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                }}>{story.highlight_label || "Highlight"}</div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       {scheduled.length > 0 && (
         <>
@@ -407,7 +434,7 @@ export default function Status({ me, toast }) {
 const AUDIENCE_MODES = [
   { key: "contacts", label: "My contacts", sub: "Everyone you share a chat with" },
   { key: "except", label: "My contacts except…", sub: "Everyone you share a chat with, except the people you pick" },
-  { key: "only", label: "Only share with…", sub: "Just the people you pick" },
+  { key: "only", label: "Close Friends", sub: "Only the standing list you pick below — the same list stays saved even if you switch away from this mode and back" },
 ];
 
 function StatusPrivacySheet({ onClose, toast }) {
@@ -1135,6 +1162,8 @@ function StoryViewer({ story, author, me, toast, allAuthors, onClose, onStoryCha
   const [activityOpen, setActivityOpen] = useState(false);
   const [replyText, setReplyText] = useState("");
   const [sending, setSending] = useState(false);
+  const [highlighted, setHighlighted] = useState(Boolean(story.highlighted_at));
+  useEffect(() => setHighlighted(Boolean(story.highlighted_at)), [story.id, story.highlighted_at]);
 
   // Auto-progress for stories
   const stories = author?.stories || [story];
@@ -1262,11 +1291,32 @@ function StoryViewer({ story, author, me, toast, allAuthors, onClose, onStoryCha
     }
   }
 
+  async function toggleHighlight() {
+    try {
+      if (highlighted) {
+        await Stories.unhighlight(story.id);
+        setHighlighted(false);
+        toast?.("Removed from Highlights");
+      } else {
+        const label = (window.prompt("Name this highlight (optional)", "") || "").slice(0, 40);
+        await Stories.highlight(story.id, label);
+        setHighlighted(true);
+        toast?.("Added to Highlights");
+      }
+    } catch (problem) {
+      toast?.(problem.message || "Could not update Highlights");
+    }
+  }
+
   const canReshare = isAuthor || Boolean(story.allow_share);
   const moreItems = [
     ...(canReshare ? [{ label: "Forward", icon: I.fwd("#fff", 18), onClick: () => setForwarding(true) }] : []),
     ...(canReshare ? [{ label: "Share", icon: I.send("#fff", 18), onClick: shareStory }] : []),
     ...(copyableText ? [{ label: "Copy", icon: I.link("#fff", 18), onClick: copyStory }] : []),
+    ...(isAuthor ? [{
+      label: highlighted ? "Remove from Highlights" : "Add to Highlights",
+      icon: I.star("#fff", 18), onClick: toggleHighlight,
+    }] : []),
     ...(isAuthor ? [{ label: "Delete", icon: I.trash("#ff8080", 18), onClick: deleteThisStory }] : []),
   ];
 

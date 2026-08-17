@@ -48,7 +48,6 @@ const CATEGORIES = [
  */
 export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, onChanged, toast,
                                     onNewChat, onLogout, headerMenuPos, onHeaderMenuClose }) {
-  const [folder, setFolder] = useState("All");
   const [category, setCategory] = useState("all");
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
@@ -80,11 +79,6 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
   const activeChats = useMemo(() => chats.filter((chat) => !chat.archived), [chats]);
   const archivedChats = useMemo(() => chats.filter((chat) => chat.archived), [chats]);
 
-  const folders = useMemo(() => {
-    const named = activeChats.map((chat) => chat.folder).filter(Boolean);
-    return ["All", ...Array.from(new Set(named))];
-  }, [activeChats]);
-
   const visible = useMemo(() => {
     let list = category === "archive" ? archivedChats : activeChats;
 
@@ -96,15 +90,12 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
     else if (category === "channel") list = list.filter((chat) => chat.type === "channel");
     else if (category === "community") list = list.filter((chat) => chat.type === "community");
 
-    if (category !== "archive" && folder !== "All") {
-      list = list.filter((chat) => chat.folder === folder);
-    }
     if (query.trim()) {
       const needle = query.trim().toLowerCase();
       list = list.filter((chat) => displayName(chat).toLowerCase().includes(needle));
     }
     return list;
-  }, [activeChats, archivedChats, category, contactUserIds, folder, query]);
+  }, [activeChats, archivedChats, category, contactUserIds, query]);
 
   async function togglePin(chat) {
     try {
@@ -330,21 +321,6 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
             }}>{label}</button>
         ))}
       </div>
-
-      {category !== "archive" && folders.length > 1 && (
-        <div style={{ display: "flex", gap: 8, padding: "0 16px 10px", overflowX: "auto" }}>
-          {folders.map((name) => (
-            <button key={name} onClick={() => setFolder(name)}
-              style={{
-                padding: "6px 14px", borderRadius: 20, whiteSpace: "nowrap",
-                border: `1px solid ${folder === name ? G.accent : G.border}`,
-                background: folder === name ? G.accentSoft : "transparent",
-                color: folder === name ? G.accentText : G.sub,
-                fontSize: 13, cursor: "pointer",
-              }}>{name}</button>
-          ))}
-        </div>
-      )}
 
       {category !== "archive" && archivedChats.length > 0 && (
         <div onClick={() => setShowArchived((v) => !v)} style={{
@@ -643,16 +619,18 @@ function ChatRow({ chat, typing, onOpen, onPin, onArchive, onClear, onDelete, on
     if (last.kind === "poll") return "📊 Poll";
     if (last.kind === "location") return "📍 Location";
     if (last.kind === "contact") return "👤 Contact";
-    if (last.kind === "video") return last.text ? `🎥 ${last.text}` : "🎥 Video";
+    if (last.kind === "video") return last.text ? `🎥 ${last.text}` : `🎥 ${last.payload?.file_name || "Video"}`;
     if (last.kind === "sticker") return "Sticker";
+    if (last.kind === "gif") return "GIF";
+    if (last.kind === "product") return `🏷️ ${last.payload?.name || "Product"}`;
     if (last.kind === "call") {
       const { call_kind: callKind, status } = last.payload || {};
       const verb = callKind === "video" ? "Video call" : "Voice call";
       return status === "completed" ? `📞 ${verb}` : `📞 Missed ${verb.toLowerCase()}`;
     }
-    if (last.kind === "photo") return last.text ? `📷 ${last.text}` : "📷 Photo";
+    if (last.kind === "photo") return last.text ? `📷 ${last.text}` : `📷 ${last.payload?.file_name || "Photo"}`;
     if (last.kind === "voice") return "🎤 Voice message";
-    if (last.kind === "document") return last.text ? `📄 ${last.text}` : "📄 Document";
+    if (last.kind === "document") return last.text ? `📄 ${last.text}` : `📄 ${last.payload?.file_name || "Document"}`;
     return last.text || `[${last.kind}]`;
   };
 

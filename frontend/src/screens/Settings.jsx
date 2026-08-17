@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Auth, Chats, Contacts, Me, Messages, Templates, Users, clearToken, forgetAccount, getToken,
+  Auth, Chats, Contacts, Me, Messages, Payments, Products, Templates, Users, clearToken, forgetAccount, getToken,
   listSavedAccounts, rememberAccount, switchToAccount,
 } from "../api.js";
 import { ACCENTS, Av, BUSINESS_CATEGORIES, Button, CoverImage, Field, G, I, SRow, SOCIAL_PLATFORMS,
@@ -13,8 +13,13 @@ import { getAutoDownload, setAutoDownload } from "../mediaPrefs.js";
 import {
   TEXTURES, getWallpaper, getWallpaperBlur, readImageAsWallpaper, setWallpaper, setWallpaperBlur,
 } from "../chatWallpaper.js";
-import { disableAppLock, isAppLockEnabled, setAppLockPin } from "../appLock.js";
+import {
+  disableAppLock, disableBiometric, enableBiometric, isAppLockEnabled, isBiometricAvailable,
+  isBiometricEnabled, setAppLockPin,
+} from "../appLock.js";
 import QrScanner from "../QrScanner.jsx";
+import { contactsAvailable, pickContacts } from "../nativeContacts.js";
+import { useT, LANGUAGES } from "../i18n.jsx";
 import Login from "./Login.jsx";
 import { COUNTRY_CODES, flagFor, samplePlaceholder, splitPhone } from "../countryCodes.js";
 
@@ -28,6 +33,7 @@ import { COUNTRY_CODES, flagFor, samplePlaceholder, splitPhone } from "../countr
  */
 export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat,
                                     theme, onThemeChange, accent, onAccentChange }) {
+  const { t, lang, setLang } = useT();
   const [editing, setEditing] = useState(false);
   const [helpView, setHelpView] = useState(null); // 'blog' | 'feedback' | null
   const { canInstall, promptInstall } = useInstallPrompt();
@@ -54,6 +60,15 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
   const [newReplyText, setNewReplyText] = useState("");
   const [awayMessageDraft, setAwayMessageDraft] = useState(me.away_message || "");
   const [templates, setTemplates] = useState([]);
+  const [products, setProducts] = useState([]);
+  const [autoReplyRules, setAutoReplyRules] = useState([]);
+  const [creatingRule, setCreatingRule] = useState(false);
+  const [newRuleTrigger, setNewRuleTrigger] = useState("");
+  const [newRuleResponse, setNewRuleResponse] = useState("");
+  const [creatingProduct, setCreatingProduct] = useState(false);
+  const [newProductName, setNewProductName] = useState("");
+  const [newProductPrice, setNewProductPrice] = useState("");
+  const [newProductDesc, setNewProductDesc] = useState("");
   const [creatingTemplate, setCreatingTemplate] = useState(false);
   const [newTemplateName, setNewTemplateName] = useState("");
   const [newTemplateContent, setNewTemplateContent] = useState("");
@@ -69,6 +84,10 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
   const [blur, setBlurState] = useState(getWallpaperBlur);
   const [appLockOn, setAppLockOn] = useState(isAppLockEnabled);
   const [appLockSheet, setAppLockSheet] = useState(false);
+  const [bioOn, setBioOn] = useState(isBiometricEnabled);
+  const [bioAvailable, setBioAvailable] = useState(false);
+  const [bioBusy, setBioBusy] = useState(false);
+  useEffect(() => { isBiometricAvailable().then(setBioAvailable); }, []);
   const [changingPhone, setChangingPhone] = useState(false);
   const [settingPassword, setSettingPassword] = useState(false);
   const [editingUsername, setEditingUsername] = useState(false);
@@ -85,6 +104,62 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
   const [coverEditFile, setCoverEditFile] = useState(null); // pending crop before upload
   const [businessOpen, setBusinessOpen] = useState(false);   // business-category dropdown
   const [qrScanOpen, setQrScanOpen] = useState(false);       // scan someone's QR to open their chat
+  const [payConfig, setPayConfig] = useState(null);
+  const [payHistory, setPayHistory] = useState([]);
+  const [paying, setPaying] = useState(false);
+
+  useEffect(() => {
+    Payments.config().then(setPayConfig).catch(() => {});
+    Payments.history().then(setPayHistory).catch(() => {});
+  }, []);
+
+  async function startPayment(planKey) {
+    if (paying) return;
+    setPaying(true);
+    try {
+      const order = await Payments.createOrder(planKey);
+      const options = {
+        key: order.key_id,
+        amount: order.amount,
+        currency: order.currency,
+        name: "TalkEx",
+        description: payConfig?.plans?.[planKey]?.label || "TalkEx Business",
+        order_id: order.order_id,
+        handler: async (response) => {
+          try {
+            const result = await Payments.verify({
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature,
+            });
+            if (result.success) {
+              toast("Payment successful! Business plan activated.");
+              onUpdated({ ...me, plan: result.plan, plan_expires_at: result.expires_at });
+              Payments.history().then(setPayHistory).catch(() => {});
+            }
+          } catch (err) {
+            toast(err.message || "Payment verification failed");
+          }
+          setPaying(false);
+        },
+        modal: { ondismiss: () => setPaying(false) },
+        prefill: { name: me.name, contact: me.phone },
+        theme: { color: G.accent },
+      };
+      if (window.Razorpay) {
+        new window.Razorpay(options).open();
+      } else {
+        const script = document.createElement("script");
+        script.src = "https://checkout.razorpay.com/v1/checkout.js";
+        script.onload = () => new window.Razorpay(options).open();
+        script.onerror = () => { toast("Could not load payment gateway"); setPaying(false); };
+        document.head.appendChild(script);
+      }
+    } catch (err) {
+      toast(err.message || "Could not start payment");
+      setPaying(false);
+    }
+  }
 
   // A scanned TalkEx QR is either a full profile URL (…/?user=username) or a
   // bare username. Resolve it and open a DM straight away.
@@ -249,6 +324,12 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
   const reloadTemplates = () => Templates.list().then(setTemplates).catch(() => {});
   useEffect(() => { reloadTemplates(); }, []);
 
+  const reloadProducts = () => Products.mine().then(setProducts).catch(() => {});
+  useEffect(() => { reloadProducts(); }, []);
+
+  const reloadAutoReplyRules = () => Me.autoReplyRules().then(setAutoReplyRules).catch(() => {});
+  useEffect(() => { reloadAutoReplyRules(); }, []);
+
   async function createWebhook() {
     if (!newWebhookUrl.trim()) return;
     setCreatingWebhook(true);
@@ -305,6 +386,49 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
   async function deleteTemplate(templateId) {
     await Templates.remove(templateId);
     setTemplates((current) => current.filter((t) => t.id !== templateId));
+  }
+
+  async function createProduct() {
+    if (!newProductName.trim()) return;
+    setCreatingProduct(true);
+    try {
+      const priceCents = Math.round((parseFloat(newProductPrice) || 0) * 100);
+      await Products.create({
+        name: newProductName.trim(), description: newProductDesc.trim(), price_cents: priceCents,
+      });
+      setNewProductName(""); setNewProductPrice(""); setNewProductDesc("");
+      reloadProducts();
+      toast("Added to your catalog");
+    } catch (problem) {
+      toast(problem.message || "Could not add that product");
+    } finally {
+      setCreatingProduct(false);
+    }
+  }
+
+  async function deleteProduct(productId) {
+    await Products.delete(productId);
+    setProducts((current) => current.filter((p) => p.id !== productId));
+  }
+
+  async function createAutoReplyRule() {
+    if (!newRuleTrigger.trim() || !newRuleResponse.trim()) return;
+    setCreatingRule(true);
+    try {
+      await Me.createAutoReplyRule(newRuleTrigger.trim(), newRuleResponse.trim());
+      setNewRuleTrigger(""); setNewRuleResponse("");
+      reloadAutoReplyRules();
+      toast("Rule added");
+    } catch (problem) {
+      toast(problem.message || "Could not add that rule");
+    } finally {
+      setCreatingRule(false);
+    }
+  }
+
+  async function deleteAutoReplyRule(ruleId) {
+    await Me.deleteAutoReplyRule(ruleId);
+    setAutoReplyRules((current) => current.filter((r) => r.id !== ruleId));
   }
 
   async function toggleAway(value) {
@@ -686,6 +810,100 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
         );
       })()}
 
+      {/* ── Linked devices (prominent, top) ────────────────── */}
+      <Section id="devices" icon={I.monitor(G.text, 20)} title="Linked devices" sub={`${sessions.length} device${sessions.length === 1 ? "" : "s"}`}
+               activeSection={activeSection} onOpen={setActiveSection}
+               onBack={() => setActiveSection(null)}>
+        <SRow icon={I.link(G.text, 18)} label="Link a device" sub="Approve a sign-in using a code from another device"
+              onClick={() => setLinkingDevice(true)}/>
+
+        {sessions.map((session) => (
+          <SRow key={session.session_id}
+                icon={session.is_current ? I.mapPin(G.accent, 18) : I.monitor(G.accent, 18)}
+                label={session.device_label + (session.is_current ? " (this device)" : "")}
+                sub={`Linked ${whenLabel(session.created_at)}`
+                  + (!session.is_current && session.short_lived ? " · auto sign-out in 4h" : "")}
+                right={
+                  !session.is_current && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <div title="Auto sign out after 4 hours" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 11, color: G.muted }}>4h</span>
+                        <Toggle on={session.short_lived}
+                                onChange={(value) => toggleSessionShortLived(session.session_id, value)}/>
+                      </div>
+                      <Button variant="ghost" style={{ padding: "6px 12px", fontSize: 12 }}
+                              onClick={() => revokeSession(session.session_id)}>
+                        Sign out
+                      </Button>
+                    </div>
+                  )
+                }/>
+        ))}
+      </Section>
+
+      {/* ── Invite a friend (direct action) ──────────────────── */}
+      {activeSection === null && (
+        <SRow icon={I.share(G.text, 20)} label="Invite a friend"
+              sub="Share TalkEx with your contacts"
+              onClick={async () => {
+                const url = `${window.location.origin}/?ref=${me.username}`;
+                const text = `Hey! Join me on TalkEx — free, fast, and secure messaging & calling.\n${url}`;
+                if (navigator.share) {
+                  try { await navigator.share({ title: "TalkEx", text }); } catch { /* cancelled */ }
+                } else {
+                  navigator.clipboard?.writeText(text);
+                  toast("Invite link copied");
+                }
+              }}/>
+      )}
+
+      {/* ── Help & Support ──────────────────────────────────── */}
+      <GroupLabel label={t("settings.group.help_support")} activeSection={activeSection}/>
+
+      <Section id="help" icon={I.info(G.text, 20)} title="Help and feedback"
+               sub="Contact support, app info"
+               activeSection={activeSection} onOpen={setActiveSection}
+               onBack={() => setActiveSection(null)}>
+        <div style={{ padding: "8px 20px 18px" }}>
+          <SRow icon={I.mail(G.text, 18)} label="Contact support"
+                sub="Questions, bugs or feedback"
+                onClick={() => {
+                  const subject = encodeURIComponent("TalkEx feedback");
+                  window.location.href = `mailto:support@coreaxis.cloud?subject=${subject}`;
+                }}/>
+          <SRow icon={I.star(G.text, 18)} label="Send feedback"
+                sub="Answer a few quick questions"
+                onClick={() => setHelpView("feedback")}/>
+          <SRow icon={I.info(G.text, 18)} label="TalkEx Blog"
+                sub="News, tips and updates"
+                onClick={() => setHelpView("blog")}/>
+          <SRow icon={I.shield(G.text, 18)} label="Terms and privacy"
+                sub="How TalkEx handles your data"
+                onClick={() => setHelpView("privacy")}/>
+
+          <div style={{ marginTop: 14, marginBottom: 6, fontSize: 13, fontWeight: 700, color: G.sub }}>
+            More from CoreAxis
+          </div>
+          <SRow icon={<span style={{ fontSize: 18 }}>🛒</span>} label="CoreAxis ePOS"
+                sub="coreaxis.cloud"
+                onClick={() => window.open("https://coreaxis.cloud", "_blank", "noopener")}/>
+          <SRow icon={<span style={{ fontSize: 18 }}>🚀</span>} label="CoreAxis Ventures"
+                sub="ventures.coreaxis.cloud"
+                onClick={() => window.open("https://ventures.coreaxis.cloud", "_blank", "noopener")}/>
+
+          <div style={{ fontSize: 12, color: G.muted, textAlign: "center", marginTop: 16 }}>
+            TalkEx — Made from Bihar, connecting the world
+          </div>
+        </div>
+      </Section>
+
+      {helpView === "feedback" && <FeedbackForm onClose={() => setHelpView(null)} toast={toast}/>}
+      {helpView === "blog" && <BlogSheet onClose={() => setHelpView(null)}/>}
+      {helpView === "privacy" && <PrivacySheet onClose={() => setHelpView(null)}/>}
+
+      {/* ── General ─────────────────────────────────────────── */}
+      <GroupLabel label={t("settings.group.general")} activeSection={activeSection}/>
+
       <Section id="myqr" icon={I.search(G.text, 20)} title="My QR code"
                sub="Let people scan to add you"
                activeSection={activeSection} onOpen={setActiveSection}
@@ -702,8 +920,6 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
             else { navigator.clipboard?.writeText(url); toast("Profile link copied"); }
           }}>Share my code</Button>
 
-          {/* Scan someone else's code to open a chat with them (WhatsApp's
-              "Scan code" tab). */}
           {qrScanOpen ? (
             <div style={{ marginTop: 8 }}>
               <div style={{ fontSize: 12.5, color: G.muted, marginBottom: 10 }}>
@@ -725,14 +941,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
         </div>
       </Section>
 
-      <Section id="invite" icon={I.share(G.text, 20)} title="Invite a friend"
-               sub="Share TalkEx with your contacts"
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
-        <InviteFriend me={me} toast={toast}/>
-      </Section>
-
-      <Section id="appearance" icon={I.palette(G.text, 20)} title="Appearance" sub="Theme and color"
+      <Section id="appearance" icon={I.palette(G.text, 20)} title="Appearance" sub="Theme, color and wallpaper"
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
         <div style={{ padding: "4px 20px 18px" }}>
@@ -839,22 +1048,38 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
                  onChange={(event) => changeWallpaperBlur(Number(event.target.value))}
                  style={{ width: "100%", accentColor: G.accent }}/>
 
+          <div style={{ fontSize: 12, color: G.muted, margin: "16px 0 10px" }}>{t("settings.appearance.language")}</div>
+          <div style={{ display: "flex", gap: 6 }}>
+            {LANGUAGES.map((l) => (
+              <button key={l.code} onClick={() => setLang(l.code)} style={{
+                flex: 1, padding: "9px 4px", borderRadius: 10, cursor: "pointer",
+                fontSize: 12.5, fontWeight: 600,
+                border: `1px solid ${lang === l.code ? G.accent : G.border}`,
+                background: lang === l.code ? G.accentSoft : "transparent",
+                color: lang === l.code ? G.accentText : G.sub,
+              }}>{l.nativeLabel}</button>
+            ))}
+          </div>
+
           <div style={{
             display: "flex", alignItems: "center", justifyContent: "space-between",
             gap: 12, marginTop: 20, paddingTop: 16, borderTop: `1px solid ${G.border}`,
           }}>
             <div>
-              <div style={{ fontSize: 14 }}>Press Enter to send</div>
+              <div style={{ fontSize: 14 }}>{t("settings.appearance.enter_to_send")}</div>
               <div style={{ fontSize: 11.5, color: G.muted, marginTop: 2 }}>
                 {enterToSend
-                  ? "Enter sends · Shift+Enter for a new line"
-                  : "Enter adds a new line · send with the button"}
+                  ? t("settings.appearance.enter_on")
+                  : t("settings.appearance.enter_off")}
               </div>
             </div>
             <Toggle on={enterToSend} onChange={(value) => { setEnterToSend(value); saveEnterToSend(value); }}/>
           </div>
         </div>
       </Section>
+
+      {/* ── Chats & Privacy ──────────────────────────────────── */}
+      <GroupLabel label={t("settings.group.chats_privacy")} activeSection={activeSection}/>
 
       <Section id="notifications" icon={I.bell(G.text, 20)} title="Notifications" sub="Push alerts"
                activeSection={activeSection} onOpen={setActiveSection}
@@ -866,30 +1091,22 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
               right={isPushSupported()
                 ? <Toggle on={pushEnabled} onChange={pushBusy ? () => {} : togglePush}/>
                 : null}/>
+        <div style={{ padding: "2px 20px 6px", fontSize: 12, color: G.muted }}>
+          These narrow which of the above actually notify you — turning
+          Push off above silences all three regardless of these.
+        </div>
+        <SRow icon={I.chat(G.text, 18)} label="Direct messages"
+              right={<Toggle on={Boolean(me.notif_dm)}
+                             onChange={(value) => togglePrivacy("notif_dm", value)}/>}/>
+        <SRow icon={I.chat(G.text, 18)} label="Groups & channels"
+              right={<Toggle on={Boolean(me.notif_groups)}
+                             onChange={(value) => togglePrivacy("notif_groups", value)}/>}/>
+        <SRow icon={I.phone(G.text, 18)} label="Calls"
+              right={<Toggle on={Boolean(me.notif_calls)}
+                             onChange={(value) => togglePrivacy("notif_calls", value)}/>}/>
       </Section>
 
-      <Section id="data" icon={I.wifi(G.text, 20)} title="Data usage" sub="Auto-download media"
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
-        <div style={{ padding: "0 20px 14px", fontSize: 12.5, color: G.muted }}>
-          When to automatically download photos, videos, voice notes and
-          documents in chats. Files you don't auto-download can still be
-          fetched any time with a tap.
-        </div>
-        <div style={{ padding: "0 20px 16px", display: "flex", gap: 6 }}>
-          {[["always", "Always"], ["wifi", "Wi-Fi only"], ["never", "Never"]].map(([value, label]) => (
-            <button key={value} onClick={() => changeAutoDownload(value)} style={{
-              flex: 1, padding: "9px 4px", borderRadius: 10, cursor: "pointer",
-              fontSize: 12.5, fontWeight: 600,
-              border: `1px solid ${autoDownload === value ? G.accent : G.border}`,
-              background: autoDownload === value ? G.accentSoft : "transparent",
-              color: autoDownload === value ? G.accentText : G.sub,
-            }}>{label}</button>
-          ))}
-        </div>
-      </Section>
-
-      <Section id="privacy" icon={I.eye(G.text, 20)} title="Privacy" sub="Last seen and read receipts"
+      <Section id="privacy" icon={I.eye(G.text, 20)} title="Privacy" sub="Last seen, read receipts and calling"
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
         <SRow icon={I.eye(G.text, 18)} label="Last seen and online"
@@ -913,19 +1130,31 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
                              onChange={(value) => togglePrivacy("calling_enabled", value)}/>}/>
       </Section>
 
-      <Section id="livelocation" icon={I.mapPin(G.text, 20)} title="Live Location" sub="Who's sharing, and with you"
+      <Section id="data" icon={I.wifi(G.text, 20)} title="Data usage" sub="Auto-download media"
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
-        <LiveLocationList toast={toast}/>
+        <div style={{ padding: "0 20px 14px", fontSize: 12.5, color: G.muted }}>
+          When to automatically download photos, videos, voice notes and
+          documents in chats. Files you don't auto-download can still be
+          fetched any time with a tap.
+        </div>
+        <div style={{ padding: "0 20px 16px", display: "flex", gap: 6 }}>
+          {[["always", "Always"], ["wifi", "Wi-Fi only"], ["never", "Never"]].map(([value, label]) => (
+            <button key={value} onClick={() => changeAutoDownload(value)} style={{
+              flex: 1, padding: "9px 4px", borderRadius: 10, cursor: "pointer",
+              fontSize: 12.5, fontWeight: 600,
+              border: `1px solid ${autoDownload === value ? G.accent : G.border}`,
+              background: autoDownload === value ? G.accentSoft : "transparent",
+              color: autoDownload === value ? G.accentText : G.sub,
+            }}>{label}</button>
+          ))}
+        </div>
       </Section>
 
-      <Section id="storage" icon={I.barChart(G.text, 20)} title="Storage and data" sub="See what's using space, chat by chat"
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
-        <StorageUsage/>
-      </Section>
+      {/* ── Security ─────────────────────────────────────────── */}
+      <GroupLabel label={t("settings.group.security")} activeSection={activeSection}/>
 
-      <Section id="security" icon={I.shield(G.text, 20)} title="Security" sub="Two-step verification"
+      <Section id="security" icon={I.shield(G.text, 20)} title="Security" sub="Two-step verification and app lock"
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
         <SRow icon={I.shield(G.text, 18)} label="Two-step verification"
@@ -938,12 +1167,283 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
               right={<Toggle on={appLockOn} onChange={(value) => {
                 if (value) { setAppLockSheet(true); return; }
                 disableAppLock();
+                disableBiometric();
                 setAppLockOn(false);
+                setBioOn(false);
                 toast("App lock turned off");
               }}/>}/>
+
+        {appLockOn && bioAvailable && (
+          <SRow icon={I.fingerprint(G.text, 18)} label="Biometric unlock"
+                sub={bioOn ? "Fingerprint or Face ID also unlocks the app" : "Off — PIN only"}
+                right={<Toggle on={bioOn} onChange={async (value) => {
+                  if (bioBusy) return;
+                  if (!value) { disableBiometric(); setBioOn(false); toast("Biometric unlock turned off"); return; }
+                  setBioBusy(true);
+                  try {
+                    await enableBiometric();
+                    setBioOn(true);
+                    toast("Biometric unlock turned on");
+                  } catch {
+                    toast("Could not set up biometric unlock");
+                  } finally {
+                    setBioBusy(false);
+                  }
+                }}/>}/>
+        )}
       </Section>
 
-      <Section id="api" icon={I.bolt(G.text, 20)} title="Business & Automation" sub={`${apiKeys.length} API key${apiKeys.length === 1 ? "" : "s"}`}
+      {/* ── Account ──────────────────────────────────────────── */}
+      <GroupLabel label={t("settings.group.account")} activeSection={activeSection}/>
+
+      <Section id="blocked" icon={I.ban(G.text, 20)} title="Blocked" sub={`${blocked.length} blocked`}
+               activeSection={activeSection} onOpen={setActiveSection}
+               onBack={() => setActiveSection(null)}>
+        {blocked.length === 0 ? (
+          <div style={{ padding: "14px 20px", fontSize: 13, color: G.muted }}>
+            Nobody is blocked.
+          </div>
+        ) : blocked.map((person) => (
+          <SRow key={person.id} icon={I.user(G.text, 18)} label={person.name} sub={`@${person.username}`}
+                right={
+                  <Button variant="ghost" style={{ padding: "6px 12px", fontSize: 12 }}
+                          onClick={async () => {
+                            await Users.unblock(person.id);
+                            setBlocked((current) => current.filter((p) => p.id !== person.id));
+                            toast("Unblocked");
+                          }}>Unblock</Button>
+                }/>
+        ))}
+      </Section>
+
+      <Section id="account" icon={I.logOut(G.text, 20)} title="Account" sub={me.phone || "Sign out, deactivate or delete"}
+               activeSection={activeSection} onOpen={setActiveSection}
+               onBack={() => setActiveSection(null)}>
+        {savedAccounts.filter((account) => account.userId !== me.id).map((account) => (
+          <SRow key={account.userId}
+                icon={<Av av={account.avatarLetter} color={account.color} size={30}/>}
+                label={account.name} sub={`@${account.username}`}
+                onClick={() => switchToAccount(account.userId)}
+                right={
+                  <Button variant="ghost" style={{ padding: "6px 12px", fontSize: 12 }}
+                          onClick={(event) => { event.stopPropagation(); removeSavedAccount(account.userId); }}>
+                    Forget
+                  </Button>
+                }/>
+        ))}
+        <SRow icon={I.user(G.text, 18)} label="Add another account"
+              sub="Switch between accounts on this device"
+              onClick={() => {
+                rememberAccount(me, getToken());
+                setAddingAccount(true);
+              }}/>
+        <SRow icon={I.phone(G.text, 18)} label="Change phone number" sub={me.phone || "Not set"}
+              onClick={() => setChangingPhone(true)}/>
+        <SRow icon={I.lock(G.text, 18)} label="Set password"
+              sub="For signing in with a username, without a phone code"
+              onClick={() => setSettingPassword(true)}/>
+        <SRow icon={I.mail(G.text, 18)} label="Email address"
+              sub={me.email_verified_at ? `${me.email} · verified` : "Not connected — used to recover a forgotten PIN"}
+              onClick={() => setConnectingEmail(true)}/>
+        <SRow icon={I.logOut(G.red, 18)} label="Sign out" danger onClick={signOut}/>
+        <SRow icon={I.moon(G.red, 18)} label="Deactivate account"
+              sub="Hides your account until you sign back in"
+              danger onClick={() => setDeactivating(true)}/>
+        <SRow icon={I.trash(G.red, 18)} label="Delete account" sub="Permanent — cannot be undone"
+              danger onClick={() => setDeletingAccount(true)}/>
+      </Section>
+
+      {/* ── Business Tools ───────────────────────────────────── */}
+      <GroupLabel label={t("settings.group.business")} activeSection={activeSection}/>
+
+      {payConfig?.configured && (
+        <Section id="subscription" icon={I.star(G.text, 20)} title="Subscription"
+                 sub={me.plan && me.plan !== "free"
+                   ? `${me.plan.replace("_", " ")} — expires ${me.plan_expires_at ? new Date(me.plan_expires_at * 1000).toLocaleDateString() : "—"}`
+                   : "Free plan"}
+                 activeSection={activeSection} onOpen={setActiveSection}
+                 onBack={() => setActiveSection(null)}>
+          <div style={{ padding: "0 20px 12px" }}>
+            {me.plan && me.plan !== "free" ? (
+              <div style={{ padding: "12px 16px", borderRadius: 10, background: G.accent + "18", border: `1px solid ${G.accent}44` }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: G.text, marginBottom: 4 }}>
+                  {me.plan.replace("_", " ").replace(/\b\w/g, c => c.toUpperCase())} Plan
+                </div>
+                <div style={{ fontSize: 12, color: G.muted }}>
+                  Active until {me.plan_expires_at ? new Date(me.plan_expires_at * 1000).toLocaleDateString() : "—"}
+                </div>
+              </div>
+            ) : (
+              <>
+                <div style={{ fontSize: 12.5, color: G.muted, marginBottom: 12 }}>
+                  Upgrade to TalkEx Business for product catalog, automation, API access, and more.
+                </div>
+                {payConfig?.plans && Object.entries(payConfig.plans).map(([key, plan]) => (
+                  <Button key={key} onClick={() => startPayment(key)} disabled={paying}
+                          style={{ width: "100%", marginBottom: 8 }}>
+                    {paying ? "Processing…" : `${plan.label} — ₹${(plan.amount_paise / 100).toFixed(0)}`}
+                  </Button>
+                ))}
+              </>
+            )}
+            {payHistory.length > 0 && (
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: G.sub, marginBottom: 6 }}>Payment history</div>
+                {payHistory.map((p) => (
+                  <div key={p.id} style={{ fontSize: 12, color: G.muted, padding: "4px 0",
+                       display: "flex", justifyContent: "space-between" }}>
+                    <span>{p.plan.replace("_", " ")} — ₹{(p.amount_paise / 100).toFixed(0)}</span>
+                    <span style={{ color: p.status === "paid" ? "#22c55e" : G.muted }}>
+                      {p.status} · {new Date(p.created_at * 1000).toLocaleDateString()}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </Section>
+      )}
+
+      <Section id="catalog" icon={I.tag(G.text, 20)} title="Product catalog"
+               sub={`${products.length} product${products.length === 1 ? "" : "s"}`}
+               activeSection={activeSection} onOpen={setActiveSection}
+               onBack={() => setActiveSection(null)}>
+        <div style={{ padding: "0 20px 8px", fontSize: 12.5, color: G.muted }}>
+          Like WhatsApp Business's catalog — list items here, then share one into
+          any chat from the composer's attach menu.
+        </div>
+        <div style={{ padding: "0 20px 10px" }}>
+          <Field value={newProductName} onChange={(event) => setNewProductName(event.target.value)}
+                 placeholder="Name, e.g. Handmade mug"/>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <Field value={newProductPrice} onChange={(event) => setNewProductPrice(event.target.value)}
+                   placeholder="Price" inputMode="decimal" style={{ width: 110, marginBottom: 0 }}/>
+            <Field value={newProductDesc} onChange={(event) => setNewProductDesc(event.target.value)}
+                   placeholder="Description (optional)" style={{ flex: 1, marginBottom: 0 }}/>
+          </div>
+          <Button onClick={createProduct} disabled={creatingProduct || !newProductName.trim()}
+                  style={{ width: "100%" }}>
+            {creatingProduct ? "Adding…" : "Add to catalog"}
+          </Button>
+        </div>
+        {products.map((product) => (
+          <SRow key={product.id} icon={I.tag(G.text, 18)} label={product.name}
+                sub={`${(product.price_cents / 100).toFixed(2)}${product.description ? " · " + product.description : ""}`}
+                right={
+                  <Button variant="danger" style={{ padding: "6px 12px", fontSize: 12 }}
+                          onClick={() => deleteProduct(product.id)}>Remove</Button>
+                }/>
+        ))}
+      </Section>
+
+      <Section id="replies" icon={I.checkDouble(G.text, 20)} title="Quick replies & Templates"
+               sub={`${cannedReplies.length} replies, ${templates.length} templates`}
+               activeSection={activeSection} onOpen={setActiveSection}
+               onBack={() => setActiveSection(null)}>
+        <div style={{ padding: "0 20px 8px", fontSize: 12.5, color: G.muted }}>
+          Saved snippets you can drop into any chat from the composer's quick-reply picker.
+        </div>
+        <div style={{ padding: "0 20px 10px" }}>
+          <Field value={newReplyLabel} onChange={(event) => setNewReplyLabel(event.target.value)}
+                 placeholder="Label, e.g. Pricing"/>
+          <div style={{ display: "flex", gap: 8 }}>
+            <Field value={newReplyText} onChange={(event) => setNewReplyText(event.target.value)}
+                   placeholder="The reply text itself" style={{ flex: 1, marginBottom: 0 }}/>
+            <Button onClick={createCannedReply}
+                    disabled={creatingReply || !newReplyLabel.trim() || !newReplyText.trim()}
+                    style={{ padding: "0 16px" }}>
+              {creatingReply ? "Adding…" : "Add"}
+            </Button>
+          </div>
+        </div>
+        {cannedReplies.map((reply) => (
+          <SRow key={reply.id} icon={I.checkDouble(G.text, 18)} label={reply.label} sub={reply.text}
+                right={
+                  <Button variant="danger" style={{ padding: "6px 12px", fontSize: 12 }}
+                          onClick={() => deleteCannedReply(reply.id)}>Remove</Button>
+                }/>
+        ))}
+
+        <div style={{ fontSize: 12, fontWeight: 700, color: G.sub, margin: "18px 20px 4px" }}>
+          Message templates
+        </div>
+        <div style={{ padding: "0 20px 8px", fontSize: 12.5, color: G.muted }}>
+          Like WhatsApp Business's template system — submitted templates
+          need approval before they're usable.
+        </div>
+        <div style={{ padding: "0 20px 10px" }}>
+          <Field value={newTemplateName} onChange={(event) => setNewTemplateName(event.target.value)}
+                 placeholder="Name, e.g. Order confirmation"/>
+          <div style={{ display: "flex", gap: 8 }}>
+            <Field value={newTemplateContent} onChange={(event) => setNewTemplateContent(event.target.value)}
+                   placeholder="The template's content" style={{ flex: 1, marginBottom: 0 }}/>
+            <Button onClick={createTemplate}
+                    disabled={creatingTemplate || !newTemplateName.trim() || !newTemplateContent.trim()}
+                    style={{ padding: "0 16px" }}>
+              {creatingTemplate ? "Adding…" : "Add"}
+            </Button>
+          </div>
+        </div>
+        {templates.map((template) => (
+          <SRow key={template.id} icon={I.doc(G.text, 18)} label={template.name}
+                sub={`${template.content} · ${template.status}`}
+                right={
+                  <Button variant="danger" style={{ padding: "6px 12px", fontSize: 12 }}
+                          onClick={() => deleteTemplate(template.id)}>Remove</Button>
+                }/>
+        ))}
+      </Section>
+
+      <Section id="automation" icon={I.bolt(G.text, 20)} title="Automation"
+               sub={me.away_enabled ? "Away mode on" : `${autoReplyRules.length} auto-reply rule${autoReplyRules.length === 1 ? "" : "s"}`}
+               activeSection={activeSection} onOpen={setActiveSection}
+               onBack={() => setActiveSection(null)}>
+        <div style={{ padding: "0 20px 8px", fontSize: 12.5, color: G.muted }}>
+          When a DM contains one of these words or phrases, the matching reply
+          is sent automatically — checked in order, first match wins, before
+          falling back to the away message below.
+        </div>
+        <div style={{ padding: "0 20px 10px" }}>
+          <Field value={newRuleTrigger} onChange={(event) => setNewRuleTrigger(event.target.value)}
+                 placeholder="Trigger word, e.g. price"/>
+          <div style={{ display: "flex", gap: 8 }}>
+            <Field value={newRuleResponse} onChange={(event) => setNewRuleResponse(event.target.value)}
+                   placeholder="The automatic reply" style={{ flex: 1, marginBottom: 0 }}/>
+            <Button onClick={createAutoReplyRule}
+                    disabled={creatingRule || !newRuleTrigger.trim() || !newRuleResponse.trim()}
+                    style={{ padding: "0 16px" }}>
+              {creatingRule ? "Adding…" : "Add"}
+            </Button>
+          </div>
+        </div>
+        {autoReplyRules.map((rule) => (
+          <SRow key={rule.id} icon={I.bolt(G.text, 18)} label={rule.trigger_text} sub={rule.response_text}
+                right={
+                  <Button variant="danger" style={{ padding: "6px 12px", fontSize: 12 }}
+                          onClick={() => deleteAutoReplyRule(rule.id)}>Remove</Button>
+                }/>
+        ))}
+
+        <div style={{ fontSize: 12, fontWeight: 700, color: G.sub, margin: "18px 20px 4px" }}>
+          Away message
+        </div>
+        <div style={{ padding: "0 20px 8px", fontSize: 12.5, color: G.muted }}>
+          The fallback when no auto-reply rule matches.
+        </div>
+        <SRow icon={I.moon(G.text, 18)} label="Auto-reply when someone DMs you"
+              sub={me.away_enabled ? "On" : "Off"}
+              right={<Toggle on={Boolean(me.away_enabled)} onChange={toggleAway}/>}/>
+        <div style={{ padding: "0 20px 14px", display: "flex", gap: 8 }}>
+          <Field value={awayMessageDraft} onChange={(event) => setAwayMessageDraft(event.target.value)}
+                 placeholder="I'm away right now — I'll reply when I'm back."
+                 style={{ flex: 1, marginBottom: 0 }}/>
+          <Button onClick={saveAwayMessage} disabled={awayMessageDraft.trim() === (me.away_message || "")}
+                  style={{ padding: "0 16px" }}>Save</Button>
+        </div>
+      </Section>
+
+      <Section id="api" icon={I.key(G.text, 20)} title="API & Integrations"
+               sub={`${apiKeys.length} key${apiKeys.length === 1 ? "" : "s"}, ${webhooks.length} webhook${webhooks.length === 1 ? "" : "s"}`}
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
         <div style={{ padding: "0 20px 8px", fontSize: 12.5, color: G.muted }}>
@@ -990,208 +1490,21 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
                           onClick={() => deleteWebhook(hook.id)}>Remove</Button>
                 }/>
         ))}
-
-        <div style={{ fontSize: 12, fontWeight: 700, color: G.sub, margin: "18px 20px 4px" }}>
-          Away message
-        </div>
-        <SRow icon={I.moon(G.text, 18)} label="Auto-reply when someone DMs you"
-              sub={me.away_enabled ? "On" : "Off"}
-              right={<Toggle on={Boolean(me.away_enabled)} onChange={toggleAway}/>}/>
-        <div style={{ padding: "0 20px 14px", display: "flex", gap: 8 }}>
-          <Field value={awayMessageDraft} onChange={(event) => setAwayMessageDraft(event.target.value)}
-                 placeholder="I'm away right now — I'll reply when I'm back."
-                 style={{ flex: 1, marginBottom: 0 }}/>
-          <Button onClick={saveAwayMessage} disabled={awayMessageDraft.trim() === (me.away_message || "")}
-                  style={{ padding: "0 16px" }}>Save</Button>
-        </div>
-
-        <div style={{ fontSize: 12, fontWeight: 700, color: G.sub, margin: "18px 20px 4px" }}>
-          Canned replies
-        </div>
-        <div style={{ padding: "0 20px 8px", fontSize: 12.5, color: G.muted }}>
-          Saved snippets you can drop into any chat from the composer's quick-reply picker.
-        </div>
-        <div style={{ padding: "0 20px 10px" }}>
-          <Field value={newReplyLabel} onChange={(event) => setNewReplyLabel(event.target.value)}
-                 placeholder="Label, e.g. Pricing"/>
-          <div style={{ display: "flex", gap: 8 }}>
-            <Field value={newReplyText} onChange={(event) => setNewReplyText(event.target.value)}
-                   placeholder="The reply text itself" style={{ flex: 1, marginBottom: 0 }}/>
-            <Button onClick={createCannedReply}
-                    disabled={creatingReply || !newReplyLabel.trim() || !newReplyText.trim()}
-                    style={{ padding: "0 16px" }}>
-              {creatingReply ? "Adding…" : "Add"}
-            </Button>
-          </div>
-        </div>
-        {cannedReplies.map((reply) => (
-          <SRow key={reply.id} icon={I.checkDouble(G.text, 18)} label={reply.label} sub={reply.text}
-                right={
-                  <Button variant="danger" style={{ padding: "6px 12px", fontSize: 12 }}
-                          onClick={() => deleteCannedReply(reply.id)}>Remove</Button>
-                }/>
-        ))}
-
-        <div style={{ fontSize: 12, fontWeight: 700, color: G.sub, margin: "18px 20px 4px" }}>
-          Message templates
-        </div>
-        <div style={{ padding: "0 20px 8px", fontSize: 12.5, color: G.muted }}>
-          Like WhatsApp Business's template system — a message meant for someone who
-          hasn't started the conversation needs sign-off first. Submitted templates
-          need approval before they're usable.
-        </div>
-        <div style={{ padding: "0 20px 10px" }}>
-          <Field value={newTemplateName} onChange={(event) => setNewTemplateName(event.target.value)}
-                 placeholder="Name, e.g. Order confirmation"/>
-          <div style={{ display: "flex", gap: 8 }}>
-            <Field value={newTemplateContent} onChange={(event) => setNewTemplateContent(event.target.value)}
-                   placeholder="The template's content" style={{ flex: 1, marginBottom: 0 }}/>
-            <Button onClick={createTemplate}
-                    disabled={creatingTemplate || !newTemplateName.trim() || !newTemplateContent.trim()}
-                    style={{ padding: "0 16px" }}>
-              {creatingTemplate ? "Adding…" : "Add"}
-            </Button>
-          </div>
-        </div>
-        {templates.map((template) => (
-          <SRow key={template.id} icon={I.doc(G.text, 18)} label={template.name}
-                sub={`${template.content} · ${template.status}`}
-                right={
-                  <Button variant="danger" style={{ padding: "6px 12px", fontSize: 12 }}
-                          onClick={() => deleteTemplate(template.id)}>Remove</Button>
-                }/>
-        ))}
       </Section>
 
-      <Section id="devices" icon={I.monitor(G.text, 20)} title="Linked devices" sub={`${sessions.length} device${sessions.length === 1 ? "" : "s"}`}
+      {/* ── Storage ────────────────────────────────────────── */}
+      <GroupLabel label={t("settings.group.storage")} activeSection={activeSection}/>
+
+      <Section id="storage" icon={I.barChart(G.text, 20)} title="Storage and data" sub="See what's using space, chat by chat"
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
-        <SRow icon={I.link(G.text, 18)} label="Link a device" sub="Approve a sign-in using a code from another device"
-              onClick={() => setLinkingDevice(true)}/>
-
-        {sessions.map((session) => (
-          <SRow key={session.session_id}
-                icon={session.is_current ? I.mapPin(G.accent, 18) : I.monitor(G.accent, 18)}
-                label={session.device_label + (session.is_current ? " (this device)" : "")}
-                sub={`Linked ${whenLabel(session.created_at)}`
-                  + (!session.is_current && session.short_lived ? " · auto sign-out in 4h" : "")}
-                right={
-                  !session.is_current && (
-                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                      <div title="Auto sign out after 4 hours" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        <span style={{ fontSize: 11, color: G.muted }}>4h</span>
-                        <Toggle on={session.short_lived}
-                                onChange={(value) => toggleSessionShortLived(session.session_id, value)}/>
-                      </div>
-                      <Button variant="ghost" style={{ padding: "6px 12px", fontSize: 12 }}
-                              onClick={() => revokeSession(session.session_id)}>
-                        Sign out
-                      </Button>
-                    </div>
-                  )
-                }/>
-        ))}
+        <StorageUsage/>
       </Section>
 
-      <Section id="blocked" icon={I.ban(G.text, 20)} title="Blocked" sub={`${blocked.length} blocked`}
+      <Section id="livelocation" icon={I.mapPin(G.text, 20)} title="Live Location" sub="Who's sharing, and with you"
                activeSection={activeSection} onOpen={setActiveSection}
                onBack={() => setActiveSection(null)}>
-        {blocked.length === 0 ? (
-          <div style={{ padding: "14px 20px", fontSize: 13, color: G.muted }}>
-            Nobody is blocked.
-          </div>
-        ) : blocked.map((person) => (
-          <SRow key={person.id} icon={I.user(G.text, 18)} label={person.name} sub={`@${person.username}`}
-                right={
-                  <Button variant="ghost" style={{ padding: "6px 12px", fontSize: 12 }}
-                          onClick={async () => {
-                            await Users.unblock(person.id);
-                            setBlocked((current) => current.filter((p) => p.id !== person.id));
-                            toast("Unblocked");
-                          }}>Unblock</Button>
-                }/>
-        ))}
-      </Section>
-
-      <Section id="help" icon={I.info(G.text, 20)} title="Help and feedback"
-               sub="Contact support, app info"
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
-        <div style={{ padding: "8px 20px 18px" }}>
-          <SRow icon={I.mail(G.text, 18)} label="Contact support"
-                sub="Questions, bugs or feedback"
-                onClick={() => {
-                  const subject = encodeURIComponent("TalkEx feedback");
-                  window.location.href = `mailto:support@coreaxis.cloud?subject=${subject}`;
-                }}/>
-          <SRow icon={I.star(G.text, 18)} label="Send feedback"
-                sub="Answer a few quick questions"
-                onClick={() => setHelpView("feedback")}/>
-          <SRow icon={I.info(G.text, 18)} label="TalkEx Blog"
-                sub="News, tips and updates"
-                onClick={() => setHelpView("blog")}/>
-          <SRow icon={I.shield(G.text, 18)} label="Terms and privacy"
-                sub="How TalkEx handles your data"
-                onClick={() => setHelpView("privacy")}/>
-
-          <div style={{ marginTop: 14, marginBottom: 6, fontSize: 13, fontWeight: 700, color: G.sub }}>
-            More from CoreAxis
-          </div>
-          <SRow icon={<span style={{ fontSize: 18 }}>🛒</span>} label="CoreAxis ePOS"
-                sub="coreaxis.cloud"
-                onClick={() => window.open("https://coreaxis.cloud", "_blank", "noopener")}/>
-          <SRow icon={<span style={{ fontSize: 18 }}>🚀</span>} label="CoreAxis Ventures"
-                sub="ventures.coreaxis.cloud"
-                onClick={() => window.open("https://ventures.coreaxis.cloud", "_blank", "noopener")}/>
-
-          <div style={{ fontSize: 12, color: G.muted, textAlign: "center", marginTop: 16 }}>
-            TalkEx — Made from Bihar, connecting the world 💙💚
-          </div>
-        </div>
-      </Section>
-
-      {helpView === "feedback" && <FeedbackForm onClose={() => setHelpView(null)} toast={toast}/>}
-      {helpView === "blog" && <BlogSheet onClose={() => setHelpView(null)}/>}
-      {helpView === "privacy" && <PrivacySheet onClose={() => setHelpView(null)}/>}
-
-      <Section id="account" icon={I.logOut(G.text, 20)} title="Account" sub={me.phone || "Sign out, deactivate or delete"}
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
-        {savedAccounts.filter((account) => account.userId !== me.id).map((account) => (
-          <SRow key={account.userId}
-                icon={<Av av={account.avatarLetter} color={account.color} size={30}/>}
-                label={account.name} sub={`@${account.username}`}
-                onClick={() => switchToAccount(account.userId)}
-                right={
-                  <Button variant="ghost" style={{ padding: "6px 12px", fontSize: 12 }}
-                          onClick={(event) => { event.stopPropagation(); removeSavedAccount(account.userId); }}>
-                    Forget
-                  </Button>
-                }/>
-        ))}
-        <SRow icon={I.user(G.text, 18)} label="Add another account"
-              sub="Switch between accounts on this device"
-              onClick={() => {
-                // Guarantees this account is in the switcher even if it was
-                // signed into before this feature existed (or restored from
-                // a cached session that never ran through rememberAccount).
-                rememberAccount(me, getToken());
-                setAddingAccount(true);
-              }}/>
-        <SRow icon={I.phone(G.text, 18)} label="Change phone number" sub={me.phone || "Not set"}
-              onClick={() => setChangingPhone(true)}/>
-        <SRow icon={I.lock(G.text, 18)} label="Set password"
-              sub="For signing in with a username, without a phone code"
-              onClick={() => setSettingPassword(true)}/>
-        <SRow icon={I.mail(G.text, 18)} label="Email address"
-              sub={me.email_verified_at ? `${me.email} · verified` : "Not connected — used to recover a forgotten PIN"}
-              onClick={() => setConnectingEmail(true)}/>
-        <SRow icon={I.logOut(G.red, 18)} label="Sign out" danger onClick={signOut}/>
-        <SRow icon={I.moon(G.red, 18)} label="Deactivate account"
-              sub="Hides your account until you sign back in"
-              danger onClick={() => setDeactivating(true)}/>
-        <SRow icon={I.trash(G.red, 18)} label="Delete account" sub="Permanent — cannot be undone"
-              danger onClick={() => setDeletingAccount(true)}/>
+        <LiveLocationList toast={toast}/>
       </Section>
 
       {activeSection === null && (
@@ -1926,6 +2239,16 @@ function WallpaperSwatch({ label, active, onClick, style, children }) {
  * behind a back button. Nothing else on the home screen is visible while a
  * category is open — this is real navigation, not an inline expand/collapse.
  */
+function GroupLabel({ label, activeSection }) {
+  if (activeSection !== null) return null;
+  return (
+    <div style={{
+      fontSize: 11.5, fontWeight: 700, color: G.muted, textTransform: "uppercase",
+      letterSpacing: 0.6, padding: "18px 20px 6px",
+    }}>{label}</div>
+  );
+}
+
 function Section({ id, icon, title, sub, activeSection, onOpen, onBack, children }) {
   if (activeSection === null) {
     return (
@@ -2322,8 +2645,7 @@ function TwoStepSheet({ enabled, onClose, onChanged, toast }) {
 
 // ── Invite a friend (WhatsApp-style) ────────────────────────────────────────
 
-const HAS_DEVICE_CONTACTS = typeof navigator !== "undefined"
-  && "contacts" in navigator && "ContactsManager" in window;
+const HAS_DEVICE_CONTACTS = contactsAvailable();
 
 function InviteFriend({ me, toast }) {
   const inviteUrl = `${window.location.origin}/?ref=${me?.username || ""}`;
@@ -2344,7 +2666,7 @@ function InviteFriend({ me, toast }) {
     if (!HAS_DEVICE_CONTACTS) return;
     setLoading(true);
     try {
-      const picked = await navigator.contacts.select(["name", "tel"], { multiple: true });
+      const picked = await pickContacts();
       const entries = [];
       for (const contact of picked) {
         const name = contact.name?.[0] || "";

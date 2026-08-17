@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Contacts } from "../api.js";
 import { Av, G, I, useCallLayout } from "../ui.jsx";
+import { setCallActive, onPipModeChange } from "../nativePip.js";
 
 export function mmss(totalSeconds) {
   const seconds = Math.max(0, Math.round(totalSeconds || 0));
@@ -301,7 +302,88 @@ export default function CallOverlay({
     if (!call || call.phase !== "active") setMinimized(false);
   }, [call?.phase, call?.chatId]);
 
+  // Ringback (outgoing) / ringtone (incoming) — synthesized with Web Audio
+  // so there's no binary asset to ship or license. Neither phase used to
+  // play any sound at all: "Ringing…" was just text. Stops itself the
+  // moment the phase moves on (answered, declined, cancelled, timed out).
+  useEffect(() => {
+    const phase = call?.phase;
+    if (phase !== "outgoing" && phase !== "incoming") return undefined;
+
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return undefined;
+    const ctx = new Ctx();
+    ctx.resume?.().catch(() => {});
+    let stopped = false;
+    const timers = [];
+
+    function beep(freq1, freq2, duration) {
+      if (stopped) return;
+      const now = ctx.currentTime;
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(0.16, now + 0.03);
+      gain.gain.setValueAtTime(0.16, Math.max(now + 0.03, now + duration - 0.03));
+      gain.gain.linearRampToValueAtTime(0, now + duration);
+      gain.connect(ctx.destination);
+      [freq1, freq2].forEach((freq) => {
+        const osc = ctx.createOscillator();
+        osc.type = "sine";
+        osc.frequency.value = freq;
+        osc.connect(gain);
+        osc.start(now);
+        osc.stop(now + duration);
+      });
+    }
+
+    function schedule() {
+      if (stopped) return;
+      if (phase === "outgoing") {
+        // Classic ringback cadence: ~1s tone, ~3s silence.
+        beep(440, 480, 1.0);
+        timers.push(setTimeout(schedule, 4000));
+      } else {
+        // Phone-ring cadence: two short bursts, then a pause.
+        beep(950, 950, 0.4);
+        timers.push(setTimeout(() => beep(950, 950, 0.4), 550));
+        timers.push(setTimeout(schedule, 2200));
+      }
+    }
+    schedule();
+
+    return () => {
+      stopped = true;
+      timers.forEach(clearTimeout);
+      ctx.close?.().catch(() => {});
+    };
+  }, [call?.phase]);
+
+  // Native Android system Picture-in-Picture: tell MainActivity a call is on
+  // screen so backgrounding the app (home button, task switch) shrinks it to
+  // a real floating OS window instead of just disappearing — and swap to a
+  // minimal, video-only layout while in that tiny window, since the normal
+  // full-screen buttons aren't usable (or even visible) at PiP size. A no-op
+  // everywhere except the native Android build (see nativePip.js).
+  const [pipMode, setPipMode] = useState(false);
+  useEffect(() => {
+    setCallActive(Boolean(call && call.phase === "active"));
+    return () => setCallActive(false);
+  }, [call?.phase, call?.chatId]);
+  useEffect(() => onPipModeChange(setPipMode), []);
+
   if (!call) return null;
+
+  if (pipMode) {
+    const pipStream = call.remoteStream || call.localStream;
+    return (
+      <div style={{ position: "fixed", inset: 0, background: "#0b1220" }}>
+        {pipStream
+          ? <VideoTag stream={pipStream} muted={!call.remoteStream}
+                      zoomable={false} style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
+          : <PeerIdentity call={call} subtitle={mmss(call.duration)}/>}
+      </div>
+    );
+  }
 
   // Minimized: a small floating window over the app (WhatsApp's picture-in-
   // picture call bubble). The rest of the app behind it stays fully usable —
@@ -327,7 +409,7 @@ export default function CallOverlay({
     }}>
       {/* Minimize to the floating window — available on every active call,
           the top-left "collapse" affordance from the WhatsApp call screen. */}
-      {call.phase === "active" && (
+      {call.phase !== "incoming" && (
         <div onClick={() => setMinimized(true)} title="Minimize" style={{
           position: "absolute", top: 14, left: 14, zIndex: 2,
           width: 34, height: 34, borderRadius: "50%", cursor: "pointer",
@@ -346,8 +428,12 @@ export default function CallOverlay({
         </div>
       )}
       {call.phase === "incoming" && <IncomingCall call={call} onAccept={onAccept} onReject={onReject}/>}
-      {call.phase === "outgoing" && <OutgoingCall call={call} onEnd={onEnd}/>}
-      {call.phase === "active" && (
+      {/* Outgoing uses the same full-control screen as an active call —
+          WhatsApp shows mute/camera/speaker the instant you place the call,
+          not just once the other side answers. Local media (localStream,
+          mute/camera toggles) is already live during "outgoing" (acquired
+          up front in startCall), so there's nothing to wait for. */}
+      {(call.phase === "outgoing" || call.phase === "active") && (
         <ActiveCall call={call} onEnd={onEnd} onToggleMute={onToggleMute} onToggleCamera={onToggleCamera}
                     onSwitchCamera={onSwitchCamera} onMinimize={() => setMinimized(true)}
                     onShareScreen={onShareScreen} onEffect={onEffect} onAddParticipant={onAddParticipant}
@@ -481,26 +567,6 @@ function IncomingCall({ call, onAccept, onReject }) {
   );
 }
 
-function OutgoingCall({ call, onEnd }) {
-  return (
-    <>
-      <div style={{ flex: 1 }}>
-        {/* "Calling…" until the server confirms the invite actually
-            reached a live, focused device (call.ringConfirmed, set from
-            the call_ringing event in useCall.js) — only then is "Ringing…"
-            an honest description of what's happening on their end. Before
-            that we genuinely don't know: a logged-out account, a dead
-            connection, or a stale client all look identical from here
-            until either this arrives or the call times out. */}
-        <PeerIdentity call={call} subtitle={call.ringConfirmed ? "Ringing…" : "Calling…"}/>
-      </div>
-      <div style={{ display: "flex", justifyContent: "center", padding: "0 40px 60px" }}>
-        <CallButton onClick={onEnd} background="#ef4444" icon={I.callEnd("#fff", 24)} label="Cancel"/>
-      </div>
-    </>
-  );
-}
-
 const VIDEO_EFFECTS = [
   { key: "none", label: "None", filter: "none" },
   { key: "blur", label: "Blur", filter: "blur(6px)" },
@@ -531,6 +597,18 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
   const mainIsLocal = swapped && hasLocalVideo;
   const showMainVideo = mainIsLocal ? hasLocalVideo : hasRemoteVideo;
 
+  // A front camera's own preview should look like a mirror — that's how
+  // everyone expects to see themselves (their right hand on their visual
+  // right, text they hold up readable to THEM). This was never applied
+  // anywhere before: the caller saw their own raw, unmirrored feed (which
+  // looks backwards to them) while the peer correctly saw a normal,
+  // unmirrored view of the caller — so only the caller ever noticed
+  // anything "wrong." Only ever applied to a tile showing MY OWN stream,
+  // driven by MY OWN facingMode — never the peer's, and never the back
+  // camera (mirroring a back-camera view would make text/signs backwards
+  // for no reason).
+  const selfMirror = call.facingMode !== "environment" ? { transform: "scaleX(-1)" } : undefined;
+
   // Landscape on a phone means very little vertical room — the 60px bottom
   // safe-area padding that portrait needs (iPhone notch bar) would eat half
   // the screen. Buttons go inline with minimal padding instead. The self-
@@ -538,6 +616,29 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
   const pipW = isLandscape ? 120 : 100;
   const pipH = isLandscape ? 80 : 140;
   const canSwap = hasRemoteVideo && hasLocalVideo;
+
+  // Self-view corner tile is draggable anywhere on screen — same
+  // pointer-drag pattern MinimizedCall (below) already uses for the
+  // floating call bubble, just clamped to this tile's own size.
+  const [pipPos, setPipPos] = useState({ x: null, y: null }); // null → default bottom-right via CSS
+  const pipMoved = useRef(false);
+  const pipDrag = useRef(null);
+  function onPipPointerDown(event) {
+    pipMoved.current = false;
+    const rect = event.currentTarget.getBoundingClientRect();
+    pipDrag.current = { startX: event.clientX, startY: event.clientY, baseX: rect.left, baseY: rect.top };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+  function onPipPointerMove(event) {
+    if (!pipDrag.current) return;
+    const dx = event.clientX - pipDrag.current.startX;
+    const dy = event.clientY - pipDrag.current.startY;
+    if (Math.abs(dx) > 4 || Math.abs(dy) > 4) pipMoved.current = true;
+    const nx = Math.max(6, Math.min(window.innerWidth - pipW - 6, pipDrag.current.baseX + dx));
+    const ny = Math.max(6, Math.min(window.innerHeight - pipH - 6, pipDrag.current.baseY + dy));
+    setPipPos({ x: nx, y: ny });
+  }
+  function onPipPointerUp() { pipDrag.current = null; }
 
   return (
     <>
@@ -560,11 +661,14 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
         {/* Local feed on the main stage (only when swapped in) */}
         {mainIsLocal && (
           <VideoTag stream={call.localStream} muted zoomable={false} style={{
-            width: "100%", height: "100%", objectFit: "cover",
+            width: "100%", height: "100%", objectFit: "cover", ...selfMirror,
           }}/>
         )}
 
-        {!showMainVideo && <PeerIdentity call={call} subtitle={mmss(call.duration)}/>}
+        {!showMainVideo && (
+          <PeerIdentity call={call}
+            subtitle={call.phase === "active" ? mmss(call.duration) : (call.ringConfirmed ? "Ringing…" : "Calling…")}/>
+        )}
 
         {showMainVideo && (
           <div style={{
@@ -589,17 +693,29 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
           </div>
         )}
 
-        {/* Corner tile: shows whichever feed is NOT on the main stage. Tapping
-            it swaps the two. Camera-flip lives here when it's the self feed. */}
+        {/* Corner tile: shows whichever feed is NOT on the main stage. Drag it
+            anywhere on screen (WhatsApp/Zoom-style); a tap that didn't move
+            still swaps main/self, same as before — pipDragRef.moved is what
+            tells the two apart. Camera-flip lives here when it's the self feed. */}
         {(hasLocalVideo || (mainIsLocal && hasRemoteVideo)) && (
-          <div style={{ position: "absolute", bottom: isLandscape ? 8 : 16, right: isLandscape ? 8 : 16 }}>
-            <div onClick={canSwap ? () => setSwapped((s) => !s) : undefined}
-                 title={canSwap ? "Swap views" : undefined}
-                 style={{ cursor: canSwap ? "pointer" : "default" }}>
+          <div onPointerDown={onPipPointerDown} onPointerMove={onPipPointerMove}
+               onPointerUp={onPipPointerUp} onPointerCancel={onPipPointerUp}
+               style={{
+                 position: "absolute", touchAction: "none", cursor: "grab",
+                 ...(pipPos.x == null
+                   ? { bottom: isLandscape ? 8 : 16, right: isLandscape ? 8 : 16 }
+                   : { left: pipPos.x, top: pipPos.y }),
+               }}>
+            <div onClick={canSwap ? () => { if (!pipMoved.current) setSwapped((s) => !s); } : undefined}
+                 title={canSwap ? "Drag to move · tap to swap" : "Drag to move"}
+                 style={{ cursor: canSwap ? "pointer" : "grab" }}>
               <VideoTag stream={mainIsLocal ? call.remoteStream : call.localStream}
                         muted={!mainIsLocal} zoomable={false} style={{
                 width: pipW, height: pipH, borderRadius: 12, objectFit: "cover",
                 border: "2px solid #ffffff33",
+                // Only this tile's feed is ever mine here when it's NOT the
+                // swapped-in main stage — mirror follows that, same as above.
+                ...(!mainIsLocal ? selfMirror : undefined),
               }}/>
             </div>
             {/* Camera flip acts on MY camera — show it on whichever tile is

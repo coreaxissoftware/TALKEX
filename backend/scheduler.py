@@ -243,9 +243,14 @@ async def publish_due_stories(now: float):
 
         # The 24-hour life starts now, not when it was written. Someone queueing
         # a status three days ahead should still get a full day of visibility.
+        # audience_mode is refreshed here too, for the same reason: who this
+        # is shown to should reflect the privacy setting active when it
+        # actually goes out, not whatever it was three days earlier at
+        # compose time.
+        author = db.query_one("SELECT story_audience FROM users WHERE id = ?", (story["user_id"],))
         db.execute(
-            "UPDATE stories SET created_at = ?, expires_at = ? WHERE id = ?",
-            (now, now + 24 * 3600, story["id"]),
+            "UPDATE stories SET created_at = ?, expires_at = ?, audience_mode = ? WHERE id = ?",
+            (now, now + 24 * 3600, author["story_audience"] if author else "contacts", story["id"]),
         )
 
         await _notify_contacts(story["user_id"], {
@@ -256,13 +261,21 @@ async def publish_due_stories(now: float):
 
 
 async def expire_stories(now: float):
-    """Retire live statuses whose 24 hours are up."""
+    """
+    Retire live statuses whose 24 hours are up — except one a user has
+    pinned to their Highlights (highlighted_at set). A highlighted story
+    just stays 'live' with a stale expires_at for as long as it's
+    highlighted; un-highlighting it drops it back into this sweep's path,
+    where its already-past expires_at lets it expire on the very next run.
+    """
     due = db.query_all(
-        "SELECT id FROM stories WHERE status = 'live' AND expires_at <= ?", (now,))
+        "SELECT id FROM stories WHERE status = 'live' AND expires_at <= ? "
+        "AND highlighted_at IS NULL", (now,))
     if not due:
         return
     db.execute(
-        "UPDATE stories SET status = 'expired' WHERE status = 'live' AND expires_at <= ?",
+        "UPDATE stories SET status = 'expired' WHERE status = 'live' AND expires_at <= ? "
+        "AND highlighted_at IS NULL",
         (now,),
     )
     # An expired status's photo/video/audio is gone the same way an expired

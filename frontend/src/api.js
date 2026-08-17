@@ -282,10 +282,22 @@ export const Me = {
   // In-app product feedback: { answers: {questionKey: answer}, comment }.
   submitFeedback: (answers, comment) => post("/feedback", { answers, comment }),
 
+  // Keyword-triggered auto-replies (the flow-builder step up from the
+  // single away_message) — checked first, in order, on every incoming DM.
+  autoReplyRules: () => get("/me/auto-reply-rules"),
+  createAutoReplyRule: (triggerText, responseText) =>
+    post("/me/auto-reply-rules", { trigger_text: triggerText, response_text: responseText }),
+  deleteAutoReplyRule: (ruleId) => remove(`/me/auto-reply-rules/${ruleId}`),
+
   // Saved quick-reply snippets for the composer picker.
   cannedReplies: () => get("/me/canned-replies"),
   createCannedReply: (label, text) => post("/me/canned-replies", { label, text }),
   deleteCannedReply: (replyId) => remove(`/me/canned-replies/${replyId}`),
+
+  // WhatsApp-Business-style chat labels — personal taxonomy, many-per-chat.
+  labels: () => get("/me/labels"),
+  createLabel: (name, color) => post("/me/labels", { name, color }),
+  deleteLabel: (labelId) => remove(`/me/labels/${labelId}`),
 
   // Personal bookmarks across every chat — distinct from a chat's shared pins.
   starred: () => get("/me/starred"),
@@ -345,6 +357,10 @@ export const Users = {
   block: (userId) => post(`/users/${userId}/block`),
   unblock: (userId) => remove(`/users/${userId}/block`),
   blocked: () => get("/blocks"),
+
+  // Telegram-style People Nearby — off until setNearby(true, lat, lng).
+  setNearby: (enabled, lat = null, lng = null) => put("/me/nearby", { enabled, lat, lng }),
+  nearby: (radiusKm = 50) => get(`/discover/nearby?radius_km=${radiusKm}`),
 };
 
 // A one-way flag for whoever moderates the platform — the target is never
@@ -461,6 +477,15 @@ export const Chats = {
   removeAvatar: (chatId) => remove(`/chats/${chatId}/avatar`),
   // WhatsApp's "Only admins can send messages" group switch.
   setSendPolicy: (chatId, adminsOnly) => put(`/chats/${chatId}/send-policy?admins_only=${adminsOnly}`),
+
+  // Telegram-style Topics: named sub-threads inside a group.
+  setTopicsPolicy: (chatId, enabled) => put(`/chats/${chatId}/topics-policy?enabled=${enabled}`),
+  topics: (chatId) => get(`/chats/${chatId}/topics`),
+  createTopic: (chatId, name) => post(`/chats/${chatId}/topics`, { name }),
+  closeTopic: (chatId, topicId) => remove(`/chats/${chatId}/topics/${topicId}`),
+
+  // Replaces this chat's full set of your own labels (see Me.labels).
+  setLabels: (chatId, labelIds) => put(`/chats/${chatId}/labels`, { label_ids: labelIds }),
   // Hand the group over to another member (owner only).
   makeOwner: (chatId, userId) => post(`/chats/${chatId}/members/${userId}/make-owner`, {}),
   // Groups both you and another user belong to.
@@ -585,6 +610,12 @@ export const Messages = {
   // Personal, cross-chat bookmark — see Me.starred() for the full list.
   star: (messageId) => post(`/messages/${messageId}/star`),
   unstar: (messageId) => remove(`/messages/${messageId}/star`),
+
+  // Explicit "I opened this" gesture for a view-once TEXT message — the
+  // text equivalent of tapping to reveal a view-once photo/video. Returns
+  // the text so the tap that spends the one view can also show it, before
+  // the next fetch of this message comes back blanked.
+  openViewOnce: (messageId) => post(`/messages/${messageId}/view-once-open`),
 };
 
 // ── Offline write queue ───────────────────────────────────────────────────────
@@ -896,6 +927,13 @@ export const Stories = {
   muteStatus: (userId) => post(`/users/${userId}/mute-status`),
   unmuteStatus: (userId) => remove(`/users/${userId}/mute-status`),
   mutedStatuses: () => get("/muted-statuses"),
+
+  // Pin a story past its normal 24h lifetime onto the profile — Instagram's
+  // Highlights. Author-only to set/unset; anyone who could see the original
+  // story can read the reel back.
+  highlight: (storyId, label = "") => post(`/stories/${storyId}/highlight`, { label }),
+  unhighlight: (storyId) => remove(`/stories/${storyId}/highlight`),
+  highlights: (userId) => get(`/users/${userId}/highlights`),
 };
 
 // ── Call history ─────────────────────────────────────────────────────────────
@@ -1232,6 +1270,46 @@ export const Music = {
   trending: () => get("/api/music/trending"),
 };
 
+// Composer's GIF picker (Tenor, proxied server-side). search() throws a 503
+// ApiError when TENOR_API_KEY isn't configured — GifPicker shows that as a
+// "not set up" state rather than a blank/broken grid.
+export const Gifs = {
+  search: (q = "", limit = 30) => get(`/api/gifs/search?q=${encodeURIComponent(q)}&limit=${limit}`),
+};
+
+// WhatsApp-Business-Catalog-style product listings.
+export const Products = {
+  mine: () => get("/me/products"),
+  ofUser: (userId) => get(`/users/${userId}/products`),
+  create: (fields) => post("/me/products", fields),
+  update: (productId, fields) => patch(`/me/products/${productId}`, fields),
+  delete: (productId) => remove(`/me/products/${productId}`),
+};
+
+// Inline "Translate" on a received message. Throws a 503 ApiError when
+// GOOGLE_TRANSLATE_API_KEY isn't configured — the caller shows that as
+// "translation isn't set up" rather than a generic failure toast.
+export const Translate = {
+  text: (text, target) =>
+    get(`/api/translate?text=${encodeURIComponent(text)}&target=${encodeURIComponent(target)}`),
+};
+
+// ── SFU (LiveKit) ────────────────────────────────────────────────────────────
+
+export const Sfu = {
+  config: () => get("/sfu/config"),
+  token: (chatId) => post("/sfu/token", { chat_id: chatId }),
+};
+
+// ── Payments (Razorpay) ──────────────────────────────────────────────────────
+
+export const Payments = {
+  config: () => get("/payments/config"),
+  createOrder: (plan) => post("/payments/create-order", { plan }),
+  verify: (data) => post("/payments/verify", data),
+  history: () => get("/payments/history"),
+};
+
 // ── E2EE Key Management ─────────────────────────────────────────────────────
 
 export const E2EE = {
@@ -1257,7 +1335,8 @@ export function newClientMessageId() {
 // it was queued for later — the caller shows it optimistically either way.
 export async function sendReliably({ chatId, text, kind = "text", payload = null,
                                      replyToId = null, disappearSecs = null,
-                                     clientMsgId = null, viewOnce = false, silent = false }) {
+                                     clientMsgId = null, viewOnce = false, silent = false,
+                                     topicId = null }) {
   const message = {
     chat_id: chatId,
     text,
@@ -1267,6 +1346,7 @@ export async function sendReliably({ chatId, text, kind = "text", payload = null
     disappear_secs: disappearSecs,
     view_once: viewOnce,
     silent,
+    topic_id: topicId,
     // The caller passes this in when it has already drawn the message
     // optimistically, so the copy on screen and the copy that comes back over
     // the socket can be recognised as the same thing.

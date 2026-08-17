@@ -13,7 +13,11 @@ perfectly fine without FCM configured — the web push path is unaffected.
 """
 
 import json
+import logging
 import os
+
+logger = logging.getLogger("talkex.fcm")
+_warned_not_configured = False
 
 try:
     import requests  # brought in transitively by pywebpush / google-auth
@@ -59,14 +63,28 @@ def send(token: str, title: str, body: str, data: dict | None = None) -> str:
     """
     creds = _load_credentials()
     if creds is None:
+        # Logged once per process, not once per notification — this fires
+        # on EVERY native push attempt when unconfigured, which without a
+        # cap would flood the log on every message sent to an Android user
+        # while staying completely silent about why they never get pushes.
+        global _warned_not_configured
+        if not _warned_not_configured:
+            _warned_not_configured = True
+            logger.warning(
+                "fcm.send: FCM_SERVICE_ACCOUNT_JSON is not set (or google-auth/"
+                "requests failed to import) — native Android push notifications "
+                "are a silent no-op until this is configured."
+            )
         return "error"
     try:
         if not creds.valid:
             creds.refresh(Request())
         access = creds.token
     except Exception:
+        logger.exception("fcm.send: failed to refresh the FCM OAuth token")
         return "error"
     if not access or not _project_id:
+        logger.error("fcm.send: refreshed credentials but got no access token or project_id")
         return "error"
 
     # Every value in an FCM `data` payload must be a string.
@@ -109,6 +127,7 @@ def send(token: str, title: str, body: str, data: dict | None = None) -> str:
             timeout=10,
         )
     except Exception:
+        logger.exception("fcm.send: request to FCM failed (network/timeout)")
         return "error"
 
     if resp.status_code == 200:
@@ -118,4 +137,5 @@ def send(token: str, title: str, body: str, data: dict | None = None) -> str:
     text = resp.text or ""
     if resp.status_code == 404 or ("UNREGISTERED" in text or "registration-token-not-registered" in text):
         return "gone"
+    logger.error("fcm.send: FCM rejected the message — status=%s body=%s", resp.status_code, text[:500])
     return "error"

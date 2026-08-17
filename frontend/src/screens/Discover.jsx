@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Chats, Contacts, Users } from "../api.js";
 import { Av, Button, Field, G, I, Spinner } from "../ui.jsx";
 import { COUNTRY_CODES, flagFor, samplePlaceholder } from "../countryCodes.js";
+import { contactsAvailable, pickContacts } from "../nativeContacts.js";
 
 /**
  * Find people, channels and communities.
@@ -24,6 +25,37 @@ export default function Discover({ onOpenChat, onChanged, toast }) {
   const [addingContact, setAddingContact] = useState(false);
   const [onTalkEx, setOnTalkEx] = useState(null); // device contacts that have a TalkEx account
   const [findingContacts, setFindingContacts] = useState(false);
+  const [nearbyOn, setNearbyOn] = useState(false);
+  const [nearbyLoading, setNearbyLoading] = useState(false);
+  const [nearbyResults, setNearbyResults] = useState([]);
+  const [nearbyError, setNearbyError] = useState("");
+
+  async function enableNearby() {
+    if (!navigator.geolocation) { setNearbyError("Location isn't available in this browser"); return; }
+    setNearbyLoading(true);
+    setNearbyError("");
+    navigator.geolocation.getCurrentPosition(async (position) => {
+      try {
+        await Users.setNearby(true, position.coords.latitude, position.coords.longitude);
+        setNearbyOn(true);
+        const results = await Users.nearby();
+        setNearbyResults(results);
+      } catch (problem) {
+        setNearbyError(problem.message || "Could not turn on Nearby");
+      } finally {
+        setNearbyLoading(false);
+      }
+    }, () => {
+      setNearbyError("Location permission was denied");
+      setNearbyLoading(false);
+    });
+  }
+
+  async function disableNearby() {
+    setNearbyOn(false);
+    setNearbyResults([]);
+    try { await Users.setNearby(false); } catch { /* best-effort */ }
+  }
 
   useEffect(() => {
     // Every keystroke fires a new request set with no debounce and — until
@@ -55,13 +87,13 @@ export default function Discover({ onOpenChat, onChanged, toast }) {
   }
 
   async function importFromDevice() {
-    // The Contact Picker API is a one-shot, user-gesture-triggered picker —
-    // there is no such thing as a background "sync," by design (a website
-    // is never allowed standing access to the device address book). Support
-    // is Android Chrome/Edge only as of this writing; the button itself is
-    // hidden everywhere else via the `"contacts" in navigator` check above.
+    // pickContacts() is a one-shot, user-gesture-triggered picker — there is
+    // no such thing as a background "sync," by design (a website/native app
+    // is never given standing address-book access). On native Android it's
+    // backed by a real permission + plugin; elsewhere it's the browser's own
+    // Contact Picker API (Android Chrome/Edge only) — see nativeContacts.js.
     try {
-      const picked = await navigator.contacts.select(["name", "tel"], { multiple: true });
+      const picked = await pickContacts();
       let imported = 0;
       for (const person of picked) {
         const name = person.name?.[0]?.trim();
@@ -88,7 +120,7 @@ export default function Discover({ onOpenChat, onChanged, toast }) {
   async function findContactsOnTalkEx() {
     setFindingContacts(true);
     try {
-      const picked = await navigator.contacts.select(["name", "tel"], { multiple: true });
+      const picked = await pickContacts();
       const phones = [];
       for (const person of picked) {
         for (const tel of (person.tel || [])) if (tel) phones.push(tel);
@@ -133,7 +165,7 @@ export default function Discover({ onOpenChat, onChanged, toast }) {
       </div>
 
       <div style={{ display: "flex", gap: 6, padding: "0 16px 12px" }}>
-        {["people", "contacts", "channels", "communities"].map((option) => (
+        {["people", "contacts", "channels", "communities", "nearby"].map((option) => (
           <button key={option} onClick={() => setTab(option)}
             style={{
               flex: 1, padding: "8px", borderRadius: 10, cursor: "pointer",
@@ -160,7 +192,7 @@ export default function Discover({ onOpenChat, onChanged, toast }) {
 
       {!loading && tab === "people" && !query.trim() && (
         <>
-          {"contacts" in navigator && "ContactsManager" in window && (
+          {contactsAvailable() && (
             <div style={{ padding: "0 16px 12px" }}>
               <Button variant="ghost" style={{ width: "100%" }}
                       onClick={findContactsOnTalkEx} disabled={findingContacts}>
@@ -222,12 +254,57 @@ export default function Discover({ onOpenChat, onChanged, toast }) {
         </div>
       ))}
 
+      {!loading && tab === "nearby" && (
+        <div style={{ padding: "0 16px 10px" }}>
+          {!nearbyOn ? (
+            <div style={{ padding: "20px 4px", textAlign: "center" }}>
+              <div style={{ fontSize: 13.5, color: G.muted, marginBottom: 14 }}>
+                Find people nearby who've also turned this on. Your location is
+                shared only while Nearby is on, rounded to about a kilometre —
+                never exact.
+              </div>
+              <Button onClick={enableNearby} disabled={nearbyLoading}>
+                {nearbyLoading ? "Turning on…" : "Turn on Nearby"}
+              </Button>
+              {nearbyError && (
+                <div style={{ fontSize: 12.5, color: G.red, marginTop: 10 }}>{nearbyError}</div>
+              )}
+            </div>
+          ) : (
+            <>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 0 12px" }}>
+                <div style={{ fontSize: 12.5, color: G.muted }}>
+                  {nearbyResults.length} nearby, within 50 km
+                </div>
+                <Button variant="ghost" onClick={disableNearby}>Turn off</Button>
+              </div>
+              {nearbyResults.length === 0 ? (
+                <div style={{ padding: 20, textAlign: "center", color: G.muted, fontSize: 13.5 }}>
+                  Nobody else nearby has turned this on yet.
+                </div>
+              ) : nearbyResults.map((person) => (
+                <div key={person.id} onClick={() => startDm(person)} style={{
+                  display: "flex", alignItems: "center", gap: 12, padding: "12px 4px",
+                  borderBottom: `1px solid ${G.border}`, cursor: "pointer",
+                }}>
+                  <Av av={person.avatar_letter} color={person.color} size={44} photoId={person.avatar_attachment_id}/>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 15, fontWeight: 600 }}>{person.name}</div>
+                    <div style={{ fontSize: 12.5, color: G.muted }}>{person.distance_km} km away</div>
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      )}
+
       {!loading && tab === "contacts" && (
         <div style={{ padding: "0 16px 10px", display: "flex", gap: 8 }}>
           <Button variant="ghost" style={{ flex: 1 }} onClick={() => setAddingContact(true)}>
             + New contact
           </Button>
-          {"contacts" in navigator && (
+          {contactsAvailable() && (
             <Button variant="ghost" style={{ flex: 1 }} onClick={importFromDevice}>
               📱 Import from device
             </Button>
@@ -388,7 +465,7 @@ function AddContactSheet({ onClose, onAdded, toast }) {
       }}>
         <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 14 }}>New contact</div>
         <Field label="Name" value={name} onChange={(event) => setName(event.target.value)}
-               placeholder="Rahul Sharma"/>
+               placeholder="Enter contact name"/>
         <label style={{ display: "block", marginBottom: 12 }}>
           <div style={{ fontSize: 12, color: G.sub, marginBottom: 6 }}>Phone number</div>
           <div style={{ display: "flex", gap: 8 }}>

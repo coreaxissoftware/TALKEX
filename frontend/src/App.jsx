@@ -1,18 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ApiError, Auth, Calls, Chats, E2EE, Me, Meetings, Messages, Scheduled, Search, Users,
+  ApiError, Auth, Calls, Chats, Contacts, E2EE, Me, Meetings, Messages, Scheduled, Search, Users,
   clearToken, flushEverything, getToken, rememberAccount,
 } from "./api.js";
 import { initE2EE, clearE2EEKeys } from "./e2ee.js";
 import { initNativePush, stopNativePush } from "./pushNative.js";
+import { getAllContacts } from "./nativeContacts.js";
 import { useRealtime } from "./useRealtime.js";
 import { useCall } from "./useCall.js";
 import { useGroupCall } from "./useGroupCall.js";
+import { useGroupCallSfu } from "./useGroupCallSfu.js";
+import { Sfu } from "./api.js";
 import {
   Button, ChatBackdrop, Field, G, I, Screen, Spinner, useIsDesktop, useViewportHeightVar,
   applyTheme, getStoredAccent, getStoredTheme, saveAccent, saveTheme,
 } from "./ui.jsx";
-import { getAppLockTimeout, isAppLockEnabled, verifyAppLockPin } from "./appLock.js";
+import { getAppLockTimeout, isAppLockEnabled, isBiometricEnabled, verifyAppLockPin, verifyBiometric } from "./appLock.js";
+import { playNotifyTone } from "./notifyTone.js";
+import { useT } from "./i18n.jsx";
 import * as offlineDb from "./offlineDb.js";
 
 import AdminPanel from "./screens/AdminPanel.jsx";
@@ -31,12 +36,12 @@ import Status from "./screens/Status.jsx";
 // its own bottom tab. It's really a set of "start something new" actions, not
 // a place you go back to — so it now lives behind the "+" button on Chats
 // (DiscoverOverlay) instead of costing the nav a whole slot.
-const TABS = [
-  { key: "chats", label: "Chats", icon: I.chat },
-  { key: "calls", label: "Calls", icon: I.phone },
-  { key: "status", label: "Status", icon: I.status },
-  { key: "planner", label: "Planner", icon: I.calendar },
-  { key: "settings", label: "You", icon: I.settings },
+const TAB_KEYS = [
+  { key: "chats", i18n: "nav.chats", icon: I.chat },
+  { key: "calls", i18n: "nav.calls", icon: I.phone },
+  { key: "status", i18n: "nav.status", icon: I.status },
+  { key: "planner", i18n: "nav.planner", icon: I.calendar },
+  { key: "settings", i18n: "nav.settings", icon: I.settings },
 ];
 
 /**
@@ -71,6 +76,8 @@ export default function App() {
   const reloadTimer = useRef(null);
   const plannerReloadTimer = useRef(null);
   const [reconnectedAt, setReconnectedAt] = useState(0);
+  const [sfuEnabled, setSfuEnabled] = useState(false);
+  useEffect(() => { Sfu.config().then((c) => setSfuEnabled(c.enabled)).catch(() => {}); }, []);
   const [theme, setThemeState] = useState(getStoredTheme);
   const [accent, setAccentState] = useState(getStoredAccent);
 
@@ -177,6 +184,45 @@ export default function App() {
         console.warn("E2EE initialization skipped (non-fatal)");
       });
     }
+  }, [me]);
+
+  // WhatsApp-style contact auto-sync: on app open, read the device address
+  // book and match phone numbers against TalkEx users. New matches are added
+  // as contacts automatically. Only runs on native Android (getAllContacts
+  // returns null elsewhere) and at most once per hour to avoid hammering.
+  useEffect(() => {
+    if (!me) return;
+    const SYNC_KEY = "talkex_last_contact_sync";
+    const ONE_HOUR = 60 * 60 * 1000;
+    const last = parseInt(localStorage.getItem(SYNC_KEY) || "0", 10);
+    if (Date.now() - last < ONE_HOUR) return;
+    (async () => {
+      const deviceContacts = await getAllContacts();
+      if (!deviceContacts || deviceContacts.length === 0) return;
+      const phones = deviceContacts
+        .map((c) => (c.tel || [])[0])
+        .filter(Boolean);
+      if (phones.length === 0) return;
+      const matched = await Users.matchContacts(phones);
+      if (!matched || matched.length === 0) {
+        localStorage.setItem(SYNC_KEY, String(Date.now()));
+        return;
+      }
+      const existing = await Contacts.list();
+      const existingUserIds = new Set(existing.filter((c) => c.user).map((c) => c.user.id));
+      for (const user of matched) {
+        if (existingUserIds.has(user.id)) continue;
+        const name = deviceContacts.find((c) =>
+          (c.tel || []).some((t) => {
+            const dA = t.replace(/\D/g, "");
+            const dB = (user.phone || "").replace(/\D/g, "");
+            return dA && dB && (dA.endsWith(dB.slice(-10)) || dB.endsWith(dA.slice(-10)));
+          })
+        )?.name?.[0] || user.name;
+        try { await Contacts.add(name, user.phone); } catch { /* duplicate or other — skip */ }
+      }
+      localStorage.setItem(SYNC_KEY, String(Date.now()));
+    })().catch(() => {});
   }, [me]);
 
   useEffect(() => {
@@ -431,6 +477,13 @@ export default function App() {
          "chat_updated", "chat_owner_changed", "members_changed"].includes(event.type)) {
       reloadChatsSoon();
     }
+    // chat_updated on the chat that's currently OPEN needs an immediate
+    // refetch, not just the sidebar reload above — e.g. the other member
+    // flipping Vanish mode on should show up in this open chat's own
+    // per-member fields right away, not only after leaving and reopening it.
+    if (event.type === "chat_updated" && event.chat_id && openChat?.id === event.chat_id) {
+      Chats.get(event.chat_id).then((chat) => { if (chat) setOpenChat(chat); }).catch(() => {});
+    }
 
     // A DM peer going online/offline — patched into whichever chat objects
     // already know that peer_id, live, rather than waiting for the next
@@ -470,6 +523,17 @@ export default function App() {
     if (event.type === "message" && event.message?.kind === "call" && event.message.sender_id !== me?.id) {
       if (tab === "calls") Calls.markSeen().catch(() => {});
       else reloadMissedCalls();
+    }
+
+    // This chat's own in-app tone (Settings > per-chat > Notification
+    // sound) — plays for any incoming message regardless of which screen is
+    // open, same as a phone's message tone would, as long as the chat isn't
+    // muted. A muted chat plays nothing here no matter what tone is set;
+    // muting is the stronger, chat-wide "silence this" switch.
+    if (event.type === "message" && event.message && event.message.sender_id !== me?.id) {
+      const chat = chats.find((c) => c.id === event.message.chat_id);
+      const muted = (chat?.muted_until || 0) > Date.now() / 1000;
+      if (!muted) playNotifyTone(chat?.notify_tone);
     }
 
     // A mention while that chat isn't the one currently open — surfaced the
@@ -524,7 +588,9 @@ export default function App() {
   // is replaced if a different account signs in later.
   const realtime = useRealtime(onEvent, me?.id, onReconnect);
   const call = useCall(events, realtime.send, toast);
-  const groupCall = useGroupCall(events, realtime.send, toast, reconnectedAt);
+  const groupCallMesh = useGroupCall(sfuEnabled ? [] : events, realtime.send, toast, reconnectedAt);
+  const groupCallSfu = useGroupCallSfu(sfuEnabled ? events : [], realtime.send, toast);
+  const groupCall = sfuEnabled ? groupCallSfu : groupCallMesh;
 
   // "Add participant" during a 1:1 call: spin up a hidden ephemeral call room
   // holding the current peer + whoever's being added, end the 1:1, and start a
@@ -701,7 +767,7 @@ export default function App() {
   // (see main.py's start_session/SUPERADMIN_USERNAME) — nothing client-side
   // grants this, it just decides whether to show the door, not who may
   // walk through it. Every /admin/* call is re-checked server-side anyway.
-  const tabs = me?.is_superadmin ? [...TABS, { key: "admin", label: "Admin", icon: I.shield }] : TABS;
+  const tabs = me?.is_superadmin ? [...TAB_KEYS, { key: "admin", i18n: null, label: "Admin", icon: I.shield }] : TAB_KEYS;
 
   if (isDesktop) {
     return (
@@ -1039,6 +1105,20 @@ function AppLockScreen({ onUnlocked, onSignOut }) {
   const [pin, setPin] = useState("");
   const [error, setError] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [bioBusy, setBioBusy] = useState(false);
+  const biometricOn = isBiometricEnabled();
+
+  async function tryBiometric() {
+    if (bioBusy) return;
+    setBioBusy(true);
+    try {
+      const ok = await verifyBiometric();
+      if (ok) onUnlocked();
+      else setError(true);
+    } finally {
+      setBioBusy(false);
+    }
+  }
 
   useEffect(() => {
     if (pin.length < 4) return;
@@ -1063,6 +1143,17 @@ function AppLockScreen({ onUnlocked, onSignOut }) {
           <div style={{ fontSize: 13, color: G.red, marginTop: 6 }}>Wrong PIN — try again</div>
         )}
       </div>
+      {biometricOn && (
+        <div onClick={tryBiometric} style={{
+          display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
+          margin: "0 auto 24px", cursor: bioBusy ? "default" : "pointer", opacity: bioBusy ? 0.6 : 1,
+        }}>
+          {I.fingerprint(G.accent, 34)}
+          <span style={{ fontSize: 12.5, color: G.sub }}>
+            {bioBusy ? "Checking…" : "Use fingerprint / Face ID"}
+          </span>
+        </div>
+      )}
       <div style={{ display: "flex", gap: 10, justifyContent: "center", marginBottom: 8 }}>
         {[0, 1, 2, 3].map((i) => (
           <div key={i} style={{
@@ -1100,7 +1191,9 @@ function AppLockScreen({ onUnlocked, onSignOut }) {
 }
 
 function TopBar({ status, tab, onNewChat, onMenuClick, onNewCall, onCallsMenuClick }) {
-  const label = tab === "admin" ? "Admin" : TABS.find((entry) => entry.key === tab)?.label || "TalkEx";
+  const { t } = useT();
+  const entry = TAB_KEYS.find((e) => e.key === tab);
+  const label = tab === "admin" ? "Admin" : (entry?.i18n ? t(entry.i18n) : "TalkEx");
   return (
     <div style={{
       display: "flex", alignItems: "center", gap: 10, padding: "14px 16px",
@@ -1165,7 +1258,8 @@ function ConnectionDot({ status }) {
   );
 }
 
-function TabBar({ tab, onChange, unread, plannerCount, missedCalls, tabs = TABS }) {
+function TabBar({ tab, onChange, unread, plannerCount, missedCalls, tabs = TAB_KEYS }) {
+  const { t } = useT();
   const badgeFor = (key) => (
     key === "chats" ? unread : key === "planner" ? plannerCount : key === "calls" ? missedCalls : 0
   );
@@ -1175,7 +1269,10 @@ function TabBar({ tab, onChange, unread, plannerCount, missedCalls, tabs = TABS 
     // rectangle with its own background/shadow, like a modern app's pill nav.
     <div style={{
       position: "sticky", bottom: 0, zIndex: 5, flexShrink: 0,
-      background: G.bg, padding: "6px 10px 10px",
+      background: G.bg, paddingTop: 6, paddingLeft: 10, paddingRight: 10,
+      // Same reasoning as the composer: reserve the device's own bottom
+      // inset so the tab bar never ends up underneath the OS nav bar.
+      paddingBottom: "max(10px, env(safe-area-inset-bottom))",
     }}>
       <div style={{
         display: "flex", background: G.surface, borderRadius: 20,
@@ -1202,7 +1299,7 @@ function TabBar({ tab, onChange, unread, plannerCount, missedCalls, tabs = TABS 
               <div style={{
                 fontSize: 10.5, marginTop: 3, color: active ? G.accentText : G.muted,
                 fontWeight: active ? 600 : 400,
-              }}>{entry.label}</div>
+              }}>{entry.i18n ? t(entry.i18n) : entry.label}</div>
 
               {badgeFor(entry.key) > 0 && (
                 <div style={{
@@ -1364,7 +1461,8 @@ function DesktopShell({
   );
 }
 
-function DesktopRail({ tab, onChange, unread, plannerCount, missedCalls, onLogout, tabs = TABS }) {
+function DesktopRail({ tab, onChange, unread, plannerCount, missedCalls, onLogout, tabs = TAB_KEYS }) {
+  const { t } = useT();
   const badgeFor = (key) => (
     key === "chats" ? unread : key === "planner" ? plannerCount : key === "calls" ? missedCalls : 0
   );
@@ -1379,7 +1477,7 @@ function DesktopRail({ tab, onChange, unread, plannerCount, missedCalls, onLogou
       {tabs.map((entry) => {
         const active = tab === entry.key;
         return (
-          <div key={entry.key} onClick={() => onChange(entry.key)} title={entry.label}
+          <div key={entry.key} onClick={() => onChange(entry.key)} title={entry.i18n ? t(entry.i18n) : entry.label}
                style={{ width: 56, padding: "8px 0", borderRadius: 14, textAlign: "center", cursor: "pointer", position: "relative" }}>
             <div style={{
               width: 40, height: 40, borderRadius: 12, margin: "0 auto",
@@ -1392,7 +1490,7 @@ function DesktopRail({ tab, onChange, unread, plannerCount, missedCalls, onLogou
             <div style={{
               fontSize: 9.5, marginTop: 3, color: active ? G.accentText : G.muted,
               fontWeight: active ? 600 : 400,
-            }}>{entry.label}</div>
+            }}>{entry.i18n ? t(entry.i18n) : entry.label}</div>
 
             {badgeFor(entry.key) > 0 && (
               <div style={{

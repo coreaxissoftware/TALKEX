@@ -2,16 +2,11 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "frontend",
+      "name": "talkex-web",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--prefix", "frontend"],
-      "port": 3020
-    },
-    {
-      "name": "offline-billing-renderer",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "D:/WebProject/APP/offline-billing-app", "run", "dev:renderer", "--", "--port", "5183"],
-      "port": 5183
+      "runtimeArgs": ["run", "dev", "--", "--port", "5199", "--strictPort"],
+      "port": 5199,
+      "cwd": "frontend"
     }
   ]
 }

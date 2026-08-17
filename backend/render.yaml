@@ -37,6 +37,31 @@ services:
         sync: false
       - key: MAILGUN_DOMAIN
         sync: false
+      # Native Android push (FCM) is silently a no-op — every send just
+      # returns "error" with nothing surfaced to the user — until this is
+      # set. Paste the WHOLE Firebase service-account JSON file's contents
+      # as this value (Firebase console → Project settings → Service
+      # accounts → Generate new private key). Web push (browser/PWA) does
+      # not need this; it uses the separate VAPID keypair in push.py,
+      # generated automatically on first run.
+      - key: FCM_SERVICE_ACCOUNT_JSON
+        sync: false
+      # Optional: the composer's GIF picker (Tenor). Absent, GET
+      # /api/gifs/search just answers 503 — nothing else is affected.
+      - key: TENOR_API_KEY
+        sync: false
+      # Optional: inline "Translate" on a received message (Google Cloud
+      # Translate). Absent, GET /api/translate just answers 503.
+      - key: GOOGLE_TRANSLATE_API_KEY
+        sync: false
+      # Optional: LiveKit SFU for scalable group calls. Without these,
+      # group calls use the built-in peer-to-peer mesh.
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+      - key: LIVEKIT_URL
+        sync: false
     healthCheckPath: /health
     disk:
       name: talkex-data

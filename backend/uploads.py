@@ -255,6 +255,25 @@ def attach_to_chat_avatar(attachment_id: str, chat_id: str, uploader_id: str) ->
     return dict(db.query_one("SELECT * FROM attachments WHERE id = ?", (attachment_id,)))
 
 
+def attach_to_product(attachment_id: str, product_id: str, uploader_id: str) -> dict | None:
+    """Bind an upload as a product's photo — the product counterpart to
+    attach_to_avatar/attach_to_chat_avatar. Caller has already checked the
+    product belongs to this uploader; here we only enforce the upload is
+    theirs and still unbound."""
+    changed = db.execute(
+        """
+        UPDATE attachments SET product_of_id = ?
+        WHERE id = ? AND uploader_id = ? AND message_id IS NULL AND story_id IS NULL
+          AND avatar_of_user_id IS NULL AND avatar_of_chat_id IS NULL
+          AND cover_of_user_id IS NULL AND product_of_id IS NULL
+        """,
+        (product_id, attachment_id, uploader_id),
+    )
+    if changed.rowcount == 0:
+        return None
+    return dict(db.query_one("SELECT * FROM attachments WHERE id = ?", (attachment_id,)))
+
+
 def duplicate_for_message(attachment_id: str, new_message_id: str) -> str | None:
     """
     Copy an attachment's file to a new id, bound directly to a different
@@ -321,7 +340,7 @@ def sweep_orphans(older_than_seconds: float = 3600) -> int:
     orphans = db.query_all(
         "SELECT id FROM attachments WHERE message_id IS NULL AND story_id IS NULL "
         "AND avatar_of_user_id IS NULL AND avatar_of_chat_id IS NULL "
-        "AND cover_of_user_id IS NULL AND created_at < ?",
+        "AND cover_of_user_id IS NULL AND product_of_id IS NULL AND created_at < ?",
         (cutoff,),
     )
     for orphan in orphans:

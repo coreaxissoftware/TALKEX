@@ -541,6 +541,106 @@ CREATE TABLE IF NOT EXISTS pinned_messages (
 );
 
 
+-- Telegram-style Topics: named sub-threads inside a group, opt-in per chat
+-- (chats.topics_enabled). A message with topic_id = NULL sits in the
+-- always-present "General" thread — there is no row for General itself,
+-- it's just the absence of a topic_id, so turning Topics on never requires
+-- migrating any existing message.
+CREATE TABLE IF NOT EXISTS topics (
+    id         TEXT PRIMARY KEY,
+    chat_id    TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at REAL NOT NULL,
+    closed_at  REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_topics_chat ON topics (chat_id);
+
+
+-- WhatsApp-Business-style chat labels: a small colored taxonomy ("New
+-- customer", "Pending payment"...) one account defines for itself and
+-- applies to any number of its own chats, many-to-many — unlike
+-- chat_members.folder (one plain-text folder per chat), a single chat can
+-- carry several labels at once. Personal to whoever set them, same scope
+-- as folder/canned_replies: the other side of the chat never sees them.
+CREATE TABLE IF NOT EXISTS chat_labels (
+    id         TEXT PRIMARY KEY,
+    owner_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    color      TEXT NOT NULL DEFAULT '#6366f1',
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_labels_owner ON chat_labels (owner_id);
+
+CREATE TABLE IF NOT EXISTS chat_label_assignments (
+    chat_id  TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    label_id TEXT NOT NULL REFERENCES chat_labels(id) ON DELETE CASCADE,
+    user_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    PRIMARY KEY (chat_id, label_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_label_assignments_chat_user ON chat_label_assignments (chat_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_label_assignments_label ON chat_label_assignments (label_id);
+
+
+-- WhatsApp-Business-Catalog-style product listing. price_cents (not a float)
+-- for the same reason money is always an integer subunit — no floating-point
+-- surprises on a price. A message that shares a product (kind='product')
+-- snapshots name/price/image into its own payload at send time rather than
+-- referencing this row live, so editing or deleting a product later never
+-- rewrites something already sent (same reasoning as stories.audience_mode).
+CREATE TABLE IF NOT EXISTS products (
+    id                  TEXT PRIMARY KEY,
+    owner_id            TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name                TEXT NOT NULL,
+    description         TEXT NOT NULL DEFAULT '',
+    price_cents         INTEGER NOT NULL DEFAULT 0,
+    currency            TEXT NOT NULL DEFAULT 'INR',
+    image_attachment_id TEXT,
+    created_at          REAL NOT NULL,
+    archived_at         REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_products_owner ON products (owner_id);
+
+
+-- In-app payment records — Razorpay orders and their verification state.
+CREATE TABLE IF NOT EXISTS payments (
+    id                  TEXT PRIMARY KEY,
+    user_id             TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    razorpay_order_id   TEXT NOT NULL,
+    razorpay_payment_id TEXT,
+    razorpay_signature  TEXT,
+    plan                TEXT NOT NULL DEFAULT 'business',
+    amount_paise        INTEGER NOT NULL,
+    currency            TEXT NOT NULL DEFAULT 'INR',
+    status              TEXT NOT NULL DEFAULT 'created',
+    created_at          REAL NOT NULL,
+    verified_at         REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_payments_user ON payments (user_id);
+
+
+-- Keyword-triggered auto-replies — the flow-builder step up from the single
+-- blanket away_message on users. Checked in trigger order (position, then
+-- created_at) against an incoming DM's text; the first substring match
+-- wins and is what actually gets sent, same "one canned line, not a pile
+-- of duplicates" cooldown maybe_send_away_reply already enforces.
+CREATE TABLE IF NOT EXISTS auto_reply_rules (
+    id            TEXT PRIMARY KEY,
+    owner_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    trigger_text  TEXT NOT NULL,
+    response_text TEXT NOT NULL,
+    position      INTEGER NOT NULL DEFAULT 0,
+    created_at    REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_auto_reply_rules_owner ON auto_reply_rules (owner_id);
+
+
 -- "Delete for me": hides a message from one member's own view without
 -- touching the shared row, so it stays intact for everyone else and the
 -- chat's sequence numbering is never affected by what one person hid for
@@ -1112,6 +1212,60 @@ COLUMNS_ADDED_LATER = [
     # Binds an upload as a user's cover photo — the cover counterpart to
     # avatar_of_user_id; must also be excluded from orphan cleanup below.
     ("attachments", "cover_of_user_id", "TEXT"),
+    # Per-type push toggles, layered under the master push subscription (whether
+    # a push_subscriptions/device_tokens row exists at all). All default on so
+    # nobody's notifications change just because this column now exists.
+    ("users", "notif_dm", "INTEGER NOT NULL DEFAULT 1"),
+    ("users", "notif_groups", "INTEGER NOT NULL DEFAULT 1"),
+    ("users", "notif_calls", "INTEGER NOT NULL DEFAULT 1"),
+    # A per-chat, per-member choice of in-app tone (see notifyTone.js) played
+    # when a message arrives for this chat while the app is open. NULL means
+    # the default tone. Distinct from muted_until — a muted chat plays nothing
+    # regardless of what tone is set here.
+    ("chat_members", "notify_tone", "TEXT"),
+    # Instagram-"Highlights"-style pin: NULL means an ordinary story that
+    # expires 24h after posting like always. Set (to when it was pinned),
+    # it survives past expires_at instead — see expire_stories in
+    # scheduler.py, which skips any story with this set.
+    ("stories", "highlighted_at", "REAL"),
+    # A standing label on this pin — shown as the highlight's own title on
+    # the profile (distinct from the story's own caption/text). Defaults to
+    # empty, in which case the client falls back to something generic.
+    ("stories", "highlight_label", "TEXT NOT NULL DEFAULT ''"),
+    # A snapshot of users.story_audience at the moment this story was
+    # posted — NOT a live join to the author's current setting. Without
+    # this, changing your audience mode later silently changed who could
+    # see every story you'd already posted (contradicting Status privacy's
+    # own "anything already posted keeps its old audience" copy). Existing
+    # rows default to 'contacts' on this migration, a one-time approximation
+    # that self-corrects within 24h as those pre-migration stories expire.
+    ("stories", "audience_mode", "TEXT NOT NULL DEFAULT 'contacts'"),
+    # Off by default — a group looks exactly as it always has until an admin
+    # turns this on (ChatSettingsRequest-style admin action, see
+    # set_topics_enabled in main.py). Channels/communities/DMs never show
+    # the toggle at all; only 'group' makes sense for a flat member list
+    # splitting into sub-threads.
+    ("chats", "topics_enabled", "INTEGER NOT NULL DEFAULT 0"),
+    # NULL = the always-present "General" thread. Set, it must reference a
+    # row in `topics` within the same chat — validated in send_message,
+    # not by a foreign key, since SQLite FKs can't easily express "and the
+    # same chat_id too" as part of the constraint.
+    ("messages", "topic_id", "TEXT"),
+    # Binds an upload as a product's photo — the product counterpart to
+    # avatar_of_user_id/avatar_of_chat_id; excluded from sweep_orphans the
+    # same way those are.
+    ("attachments", "product_of_id", "TEXT"),
+    # Telegram-style "People Nearby" — every field NULL/0 until the user
+    # explicitly opts in (PUT /me/nearby). Coordinates are rounded to ~1km
+    # precision before they're ever stored (see set_nearby in main.py) and
+    # nearby_updated_at gates a 2-hour visibility window in list_nearby, so
+    # nobody stays "nearby" from a location they shared once and forgot about.
+    ("users", "nearby_enabled", "INTEGER NOT NULL DEFAULT 0"),
+    ("users", "nearby_lat", "REAL"),
+    ("users", "nearby_lng", "REAL"),
+    ("users", "nearby_updated_at", "REAL"),
+    ("users", "plan", "TEXT NOT NULL DEFAULT 'free'"),
+    ("users", "plan_expires_at", "REAL"),
 ]
 
 

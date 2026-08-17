@@ -243,6 +243,451 @@ def test_group_info_can_be_edited_and_send_policy_enforced(client):
                        json={"chat_id": group_id, "text": "back"}).status_code == 200
 
 
+# ── Topics ────────────────────────────────────────────────────────────────────
+
+def test_topics_are_off_by_default_and_a_plain_member_cannot_turn_them_on(client):
+    owner, owner_id, _ = make_user(client, "Owner")
+    member, member_id, _ = make_user(client, "Member")
+    group_id = client.post("/chats/group", headers=owner,
+                           json={"name": "Team", "member_ids": [member_id]}).json()["id"]
+
+    assert client.post(f"/chats/{group_id}/topics", headers=owner,
+                       json={"name": "Bugs"}).status_code == 400
+    assert client.put(f"/chats/{group_id}/topics-policy?enabled=true",
+                      headers=member).status_code == 403
+
+
+def test_creating_a_topic_and_filtering_messages_by_it(client):
+    owner, owner_id, _ = make_user(client, "Owner")
+    member, member_id, _ = make_user(client, "Member")
+    group_id = client.post("/chats/group", headers=owner,
+                           json={"name": "Team", "member_ids": [member_id]}).json()["id"]
+    client.put(f"/chats/{group_id}/topics-policy?enabled=true", headers=owner)
+
+    topic = client.post(f"/chats/{group_id}/topics", headers=member, json={"name": "Bugs"}).json()
+    assert topic["name"] == "Bugs"
+    assert topic["closed_at"] is None
+
+    client.post("/messages", headers=owner, json={"chat_id": group_id, "text": "general chat"})
+    client.post("/messages", headers=member, json={
+        "chat_id": group_id, "text": "found a bug", "topic_id": topic["id"],
+    })
+
+    # "General" also holds the group's own system messages (created/added) —
+    # only asserting the topic-specific message is correctly excluded from it.
+    general_only = client.get(
+        f"/chats/{group_id}/messages", headers=owner, params={"only_general": True}).json()
+    assert "general chat" in [m["text"] for m in general_only]
+    assert "found a bug" not in [m["text"] for m in general_only]
+
+    bugs_only = client.get(
+        f"/chats/{group_id}/messages", headers=owner, params={"topic_id": topic["id"]}).json()
+    assert [m["text"] for m in bugs_only] == ["found a bug"]
+
+    everything = client.get(f"/chats/{group_id}/messages", headers=owner).json()
+    everything_text = [m["text"] for m in everything]
+    assert "general chat" in everything_text
+    assert "found a bug" in everything_text
+
+
+def test_a_message_cannot_be_posted_into_another_chats_topic(client):
+    owner, owner_id, _ = make_user(client, "Owner")
+    group_a = client.post("/chats/group", headers=owner, json={"name": "A"}).json()["id"]
+    group_b = client.post("/chats/group", headers=owner, json={"name": "B"}).json()["id"]
+    client.put(f"/chats/{group_a}/topics-policy?enabled=true", headers=owner)
+    client.put(f"/chats/{group_b}/topics-policy?enabled=true", headers=owner)
+    topic_a = client.post(f"/chats/{group_a}/topics", headers=owner, json={"name": "Only A"}).json()
+
+    leaked = client.post("/messages", headers=owner, json={
+        "chat_id": group_b, "text": "sneaking in", "topic_id": topic_a["id"],
+    })
+    assert leaked.status_code == 400
+
+
+def test_a_closed_topic_refuses_new_messages_but_keeps_its_history(client):
+    owner, owner_id, _ = make_user(client, "Owner")
+    member, member_id, _ = make_user(client, "Member")
+    group_id = client.post("/chats/group", headers=owner,
+                           json={"name": "Team", "member_ids": [member_id]}).json()["id"]
+    client.put(f"/chats/{group_id}/topics-policy?enabled=true", headers=owner)
+    topic = client.post(f"/chats/{group_id}/topics", headers=member, json={"name": "Q&A"}).json()
+    client.post("/messages", headers=member, json={
+        "chat_id": group_id, "text": "old question", "topic_id": topic["id"],
+    })
+
+    # A plain member (not the creator, not a manager) cannot close it.
+    other, other_id, _ = make_user(client, "Other")
+    client.post(f"/chats/{group_id}/members", headers=owner, json={"user_ids": [other_id]})
+    assert client.delete(f"/chats/{group_id}/topics/{topic['id']}", headers=other).status_code == 403
+
+    # Its own creator can.
+    assert client.delete(f"/chats/{group_id}/topics/{topic['id']}", headers=member).status_code == 200
+
+    refused = client.post("/messages", headers=member, json={
+        "chat_id": group_id, "text": "too late", "topic_id": topic["id"],
+    })
+    assert refused.status_code == 400
+
+    still_there = client.get(
+        f"/chats/{group_id}/messages", headers=owner, params={"topic_id": topic["id"]}).json()
+    assert [m["text"] for m in still_there] == ["old question"]
+
+
+# ── People Nearby ────────────────────────────────────────────────────────────
+
+def test_nearby_requires_opting_in_yourself_first(client):
+    alice, _, _ = make_user(client, "Alice")
+    denied = client.get("/discover/nearby", headers=alice)
+    assert denied.status_code == 400
+
+
+def test_nearby_finds_opted_in_users_sorted_by_distance(client):
+    # This module's client fixture shares one DB across every test in the
+    # file, so each nearby test uses its own geographically isolated
+    # coordinate cluster (and a tight radius_km where relevant) — otherwise
+    # a user left opted-in by an earlier test could leak into this one.
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    carol, carol_id, _ = make_user(client, "Carol")
+    dave, dave_id, _ = make_user(client, "Dave")
+
+    # Reference point: mid-Pacific, nowhere near any other test's cluster.
+    client.put("/me/nearby", headers=alice, json={"enabled": True, "lat": 0.0, "lng": -160.0})
+    client.put("/me/nearby", headers=bob, json={"enabled": True, "lat": 0.05, "lng": -160.0})   # ~5.5km
+    client.put("/me/nearby", headers=carol, json={"enabled": True, "lat": 5.0, "lng": -160.0})  # ~555km
+    # Dave never opted in at all.
+
+    results = client.get("/discover/nearby", headers=alice, params={"radius_km": 1000}).json()
+    ids = [r["id"] for r in results]
+    assert ids == [bob_id, carol_id]
+    assert dave_id not in ids
+    assert results[0]["distance_km"] < results[1]["distance_km"]
+
+
+def test_radius_km_excludes_anyone_further_than_asked(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    client.put("/me/nearby", headers=alice, json={"enabled": True, "lat": 10.0, "lng": -160.0})
+    client.put("/me/nearby", headers=bob, json={"enabled": True, "lat": 10.5, "lng": -160.0})  # ~55km away
+
+    assert client.get("/discover/nearby", headers=alice, params={"radius_km": 10}).json() == []
+    close = client.get("/discover/nearby", headers=alice, params={"radius_km": 100}).json()
+    assert [r["id"] for r in close] == [bob_id]
+
+
+def test_disabling_nearby_removes_you_from_results_and_your_own_access(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    client.put("/me/nearby", headers=alice, json={"enabled": True, "lat": 20.0, "lng": -160.0})
+    client.put("/me/nearby", headers=bob, json={"enabled": True, "lat": 20.01, "lng": -160.0})
+
+    assert bob_id in [r["id"] for r in client.get("/discover/nearby", headers=alice, params={"radius_km": 10}).json()]
+
+    client.put("/me/nearby", headers=bob, json={"enabled": False})
+    assert bob_id not in [r["id"] for r in client.get("/discover/nearby", headers=alice, params={"radius_km": 10}).json()]
+
+    client.put("/me/nearby", headers=alice, json={"enabled": False})
+    assert client.get("/discover/nearby", headers=alice).status_code == 400
+
+
+def test_blocked_users_never_appear_in_each_others_nearby_results(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    client.put("/me/nearby", headers=alice, json={"enabled": True, "lat": 30.0, "lng": -160.0})
+    client.put("/me/nearby", headers=bob, json={"enabled": True, "lat": 30.01, "lng": -160.0})
+    client.post(f"/users/{bob_id}/block", headers=alice)
+
+    assert client.get("/discover/nearby", headers=alice, params={"radius_km": 10}).json() == []
+    assert client.get("/discover/nearby", headers=bob, params={"radius_km": 10}).json() == []
+
+
+def test_nearby_response_never_leaks_raw_coordinates(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    client.put("/me/nearby", headers=alice, json={"enabled": True, "lat": 40.0, "lng": -160.0})
+    client.put("/me/nearby", headers=bob, json={"enabled": True, "lat": 40.01, "lng": -160.0})
+
+    result = client.get("/discover/nearby", headers=alice, params={"radius_km": 10}).json()[0]
+    assert "nearby_lat" not in result
+    assert "nearby_lng" not in result
+
+
+# ── Chat labels ──────────────────────────────────────────────────────────────
+
+def test_creating_and_applying_a_label_shows_up_in_the_chat_list(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    label = client.post("/me/labels", headers=alice, json={"name": "New customer", "color": "#22c55e"}).json()
+    assert label["name"] == "New customer"
+
+    applied = client.put(f"/chats/{chat_id}/labels", headers=alice, json={"label_ids": [label["id"]]})
+    assert applied.status_code == 200
+
+    chats = client.get("/chats", headers=alice).json()
+    mine = next(c for c in chats if c["id"] == chat_id)
+    assert [l["name"] for l in mine["labels"]] == ["New customer"]
+
+    # Bob never applied it — labels are personal to whoever set them.
+    bobs_chats = client.get("/chats", headers=bob).json()
+    bobs_view = next(c for c in bobs_chats if c["id"] == chat_id)
+    assert bobs_view["labels"] == []
+
+
+def test_a_chat_can_carry_multiple_labels_at_once(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    new_customer = client.post("/me/labels", headers=alice, json={"name": "New customer"}).json()
+    pending = client.post("/me/labels", headers=alice, json={"name": "Pending payment"}).json()
+    client.put(f"/chats/{chat_id}/labels", headers=alice,
+              json={"label_ids": [new_customer["id"], pending["id"]]})
+
+    mine = next(c for c in client.get("/chats", headers=alice).json() if c["id"] == chat_id)
+    assert {l["name"] for l in mine["labels"]} == {"New customer", "Pending payment"}
+
+
+def test_setting_labels_replaces_the_previous_set(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    a = client.post("/me/labels", headers=alice, json={"name": "A"}).json()
+    b = client.post("/me/labels", headers=alice, json={"name": "B"}).json()
+    client.put(f"/chats/{chat_id}/labels", headers=alice, json={"label_ids": [a["id"]]})
+    client.put(f"/chats/{chat_id}/labels", headers=alice, json={"label_ids": [b["id"]]})
+
+    mine = next(c for c in client.get("/chats", headers=alice).json() if c["id"] == chat_id)
+    assert [l["name"] for l in mine["labels"]] == ["B"]
+
+
+def test_cannot_apply_someone_elses_label(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+    bobs_label = client.post("/me/labels", headers=bob, json={"name": "Bob's own"}).json()
+
+    denied = client.put(f"/chats/{chat_id}/labels", headers=alice, json={"label_ids": [bobs_label["id"]]})
+    assert denied.status_code == 400
+
+
+def test_deleting_a_label_removes_it_from_every_chat_it_was_on(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+    label = client.post("/me/labels", headers=alice, json={"name": "Temp"}).json()
+    client.put(f"/chats/{chat_id}/labels", headers=alice, json={"label_ids": [label["id"]]})
+
+    assert client.delete(f"/me/labels/{label['id']}", headers=alice).status_code == 200
+
+    mine = next(c for c in client.get("/chats", headers=alice).json() if c["id"] == chat_id)
+    assert mine["labels"] == []
+    assert client.get("/me/labels", headers=alice).json() == []
+
+
+# ── GIF messages ─────────────────────────────────────────────────────────────
+
+def test_a_gif_message_needs_an_https_gif_url(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    missing = client.post("/messages", headers=alice, json={"chat_id": chat_id, "kind": "gif"})
+    assert missing.status_code == 400
+
+    insecure = client.post("/messages", headers=alice, json={
+        "chat_id": chat_id, "kind": "gif", "payload": {"gif_url": "http://example.com/a.gif"},
+    })
+    assert insecure.status_code == 400
+
+    ok = client.post("/messages", headers=alice, json={
+        "chat_id": chat_id, "kind": "gif", "payload": {"gif_url": "https://example.com/a.gif"},
+    })
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["payload"]["gif_url"] == "https://example.com/a.gif"
+
+
+def test_gif_search_reports_not_configured_without_an_api_key(client):
+    alice, _, _ = make_user(client, "Alice")
+    # The test suite never sets TENOR_API_KEY.
+    result = client.get("/api/gifs/search", headers=alice, params={"q": "cat"})
+    assert result.status_code == 503
+
+
+# ── Translation ──────────────────────────────────────────────────────────────
+
+def test_translate_reports_not_configured_without_an_api_key(client):
+    alice, _, _ = make_user(client, "Alice")
+    # The test suite never sets GOOGLE_TRANSLATE_API_KEY.
+    result = client.get("/api/translate", headers=alice, params={"text": "hello", "target": "hi"})
+    assert result.status_code == 503
+
+
+def test_translate_requires_non_empty_text_even_when_configured(client, monkeypatch):
+    monkeypatch.setenv("GOOGLE_TRANSLATE_API_KEY", "fake-key-for-this-test")
+    alice, _, _ = make_user(client, "Alice")
+    empty = client.get("/api/translate", headers=alice, params={"text": "   ", "target": "hi"})
+    assert empty.status_code == 400
+    too_long = client.get("/api/translate", headers=alice, params={"text": "x" * 5000, "target": "hi"})
+    assert too_long.status_code == 400
+
+
+# ── Auto-reply rules (chatbot flow builder) ─────────────────────────────────
+
+def test_a_keyword_rule_auto_replies_in_a_dm(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    rule = client.post("/me/auto-reply-rules", headers=alice, json={
+        "trigger_text": "price", "response_text": "Our starting price is ₹499.",
+    }).json()
+    assert rule["trigger_text"] == "price"
+
+    client.post("/messages", headers=bob, json={"chat_id": chat_id, "text": "hey, what's the price?"})
+
+    messages = client.get(f"/chats/{chat_id}/messages", headers=bob).json()
+    assert any(m["text"] == "Our starting price is ₹499." and m["sender_id"] == alice_id
+               for m in messages)
+
+
+def test_rules_are_checked_in_order_first_match_wins(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    client.post("/me/auto-reply-rules", headers=alice,
+               json={"trigger_text": "hi", "response_text": "First rule"})
+    client.post("/me/auto-reply-rules", headers=alice,
+               json={"trigger_text": "hi there", "response_text": "Second rule"})
+
+    client.post("/messages", headers=bob, json={"chat_id": chat_id, "text": "hi there!"})
+
+    messages = client.get(f"/chats/{chat_id}/messages", headers=bob).json()
+    assert any(m["text"] == "First rule" for m in messages)
+    assert not any(m["text"] == "Second rule" for m in messages)
+
+
+def test_no_matching_rule_falls_back_to_the_away_message(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    client.post("/me/auto-reply-rules", headers=alice,
+               json={"trigger_text": "hours", "response_text": "We're open 9-5."})
+    client.patch("/me", headers=alice, json={
+        "away_enabled": True, "away_message": "Thanks for reaching out, I'll reply soon.",
+    })
+
+    client.post("/messages", headers=bob, json={"chat_id": chat_id, "text": "just saying hello"})
+
+    messages = client.get(f"/chats/{chat_id}/messages", headers=bob).json()
+    assert any(m["text"] == "Thanks for reaching out, I'll reply soon." for m in messages)
+    assert not any(m["text"] == "We're open 9-5." for m in messages)
+
+
+def test_deleting_a_rule_removes_it_from_future_matches(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+    rule = client.post("/me/auto-reply-rules", headers=alice,
+                       json={"trigger_text": "refund", "response_text": "See our refund policy."}).json()
+
+    assert client.delete(f"/me/auto-reply-rules/{rule['id']}", headers=alice).status_code == 200
+    assert client.get("/me/auto-reply-rules", headers=alice).json() == []
+
+    client.post("/messages", headers=bob, json={"chat_id": chat_id, "text": "can I get a refund"})
+    messages = client.get(f"/chats/{chat_id}/messages", headers=bob).json()
+    assert not any(m["text"] == "See our refund policy." for m in messages)
+
+
+# ── Product catalog ──────────────────────────────────────────────────────────
+
+def test_creating_listing_and_sharing_a_product_into_a_chat(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    product = client.post("/me/products", headers=alice, json={
+        "name": "Handmade mug", "description": "Ceramic, 350ml", "price_cents": 49900,
+    }).json()
+    assert product["name"] == "Handmade mug"
+    assert product["price_cents"] == 49900
+
+    assert [p["id"] for p in client.get("/me/products", headers=alice).json()] == [product["id"]]
+    assert [p["id"] for p in client.get(f"/users/{alice_id}/products", headers=bob).json()] == [product["id"]]
+
+    shared = client.post("/messages", headers=alice, json={
+        "chat_id": chat_id, "kind": "product", "payload": {"product_id": product["id"]},
+    })
+    assert shared.status_code == 200, shared.text
+    assert shared.json()["payload"]["name"] == "Handmade mug"
+    assert shared.json()["payload"]["price_cents"] == 49900
+
+
+def test_editing_a_product_does_not_change_an_already_shared_card(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    product = client.post("/me/products", headers=alice, json={
+        "name": "Original name", "price_cents": 10000,
+    }).json()
+    sent = client.post("/messages", headers=alice, json={
+        "chat_id": chat_id, "kind": "product", "payload": {"product_id": product["id"]},
+    }).json()
+
+    client.patch(f"/me/products/{product['id']}", headers=alice,
+                json={"name": "Renamed", "price_cents": 20000})
+
+    seen_by_bob = client.get(f"/chats/{chat_id}/messages", headers=bob).json()
+    card = next(m for m in seen_by_bob if m["id"] == sent["id"])
+    assert card["payload"]["name"] == "Original name"
+    assert card["payload"]["price_cents"] == 10000
+
+
+def test_cannot_share_someone_elses_product(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+    bobs_product = client.post("/me/products", headers=bob, json={"name": "Bob's item"}).json()
+
+    denied = client.post("/messages", headers=alice, json={
+        "chat_id": chat_id, "kind": "product", "payload": {"product_id": bobs_product["id"]},
+    })
+    assert denied.status_code == 400
+
+
+def test_deleting_a_product_removes_it_from_the_catalog_but_not_past_shares(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+    product = client.post("/me/products", headers=alice, json={"name": "Temp", "price_cents": 500}).json()
+    sent = client.post("/messages", headers=alice, json={
+        "chat_id": chat_id, "kind": "product", "payload": {"product_id": product["id"]},
+    }).json()
+
+    assert client.delete(f"/me/products/{product['id']}", headers=alice).status_code == 200
+    assert client.get("/me/products", headers=alice).json() == []
+
+    still_there = next(m for m in client.get(f"/chats/{chat_id}/messages", headers=bob).json()
+                        if m["id"] == sent["id"])
+    assert still_there["payload"]["name"] == "Temp"
+
+
+def test_archiving_a_product_hides_it_without_deleting(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    product = client.post("/me/products", headers=alice, json={"name": "Seasonal"}).json()
+
+    client.patch(f"/me/products/{product['id']}", headers=alice, json={"archived": True})
+    assert client.get("/me/products", headers=alice).json() == []
+
+    client.patch(f"/me/products/{product['id']}", headers=alice, json={"archived": False})
+    assert [p["id"] for p in client.get("/me/products", headers=alice).json()] == [product["id"]]
+
+
 def test_channel_post_comments_flow(client):
     owner, owner_id, _ = make_user(client, "Owner")
     sub, sub_id, _ = make_user(client, "Subscriber")
@@ -1045,6 +1490,36 @@ def test_scheduled_status_publishes_when_due(client):
     assert feed[0]["stories"][0]["text"] == "launching today"
 
 
+def test_changing_audience_mode_does_not_retroactively_hide_an_already_posted_status(client):
+    """Status privacy's own copy promises "anything already posted keeps its
+    old audience" — this only holds if visibility is checked against the
+    mode a story was posted UNDER (stories.audience_mode), not the
+    account's current, possibly since-changed, story_audience setting."""
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    client.post(f"/chats/dm/{bob_id}", headers=alice)
+
+    # Posted while everyone (contacts) can see it.
+    story = client.post("/stories", headers=alice, json={"text": "visible to all"}).json()
+    assert client.get("/stories", headers=bob).json() != []
+
+    # Alice locks down to "only" a list that does NOT include Bob.
+    client.put("/me/story-audience", headers=alice, json={"mode": "only", "user_ids": []})
+
+    # The already-posted story must still show for Bob — it was posted
+    # under 'contacts', which this account-level change must not rewrite.
+    feed = client.get("/stories", headers=bob).json()
+    assert len(feed) == 1
+    assert feed[0]["stories"][0]["id"] == story["id"]
+
+    # A NEW story posted after the change, however, follows the new mode.
+    new_story = client.post("/stories", headers=alice, json={"text": "only for my list"}).json()
+    feed_after = client.get("/stories", headers=bob).json()
+    seen_ids = {s["id"] for author in feed_after for s in author["stories"]}
+    assert story["id"] in seen_ids
+    assert new_story["id"] not in seen_ids
+
+
 def test_published_status_expires_after_24_hours(client):
     alice, _, _ = make_user(client, "Alice")
     bob, bob_id, _ = make_user(client, "Bob")
@@ -1059,6 +1534,62 @@ def test_published_status_expires_after_24_hours(client):
     # The 24 hours run from publication, not from when it was written.
     run_tick(publish_at + 24 * HOUR + 60)
     assert client.get("/stories", headers=bob).json() == []
+
+
+# ── Story Highlights ──────────────────────────────────────────────────────────
+
+def test_highlighting_a_story_keeps_it_alive_past_its_normal_expiry(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    client.post(f"/chats/dm/{bob_id}", headers=alice)
+
+    story = client.post("/stories", headers=alice, json={"text": "a keeper"}).json()
+    pinned = client.post(f"/stories/{story['id']}/highlight", headers=alice, json={"label": "Faves"})
+    assert pinned.status_code == 200
+    assert pinned.json()["highlight_label"] == "Faves"
+
+    # Long past the normal 24h lifetime — an ordinary (non-highlighted) story's
+    # `status` would already have flipped to 'expired' by this point, and
+    # expire_stories() would have dropped its attachment along with it.
+    run_tick(time.time() + 25 * HOUR)
+
+    assert db.query_one("SELECT status FROM stories WHERE id = ?", (story["id"],))["status"] == "live"
+    highlights = client.get(f"/users/{alice_id}/highlights", headers=bob).json()
+    assert len(highlights) == 1
+    assert highlights[0]["id"] == story["id"]
+    assert highlights[0]["text"] == "a keeper"
+
+
+def test_unhighlighting_lets_an_already_overdue_story_expire_on_the_next_tick(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    story = client.post("/stories", headers=alice, json={"text": "temporary highlight"}).json()
+    client.post(f"/stories/{story['id']}/highlight", headers=alice, json={})
+
+    run_tick(time.time() + 25 * HOUR)  # stays alive while highlighted
+    assert client.get(f"/users/{alice_id}/highlights", headers=alice).json() != []
+
+    client.delete(f"/stories/{story['id']}/highlight", headers=alice)
+    run_tick(time.time() + 26 * HOUR)  # its expires_at was already in the past
+    assert client.get(f"/users/{alice_id}/highlights", headers=alice).json() == []
+
+
+def test_only_the_author_can_highlight_their_own_story(client):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    client.post(f"/chats/dm/{bob_id}", headers=alice)
+    story = client.post("/stories", headers=alice, json={"text": "mine"}).json()
+
+    denied = client.post(f"/stories/{story['id']}/highlight", headers=bob, json={})
+    assert denied.status_code == 404
+
+
+def test_a_stranger_cannot_see_highlights_from_someone_they_share_no_chat_with(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    stranger, _, _ = make_user(client, "Stranger")
+    story = client.post("/stories", headers=alice, json={"text": "not for you"}).json()
+    client.post(f"/stories/{story['id']}/highlight", headers=alice, json={})
+
+    assert client.get(f"/users/{alice_id}/highlights", headers=stranger).json() == []
 
 
 def test_photo_status_carries_attachment_metadata_and_is_visible_to_a_contact(client):
@@ -4018,21 +4549,28 @@ def test_leaving_a_chat_without_vanish_mode_does_nothing(client):
     assert len(client.get(f"/chats/{chat_id}/messages", headers=bob).json()) == 1
 
 
-def test_vanish_mode_is_a_purely_personal_setting(client):
-    """Turning it on for yourself must never appear on the other member's
-    view of the same chat, nor affect what happens on their screen."""
+def test_vanish_mode_is_mutual(client):
+    """Instagram-style: either member turning it on applies to the whole
+    chat, so both sides' already-seen messages vanish from their own view
+    as each of them leaves — not just the one who flipped the toggle."""
     alice, _, _ = make_user(client, "Alice")
     bob, bob_id, _ = make_user(client, "Bob")
     chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
     msg = client.post("/messages", headers=alice, json={"chat_id": chat_id, "text": "hi"}).json()
 
-    client.put(f"/chats/{chat_id}/vanish-mode?enabled=true", headers=bob)
+    # Bob turns it on — Alice never touched the setting herself.
+    resp = client.put(f"/chats/{chat_id}/vanish-mode?enabled=true", headers=bob)
+    assert resp.json()["vanish_mode"] is True
+    # It's chat-wide: Alice's own /chats listing must show it as on too.
+    alice_chat = next(c for c in client.get("/chats", headers=alice).json() if c["id"] == chat_id)
+    assert alice_chat["vanish_mode"] == 1
+
     client.post(f"/chats/{chat_id}/read", headers=alice, json={"seq": msg["seq"]})
     client.post(f"/chats/{chat_id}/leave-view", headers=alice)
 
-    # Alice never turned vanish mode on for herself — her own message must
-    # still be sitting in her own view.
-    assert len(client.get(f"/chats/{chat_id}/messages", headers=alice).json()) == 1
+    # Alice never explicitly opted in herself, but the chat-wide setting
+    # (Bob's toggle) still vanishes her already-seen message from her view.
+    assert len(client.get(f"/chats/{chat_id}/messages", headers=alice).json()) == 0
 
 
 def test_an_outsider_cannot_set_vanish_mode_for_a_chat_they_are_not_in(client):
@@ -4246,6 +4784,71 @@ def test_online_recipient_does_not_get_a_push(client, monkeypatch):
 
     with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, bob_name)}"):
         client.post("/messages", headers=alice, json={"chat_id": chat_id, "text": "hi bob"})
+
+    assert len(calls) == 0
+
+
+def test_dm_push_is_skipped_when_the_recipient_turned_off_notif_dm(client, monkeypatch):
+    alice, _, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    client.post("/push/subscribe", headers=bob, json={
+        "endpoint": "https://push.example.com/bob-dm-off", "p256dh": "key1", "auth": "auth1",
+    })
+    client.patch("/me", headers=bob, json={"notif_dm": False})
+
+    calls = []
+    monkeypatch.setattr(main.push, "send", lambda *a, **k: calls.append(1) or "ok")
+
+    client.post("/messages", headers=alice, json={"chat_id": chat_id, "text": "hi bob"})
+
+    assert len(calls) == 0
+
+
+def test_group_push_is_skipped_when_the_recipient_turned_off_notif_groups_but_dm_still_works(client, monkeypatch):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    group_id = client.post("/chats/group", headers=alice, json={
+        "name": "Team", "member_ids": [bob_id],
+    }).json()["id"]
+    dm_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    client.post("/push/subscribe", headers=bob, json={
+        "endpoint": "https://push.example.com/bob-groups-off", "p256dh": "key1", "auth": "auth1",
+    })
+    client.patch("/me", headers=bob, json={"notif_groups": False})
+
+    calls = []
+    monkeypatch.setattr(main.push, "send",
+                        lambda sub, title, body, data=None: calls.append(data.get("chat_id")) or "ok")
+
+    client.post("/messages", headers=alice, json={"chat_id": group_id, "text": "group hi"})
+    client.post("/messages", headers=alice, json={"chat_id": dm_id, "text": "dm hi"})
+
+    assert calls == [dm_id]
+
+
+def test_call_push_is_skipped_when_the_recipient_turned_off_notif_calls(client, monkeypatch):
+    alice, alice_id, alice_name = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    client.post("/push/subscribe", headers=bob, json={
+        "endpoint": "https://push.example.com/bob-calls-off", "p256dh": "key1", "auth": "auth1",
+    })
+    client.patch("/me", headers=bob, json={"notif_calls": False})
+
+    calls = []
+    monkeypatch.setattr(main.push, "send", lambda *a, **k: calls.append(1) or "ok")
+
+    with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as alice_socket:
+        alice_socket.send_json({
+            "type": "call_invite", "to": bob_id, "chat_id": chat_id,
+            "call_kind": "voice", "sdp": {"type": "offer", "sdp": "v=0..."},
+        })
+        alice_socket.send_json({"type": "ping"})
+        assert alice_socket.receive_json()["type"] == "pong"
 
     assert len(calls) == 0
 
@@ -5246,11 +5849,12 @@ def test_an_ordinary_photo_ignores_the_view_once_gate(client):
 
 # ── View-once TEXT messages ──────────────────────────────────────────────────
 # A view-once photo has an explicit "open" request (GET /uploads/{id}) to hang
-# the single-use gate on. A plain text message has no such request — the
-# recipient reading it (mark_read) IS the view, so consume_view_once_text_messages
-# is what stamps view_once_opened_at here instead.
+# the single-use gate on. A view-once text message gets the same treatment via
+# POST /messages/{id}/view-once-open — an explicit tap, not merely the chat's
+# read watermark passing it (the old mark_read-triggered behavior could blank
+# it before the recipient had even scrolled to it).
 
-def test_view_once_text_message_disappears_once_the_recipient_reads_it(client):
+def test_view_once_text_message_is_untouched_until_explicitly_opened(client):
     alice, alice_id, _ = make_user(client, "Alice")
     bob, bob_id, _ = make_user(client, "Bob")
     chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
@@ -5261,18 +5865,48 @@ def test_view_once_text_message_disappears_once_the_recipient_reads_it(client):
     assert sent["view_once"]
     assert not sent.get("view_once_consumed")
 
-    # Not consumed yet — Bob hasn't read it.
+    # Not consumed yet — Bob has read the chat (mark_read) but not opened it.
+    client.post(f"/chats/{chat_id}/read", headers=bob, json={"seq": sent["seq"]})
     still_there = client.get(f"/chats/{chat_id}/messages", headers=bob).json()
     fetched = next(m for m in still_there if m["id"] == sent["id"])
     assert fetched["text"] == "self-destructing secret"
 
-    read = client.post(f"/chats/{chat_id}/read", headers=bob, json={"seq": sent["seq"]})
-    assert read.status_code == 200
+    opened = client.post(f"/messages/{sent['id']}/view-once-open", headers=bob)
+    assert opened.status_code == 200
+    assert opened.json()["text"] == "self-destructing secret"
 
     after = client.get(f"/chats/{chat_id}/messages", headers=bob).json()
     consumed = next(m for m in after if m["id"] == sent["id"])
     assert consumed["text"] == ""
     assert consumed["view_once_consumed"] is True
+
+
+def test_view_once_text_cannot_be_opened_twice(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    sent = client.post("/messages", headers=alice, json={
+        "chat_id": chat_id, "text": "one look only", "view_once": True,
+    }).json()
+
+    first = client.post(f"/messages/{sent['id']}/view-once-open", headers=bob)
+    second = client.post(f"/messages/{sent['id']}/view-once-open", headers=bob)
+    assert first.status_code == 200
+    assert second.status_code == 410
+
+
+def test_view_once_text_sender_cannot_open_their_own_message(client):
+    alice, alice_id, _ = make_user(client, "Alice")
+    bob, bob_id, _ = make_user(client, "Bob")
+    chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
+
+    sent = client.post("/messages", headers=alice, json={
+        "chat_id": chat_id, "text": "for your eyes only", "view_once": True,
+    }).json()
+
+    denied = client.post(f"/messages/{sent['id']}/view-once-open", headers=alice)
+    assert denied.status_code == 403
 
 
 def test_view_once_text_is_also_gone_for_the_sender_once_opened(client):
@@ -5285,7 +5919,7 @@ def test_view_once_text_is_also_gone_for_the_sender_once_opened(client):
     sent = client.post("/messages", headers=alice, json={
         "chat_id": chat_id, "text": "for your eyes only", "view_once": True,
     }).json()
-    client.post(f"/chats/{chat_id}/read", headers=bob, json={"seq": sent["seq"]})
+    client.post(f"/messages/{sent['id']}/view-once-open", headers=bob)
 
     own_view = client.get(f"/chats/{chat_id}/messages", headers=alice).json()
     mine = next(m for m in own_view if m["id"] == sent["id"])
@@ -5294,8 +5928,8 @@ def test_view_once_text_is_also_gone_for_the_sender_once_opened(client):
 
 
 def test_the_senders_own_read_receipt_does_not_consume_their_view_once_text(client):
-    """Marking your OWN chat as read (e.g. right after sending) must not
-    burn the message before the recipient has ever seen it."""
+    """Marking the chat as read (by either side) must never burn a view-once
+    text message — only the explicit view-once-open endpoint may."""
     alice, alice_id, _ = make_user(client, "Alice")
     bob, bob_id, _ = make_user(client, "Bob")
     chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
@@ -5304,13 +5938,14 @@ def test_the_senders_own_read_receipt_does_not_consume_their_view_once_text(clie
         "chat_id": chat_id, "text": "still unread by bob", "view_once": True,
     }).json()
     client.post(f"/chats/{chat_id}/read", headers=alice, json={"seq": sent["seq"]})
+    client.post(f"/chats/{chat_id}/read", headers=bob, json={"seq": sent["seq"]})
 
     still_there = client.get(f"/chats/{chat_id}/messages", headers=bob).json()
     fetched = next(m for m in still_there if m["id"] == sent["id"])
     assert fetched["text"] == "still unread by bob"
 
 
-def test_view_once_text_read_event_notifies_the_chat_live(client):
+def test_view_once_text_open_event_notifies_the_chat_live(client):
     """The sender's own open socket has to hear about the blanking too —
     otherwise their screen keeps showing content that's already gone
     server-side until they reload."""
@@ -5323,7 +5958,7 @@ def test_view_once_text_read_event_notifies_the_chat_live(client):
     }).json()
 
     with client.websocket_connect(f"/ws?ticket={ws_ticket_for(client, alice_name)}") as socket:
-        client.post(f"/chats/{chat_id}/read", headers=bob, json={"seq": sent["seq"]})
+        client.post(f"/messages/{sent['id']}/view-once-open", headers=bob)
 
         event = socket.receive_json()
         assert event["type"] == "message_edited"

@@ -31,3 +31,8 @@ pywebpush>=2.0,<3.0
 # service-account key, so the backend can push to native (Android) devices —
 # the Capacitor app's WebView can't receive Web Push, only FCM.
 google-auth>=2.0,<3.0
+
+# Mints the LiveKit access token (HS256 JWT) when the SFU is configured —
+# group calls route through LiveKit instead of the peer-to-peer mesh,
+# scaling past the 4–6 participant limit of direct WebRTC.
+PyJWT>=2.8,<3.0

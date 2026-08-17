@@ -773,6 +773,9 @@ export const I = {
   pin: (c = G.sub, s = 16) => <svg width={s} height={s} viewBox="0 0 24 24" fill={c} stroke="none"><path d="M16 3H8a1 1 0 0 0 0 2h1v4.59c0 1.13-.36 2.23-1.03 3.14L6.4 14.9A1 1 0 0 0 7.2 16.5h3.8v5.5a1 1 0 0 0 2 0v-5.5h3.8a1 1 0 0 0 .8-1.6l-1.57-2.17A5.3 5.3 0 0 1 15 9.59V5h1a1 1 0 0 0 0-2z"/></svg>,
   settings: (c = G.sub, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
   lock: (c = G.green, s = 12) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2.5" strokeLinecap="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>,
+  fingerprint: (c = G.accent, s = 22) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a8 8 0 0 0-8 8c0 2.5.5 4 1.5 6"/><path d="M12 4a6 6 0 0 1 6 6c0 3-.5 5-1.5 7"/><path d="M12 8a2 2 0 0 0-2 2c0 4-1 6-3 8"/><path d="M12 8a2 2 0 0 1 2 2c0 1.5-.15 2.7-.5 3.8"/><path d="M9 16.5c1.2-1.5 1.5-3 1.5-4.5"/></svg>,
+  tag: (c = G.accent, s = 18) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20.59 13.41 11 3.83A2 2 0 0 0 9.59 3.17H4a1 1 0 0 0-1 1v5.59a2 2 0 0 0 .59 1.41l9.59 9.59a2 2 0 0 0 2.83 0l4.58-4.58a2 2 0 0 0 0-2.83z"/><circle cx="7.5" cy="7.5" r="1.5"/></svg>,
+  globe: (c = G.sub, s = 18) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>,
   bolt: (c = G.accent, s = 14) => <svg width={s} height={s} viewBox="0 0 24 24" fill={c}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>,
   search: (c = G.muted, s = 16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>,
   plus: (c = "#fff", s = 22) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>,
@@ -882,6 +885,7 @@ export const I = {
   logOut: (c = G.sub, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>,
   wifi: (c = G.sub, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>,
   play: (c = G.sub, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill={c}><path d="M6 4.5v15l13-7.5z"/></svg>,
+  pause: (c = G.sub, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill={c}><path d="M6 4h4v16H6zm8 0h4v16h-4z"/></svg>,
   mail: (c = G.sub, s = 20) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m2 7 10 6 10-6"/></svg>,
 };
 
@@ -1191,20 +1195,40 @@ export function useViewportHeightVar() {
       const height = vv && vv.height ? vv.height : window.innerHeight;
       root.style.setProperty("--app-height", `${Math.round(height)}px`);
     }
+    // The keyboard show/hide animation (and, on Android, the WebView's own
+    // adjustResize firing independently of visualViewport) can deliver a
+    // resize/scroll event mid-animation — applying that value immediately
+    // is what used to leave the composer floating with a gap under it, or
+    // briefly under-sized so the nav bar peeked over it. Apply right away
+    // for a snappy first response, then re-apply once more shortly after:
+    // whatever the height has settled to by then wins, so a stale
+    // in-between reading never gets stuck as the final value.
+    let raf = null;
+    let settleTimer = null;
+    function scheduleApply() {
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        apply();
+        if (settleTimer) clearTimeout(settleTimer);
+        settleTimer = setTimeout(apply, 140);
+      });
+    }
     apply();
     if (vv) {
-      vv.addEventListener("resize", apply);
-      vv.addEventListener("scroll", apply);
+      vv.addEventListener("resize", scheduleApply);
+      vv.addEventListener("scroll", scheduleApply);
     }
-    window.addEventListener("resize", apply);
-    window.addEventListener("orientationchange", apply);
+    window.addEventListener("resize", scheduleApply);
+    window.addEventListener("orientationchange", scheduleApply);
     return () => {
+      if (raf) cancelAnimationFrame(raf);
+      if (settleTimer) clearTimeout(settleTimer);
       if (vv) {
-        vv.removeEventListener("resize", apply);
-        vv.removeEventListener("scroll", apply);
+        vv.removeEventListener("resize", scheduleApply);
+        vv.removeEventListener("scroll", scheduleApply);
       }
-      window.removeEventListener("resize", apply);
-      window.removeEventListener("orientationchange", apply);
+      window.removeEventListener("resize", scheduleApply);
+      window.removeEventListener("orientationchange", scheduleApply);
     };
   }, []);
 }

@@ -404,6 +404,9 @@ export default function GroupCallOverlay({
 }) {
   const [sinkId, setSinkId] = useState(undefined);
   const [minimized, setMinimized] = useState(false);
+  const [bubblePos, setBubblePos] = useState({ x: null, y: null }); // null → default bottom-right via CSS
+  const bubbleDrag = useRef(null);
+  const bubbleMoved = useRef(false);
   const { expanded, toggle, isDesktop, isLandscape } = useCallLayout();
 
   if (!call) return null;
@@ -413,13 +416,36 @@ export default function GroupCallOverlay({
   // audio keeps playing either way; only the video grid and controls stop
   // being drawn.
   if (minimized && call.phase !== "incoming") {
+    const BW = 220, BH = 46; // matches the pill's own rendered footprint
+    function onBubblePointerDown(event) {
+      bubbleMoved.current = false;
+      const rect = event.currentTarget.getBoundingClientRect();
+      bubbleDrag.current = { startX: event.clientX, startY: event.clientY, baseX: rect.left, baseY: rect.top };
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+    }
+    function onBubblePointerMove(event) {
+      if (!bubbleDrag.current) return;
+      const dx = event.clientX - bubbleDrag.current.startX;
+      const dy = event.clientY - bubbleDrag.current.startY;
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) bubbleMoved.current = true;
+      const nx = Math.max(6, Math.min(window.innerWidth - BW - 6, bubbleDrag.current.baseX + dx));
+      const ny = Math.max(6, Math.min(window.innerHeight - BH - 6, bubbleDrag.current.baseY + dy));
+      setBubblePos({ x: nx, y: ny });
+    }
+    function onBubblePointerUp() { bubbleDrag.current = null; }
+    const anchored = bubblePos.x == null
+      ? { right: 16, bottom: 90 }
+      : { left: bubblePos.x, top: bubblePos.y };
     return (
-      <div onClick={() => setMinimized(false)} style={{
-        position: "fixed", bottom: 90, right: 16, zIndex: 999, cursor: "pointer",
-        display: "flex", alignItems: "center", gap: 8, padding: "8px 14px 8px 8px",
-        background: "#182234", color: "#fff", borderRadius: 30,
-        boxShadow: "0 4px 16px #00000055", border: "1px solid #ffffff26",
-      }}>
+      <div
+        onPointerDown={onBubblePointerDown} onPointerMove={onBubblePointerMove} onPointerUp={onBubblePointerUp}
+        onClick={() => { if (!bubbleMoved.current) setMinimized(false); }}
+        style={{
+          position: "fixed", ...anchored, zIndex: 999, cursor: "pointer", touchAction: "none",
+          display: "flex", alignItems: "center", gap: 8, padding: "8px 14px 8px 8px",
+          background: "#182234", color: "#fff", borderRadius: 30,
+          boxShadow: "0 4px 16px #00000055", border: "1px solid #ffffff26",
+        }}>
         <div style={{
           width: 30, height: 30, borderRadius: "50%", background: G.accent,
           display: "flex", alignItems: "center", justifyContent: "center",
@@ -904,6 +930,11 @@ function ActiveGroupCall({
 
 function SelfTile({ call, isHost, onSwitchCamera, zoomable = true }) {
   const showVideo = (call.callKind === "video" || call.sharingScreen) && !call.cameraOff && call.localStream;
+  // Front camera feeds look backwards to the person on them (text/gestures
+  // reversed) unless mirrored — same fix as CallOverlay's 1:1 self-view.
+  // Never applies to the rear camera or a shared screen.
+  const selfMirror = !call.sharingScreen && call.facingMode !== "environment"
+    ? { transform: "scaleX(-1)" } : undefined;
   return (
     <div style={{
       position: "relative", background: "#142235", borderRadius: 10,
@@ -911,7 +942,7 @@ function SelfTile({ call, isHost, onSwitchCamera, zoomable = true }) {
     }}>
       {showVideo ? (
         <VideoTag stream={call.localStream} muted zoomable={zoomable}
-                  style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
+                  style={{ width: "100%", height: "100%", objectFit: "cover", ...selfMirror }}/>
       ) : (
         <div style={{ width: 64, height: 64, borderRadius: "50%", background: G.accent }}/>
       )}

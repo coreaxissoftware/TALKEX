@@ -27,6 +27,7 @@ import hmac
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -63,22 +64,25 @@ import uploads
 from chatstore import new_id
 from models import (
     AddContactRequest, AddMembersRequest, BroadcastRecipientsRequest, BulkSendRequest,
+    CreateAutoReplyRuleRequest, UpdateAutoReplyRuleRequest,
     ChatSettingsRequest, CommentRequest, ConfirmEmailRequest, CreateApiKeyRequest, CreateBroadcastRequest,
     CreateCannedReplyRequest, CreateChannelRequest, CreateCommunityRequest, CreateGroupRequest,
-    CreateMeetingRequest, CreateSubChannelRequest, CreateTemplateRequest, CreateWebhookRequest,
+    CreateLabelRequest, CreateMeetingRequest, CreateProductRequest, CreateSubChannelRequest,
+    CreateTemplateRequest, CreateTopicRequest, CreateWebhookRequest,
     CreateBreakoutRoomsRequest, DisappearingRequest, InstantMeetingRequest,
-    EditMessageRequest, FeedbackRequest, ForwardRequest, ForwardStoryRequest,
+    EditMessageRequest, FeedbackRequest, ForwardRequest, ForwardStoryRequest, HighlightStoryRequest,
     LiveLocationUpdateRequest, LoginRequest,
     MatchContactsRequest,
     FcmTokenRequest, PushSubscribeRequest, PushUnsubscribeRequest, ReactRequest, ReadRequest,
     RegisterRequest, RemoveTwoStepRequest, RequestEmailOtpRequest, RequestOtpRequest,
     ReportRequest, RescheduleRequest, RsvpRequest,
-    ScheduleRequest, SendMessageRequest, SetPasswordRequest, SetPinRequest, SetRoleRequest,
+    ScheduleRequest, SendMessageRequest, SetChatLabelsRequest, SetNearbyRequest, SetPasswordRequest,
+    SetPinRequest, SetRoleRequest,
     SetSessionShortLivedRequest,
     SetTwoStepRequest, SetUsernameRequest, StartLinkRequest, StoryAudienceRequest, StoryRequest,
     TestEmailRequest, TestSmsRequest,
     UpdateChatInfoRequest, UpdateContactRequest, UpdateIntegrationSettingsRequest, UpdateMeetingRequest,
-    UpdateProfileRequest, VerifyOtpRequest, VerifyTwoStepRequest, VoteRequest,
+    UpdateProductRequest, UpdateProfileRequest, VerifyOtpRequest, VerifyTwoStepRequest, VoteRequest,
 )
 from realtime import hub
 
@@ -1411,6 +1415,151 @@ def delete_canned_reply(reply_id: str, user: dict = Depends(current_user)):
     return {"deleted": True}
 
 
+# ── Chat labels ──────────────────────────────────────────────────────────────
+# WhatsApp-Business-style tags — see chat_labels' own table comment for how
+# these differ from the plain-text, one-per-chat chat_members.folder.
+
+@app.post("/me/labels")
+def create_label(request: CreateLabelRequest, user: dict = Depends(current_user)):
+    label_id = new_id("label")
+    db.execute(
+        "INSERT INTO chat_labels (id, owner_id, name, color, created_at) VALUES (?, ?, ?, ?, ?)",
+        (label_id, user["id"], request.name.strip(), request.color, time.time()),
+    )
+    return {"id": label_id, "name": request.name.strip(), "color": request.color}
+
+
+@app.get("/me/labels")
+def list_labels(user: dict = Depends(current_user)):
+    rows = db.query_all(
+        "SELECT id, name, color FROM chat_labels WHERE owner_id = ? ORDER BY created_at",
+        (user["id"],),
+    )
+    return [dict(row) for row in rows]
+
+
+@app.delete("/me/labels/{label_id}")
+def delete_label(label_id: str, user: dict = Depends(current_user)):
+    """Deleting a label also drops it from every chat it was applied to —
+    the assignments row has no meaning once the label itself is gone."""
+    changed = db.execute(
+        "DELETE FROM chat_labels WHERE id = ? AND owner_id = ?", (label_id, user["id"]))
+    if changed.rowcount == 0:
+        raise HTTPException(404, "Label not found")
+    return {"deleted": True}
+
+
+@app.put("/chats/{chat_id}/labels")
+def set_chat_labels(chat_id: str, request: SetChatLabelsRequest, user: dict = Depends(current_user)):
+    require_member(chat_id, user["id"])
+    owned = {row["id"] for row in db.query_all(
+        "SELECT id FROM chat_labels WHERE owner_id = ?", (user["id"],))}
+    unknown = set(request.label_ids) - owned
+    if unknown:
+        raise HTTPException(400, "One or more label_ids don't belong to you")
+    with db.transaction() as conn:
+        conn.execute(
+            "DELETE FROM chat_label_assignments WHERE chat_id = ? AND user_id = ?",
+            (chat_id, user["id"]),
+        )
+        conn.executemany(
+            "INSERT INTO chat_label_assignments (chat_id, label_id, user_id) VALUES (?, ?, ?)",
+            [(chat_id, label_id, user["id"]) for label_id in set(request.label_ids)],
+        )
+    return {"label_ids": request.label_ids}
+
+
+# ── Product catalog ───────────────────────────────────────────────────────────
+# WhatsApp Business Catalog equivalent — a business lists items, then shares
+# one into a chat (kind='product'); see send_message's payload snapshot for
+# why an already-sent product card never changes if the listing does later.
+
+def _serialise_product(row) -> dict:
+    product = dict(row)
+    if product.get("image_attachment_id"):
+        details = chatstore.attachment_details(product["image_attachment_id"])
+        if details:
+            product["image"] = details
+    return product
+
+
+@app.post("/me/products")
+def create_product(request: CreateProductRequest, user: dict = Depends(current_user)):
+    product_id = new_id("product")
+    if request.image_attachment_id:
+        attached = uploads.attach_to_product(request.image_attachment_id, product_id, user["id"])
+        if attached is None:
+            raise HTTPException(400, "Invalid or already-used image_attachment_id")
+    db.execute(
+        """
+        INSERT INTO products (id, owner_id, name, description, price_cents, currency,
+                              image_attachment_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (product_id, user["id"], request.name.strip(), request.description.strip(),
+         request.price_cents, request.currency.upper(), request.image_attachment_id, time.time()),
+    )
+    return _serialise_product(db.query_one("SELECT * FROM products WHERE id = ?", (product_id,)))
+
+
+@app.get("/me/products")
+def list_my_products(user: dict = Depends(current_user)):
+    rows = db.query_all(
+        "SELECT * FROM products WHERE owner_id = ? AND archived_at IS NULL ORDER BY created_at DESC",
+        (user["id"],),
+    )
+    return [_serialise_product(row) for row in rows]
+
+
+@app.patch("/me/products/{product_id}")
+def update_product(product_id: str, request: UpdateProductRequest, user: dict = Depends(current_user)):
+    product = db.query_one("SELECT * FROM products WHERE id = ? AND owner_id = ?",
+                           (product_id, user["id"]))
+    if product is None:
+        raise HTTPException(404, "Product not found")
+
+    fields = request.model_dump(exclude={"archived", "image_attachment_id"}, exclude_none=True)
+    if "name" in fields:
+        fields["name"] = fields["name"].strip()
+    if "description" in fields:
+        fields["description"] = fields["description"].strip()
+    if "currency" in fields:
+        fields["currency"] = fields["currency"].upper()
+    if request.archived is not None:
+        fields["archived_at"] = time.time() if request.archived else None
+    if request.image_attachment_id:
+        attached = uploads.attach_to_product(request.image_attachment_id, product_id, user["id"])
+        if attached is None:
+            raise HTTPException(400, "Invalid or already-used image_attachment_id")
+        fields["image_attachment_id"] = request.image_attachment_id
+
+    if fields:
+        assignments = ", ".join(f"{name} = ?" for name in fields)
+        db.execute(f"UPDATE products SET {assignments} WHERE id = ?", (*fields.values(), product_id))
+    return _serialise_product(db.query_one("SELECT * FROM products WHERE id = ?", (product_id,)))
+
+
+@app.delete("/me/products/{product_id}")
+def delete_product(product_id: str, user: dict = Depends(current_user)):
+    changed = db.execute(
+        "DELETE FROM products WHERE id = ? AND owner_id = ?", (product_id, user["id"]))
+    if changed.rowcount == 0:
+        raise HTTPException(404, "Product not found")
+    return {"deleted": True}
+
+
+@app.get("/users/{user_id}/products")
+def list_user_products(user_id: str, user: dict = Depends(current_user)):
+    """Anyone can browse anyone's catalog — same "public unless you say
+    otherwise" visibility a profile itself already has; there's no private
+    content here, only what its owner chose to list for sale."""
+    rows = db.query_all(
+        "SELECT * FROM products WHERE owner_id = ? AND archived_at IS NULL ORDER BY created_at DESC",
+        (user_id,),
+    )
+    return [_serialise_product(row) for row in rows]
+
+
 # ── Message templates ─────────────────────────────────────────────────────────
 # WhatsApp Business API's template system: any account can propose one, but
 # it sits at 'pending' until a superadmin approves or rejects it (see the
@@ -1448,28 +1597,104 @@ def delete_template(template_id: str, user: dict = Depends(current_user)):
     return {"deleted": True}
 
 
-# ── Away message ──────────────────────────────────────────────────────────────
-# WhatsApp Business's auto-reply: turned on/off via PATCH /me (away_enabled,
-# away_message, alongside the other profile flags) — no dedicated endpoint
-# needed, since it's just two more fields on the same profile row.
+# ── Away message + keyword auto-replies (the flow-builder) ─────────────────────
+# Away message: WhatsApp Business's blanket auto-reply, on/off via PATCH /me
+# (away_enabled, away_message, alongside the other profile flags) — no
+# dedicated endpoint needed, since it's just two more fields on the profile
+# row. auto_reply_rules layers keyword-triggered responses ("price", "hours")
+# on top: checked first, away_message is only the fallback when nothing matches.
 
 AWAY_REPLY_COOLDOWN_SECONDS = 12 * 3600
 
 
-async def maybe_send_away_reply(background_tasks: BackgroundTasks, chat_id: str, sender_id: str):
+@app.post("/me/auto-reply-rules")
+def create_auto_reply_rule(request: CreateAutoReplyRuleRequest, user: dict = Depends(current_user)):
+    rule_id = new_id("rule")
+    next_position = db.query_one(
+        "SELECT COALESCE(MAX(position), -1) + 1 AS n FROM auto_reply_rules WHERE owner_id = ?",
+        (user["id"],),
+    )["n"]
+    db.execute(
+        "INSERT INTO auto_reply_rules (id, owner_id, trigger_text, response_text, position, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (rule_id, user["id"], request.trigger_text.strip(), request.response_text.strip(),
+         next_position, time.time()),
+    )
+    return dict(db.query_one("SELECT * FROM auto_reply_rules WHERE id = ?", (rule_id,)))
+
+
+@app.get("/me/auto-reply-rules")
+def list_auto_reply_rules(user: dict = Depends(current_user)):
+    rows = db.query_all(
+        "SELECT * FROM auto_reply_rules WHERE owner_id = ? ORDER BY position, created_at",
+        (user["id"],),
+    )
+    return [dict(row) for row in rows]
+
+
+@app.patch("/me/auto-reply-rules/{rule_id}")
+def update_auto_reply_rule(rule_id: str, request: UpdateAutoReplyRuleRequest,
+                           user: dict = Depends(current_user)):
+    rule = db.query_one("SELECT * FROM auto_reply_rules WHERE id = ? AND owner_id = ?",
+                        (rule_id, user["id"]))
+    if rule is None:
+        raise HTTPException(404, "Rule not found")
+    fields = request.model_dump(exclude_none=True)
+    if "trigger_text" in fields:
+        fields["trigger_text"] = fields["trigger_text"].strip()
+    if "response_text" in fields:
+        fields["response_text"] = fields["response_text"].strip()
+    if fields:
+        assignments = ", ".join(f"{name} = ?" for name in fields)
+        db.execute(f"UPDATE auto_reply_rules SET {assignments} WHERE id = ?",
+                  (*fields.values(), rule_id))
+    return dict(db.query_one("SELECT * FROM auto_reply_rules WHERE id = ?", (rule_id,)))
+
+
+@app.delete("/me/auto-reply-rules/{rule_id}")
+def delete_auto_reply_rule(rule_id: str, user: dict = Depends(current_user)):
+    changed = db.execute(
+        "DELETE FROM auto_reply_rules WHERE id = ? AND owner_id = ?", (rule_id, user["id"]))
+    if changed.rowcount == 0:
+        raise HTTPException(404, "Rule not found")
+    return {"deleted": True}
+
+
+async def maybe_send_away_reply(background_tasks: BackgroundTasks, chat_id: str, sender_id: str,
+                                text: str = ""):
     """
     Auto-replies at most once per cooldown window per conversation, so a
     back-and-forth doesn't get the same canned line on every message. The
     reply is an entirely ordinary message written by the away user's own
     account — it shows up and behaves exactly like they typed it themselves,
     not a system notice.
+
+    Keyword rules are checked first (first trigger, by position, that's a
+    case-insensitive substring of the incoming text, wins); away_message is
+    only ever the fallback when no rule matched. Both share the one cooldown
+    gate below — a real chatbot answering the same question twice in one
+    burst is exactly the noise the cooldown exists to prevent.
     """
     peer_id = dm_peer_id(chat_id, sender_id)
     if not peer_id:
         return
     owner = db.query_one("SELECT * FROM users WHERE id = ?", (peer_id,))
-    if not owner or not owner["away_enabled"] or not owner["away_message"].strip():
+    if not owner:
         return
+
+    reply_text = None
+    lowered = text.lower()
+    for rule in db.query_all(
+        "SELECT * FROM auto_reply_rules WHERE owner_id = ? ORDER BY position, created_at",
+        (peer_id,),
+    ):
+        if rule["trigger_text"].lower() in lowered:
+            reply_text = rule["response_text"]
+            break
+    if reply_text is None:
+        if not owner["away_enabled"] or not owner["away_message"].strip():
+            return
+        reply_text = owner["away_message"]
 
     last_from_owner = db.query_one(
         "SELECT created_at FROM messages WHERE chat_id = ? AND sender_id = ? ORDER BY created_at DESC LIMIT 1",
@@ -1478,7 +1703,7 @@ async def maybe_send_away_reply(background_tasks: BackgroundTasks, chat_id: str,
     if last_from_owner and time.time() - last_from_owner["created_at"] < AWAY_REPLY_COOLDOWN_SECONDS:
         return
 
-    background_tasks.add_task(_send_away_reply, chat_id, peer_id, owner["away_message"])
+    background_tasks.add_task(_send_away_reply, chat_id, peer_id, reply_text)
 
 
 async def _send_away_reply(chat_id: str, peer_id: str, text: str):
@@ -1605,7 +1830,8 @@ async def push_to_users(user_ids: list[str], title: str, body: str, data: dict):
                 db.execute("DELETE FROM device_tokens WHERE token = ?", (row["token"],))
 
 
-async def notify_offline_members(chat_id: str, sender_id: str, title: str, body: str):
+async def notify_offline_members(chat_id: str, sender_id: str, title: str, body: str,
+                                  chat_type: str = "dm"):
     """
     Web Push for whoever isn't reachable over the live socket right now.
 
@@ -1614,12 +1840,24 @@ async def notify_offline_members(chat_id: str, sender_id: str, title: str, body:
     pushing them a duplicate OS notification for something already on their
     screen is exactly the kind of noise that gets a real app's notifications
     switched off entirely.
+
+    `chat_type` picks which per-type toggle (Settings > Notifications) gates
+    this push: a DM checks notif_dm, anything else (group/channel/community/
+    broadcast fan-out) checks notif_groups. Someone who's turned a category
+    off still sees the message the moment they open the app — this only
+    skips the OS-level push for it.
     """
+    pref_column = "notif_dm" if chat_type == "dm" else "notif_groups"
     member_rows = db.query_all(
-        "SELECT user_id FROM chat_members WHERE chat_id = ? AND user_id != ?",
+        f"SELECT user_id FROM chat_members m JOIN users u ON u.id = m.user_id "
+        f"WHERE m.chat_id = ? AND m.user_id != ? AND u.{pref_column} = 1",
         (chat_id, sender_id),
     )
-    offline_ids = [row["user_id"] for row in member_rows if not hub.is_online(row["user_id"])]
+    # has_connection (any open socket), not is_online (focused) — per its own
+    # docstring, a backgrounded-but-connected tab already gets this message
+    # over its live socket, so pushing it too was a redundant duplicate
+    # notification on top of what the app already delivered silently.
+    offline_ids = [row["user_id"] for row in member_rows if not hub.has_connection(row["user_id"])]
     await push_to_users(offline_ids, title, body, {"chat_id": chat_id})
 
 
@@ -1649,6 +1887,9 @@ async def notify_incoming_call(user_id: str, chat_id: str, caller_name: str, cal
     for an ordinary message.
     """
     if hub.is_online(user_id):
+        return
+    callee = db.query_one("SELECT notif_calls FROM users WHERE id = ?", (user_id,))
+    if callee is not None and not callee["notif_calls"]:
         return
     verb = "Video call" if call_kind == "video" else "Voice call"
     await push_to_users(
@@ -2013,6 +2254,90 @@ def set_story_audience(request: StoryAudienceRequest, user: dict = Depends(curre
                 [(user["id"], other_id) for other_id in set(request.user_ids)],
             )
     return {"mode": request.mode, "user_ids": request.user_ids}
+
+
+NEARBY_VISIBILITY_SECONDS = 2 * 3600  # a shared location goes stale after this
+
+
+@app.put("/me/nearby")
+def set_nearby(request: SetNearbyRequest, user: dict = Depends(current_user)):
+    """
+    Telegram's "People Nearby" — entirely opt-in, and off again the moment
+    the user leaves the screen or explicitly disables it (the client is
+    expected to call this with enabled=False on unmount, same pattern as
+    live location's own stop-sharing call).
+    """
+    if not request.enabled:
+        db.execute(
+            "UPDATE users SET nearby_enabled = 0, nearby_lat = NULL, nearby_lng = NULL, "
+            "nearby_updated_at = NULL WHERE id = ?",
+            (user["id"],),
+        )
+        return {"enabled": False}
+
+    if request.lat is None or request.lng is None:
+        raise HTTPException(400, "lat and lng are required to enable Nearby")
+
+    # Rounded to ~1km (2 decimal places) before it's ever written to disk —
+    # "which neighborhood" is enough for this feature; an exact coordinate
+    # trail isn't something this needs to keep.
+    db.execute(
+        "UPDATE users SET nearby_enabled = 1, nearby_lat = ?, nearby_lng = ?, nearby_updated_at = ? "
+        "WHERE id = ?",
+        (round(request.lat, 2), round(request.lng, 2), time.time(), user["id"]),
+    )
+    return {"enabled": True}
+
+
+def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+@app.get("/discover/nearby")
+def list_nearby(radius_km: float = Query(default=50, gt=0, le=1000), user: dict = Depends(current_user)):
+    """
+    Other opted-in users within radius_km (default 50, capped at 1000) and
+    NEARBY_VISIBILITY_SECONDS, nearest first. Requires the caller to have
+    shared their own location too — you can't browse who's nearby without
+    being findable yourself, the same reciprocity WhatsApp/Telegram's own
+    nearby-style features use.
+    """
+    me = db.query_one(
+        "SELECT nearby_enabled, nearby_lat, nearby_lng FROM users WHERE id = ?", (user["id"],))
+    if not me or not me["nearby_enabled"]:
+        raise HTTPException(400, "Turn on Nearby for yourself first")
+
+    cutoff = time.time() - NEARBY_VISIBILITY_SECONDS
+    candidates = db.query_all(
+        """
+        SELECT id, name, avatar_letter, color, avatar_attachment_id, nearby_lat, nearby_lng
+        FROM users
+        WHERE nearby_enabled = 1 AND nearby_updated_at > ? AND id != ? AND disabled_at IS NULL
+        """,
+        (cutoff, user["id"]),
+    )
+    results = []
+    for row in candidates:
+        if blocked_between(user["id"], row["id"]):
+            continue
+        distance_km = _haversine_km(me["nearby_lat"], me["nearby_lng"], row["nearby_lat"], row["nearby_lng"])
+        if distance_km > radius_km:
+            continue
+        # public_user() only knows to scrub credential-shaped columns — the
+        # raw coordinates behind this row's distance_km are nobody else's
+        # business at all, so they're dropped explicitly rather than trusted
+        # to that blocklist.
+        person = public_user(row, viewer_id=user["id"])
+        person.pop("nearby_lat", None)
+        person.pop("nearby_lng", None)
+        results.append({**person, "distance_km": round(distance_km, 1)})
+    results.sort(key=lambda r: r["distance_km"])
+    return results
 
 
 @app.post("/me/avatar")
@@ -2644,7 +2969,7 @@ def list_chats(user: dict = Depends(current_user),
         SELECT
             c.*,
             m.role, m.last_read_seq, m.muted_until, m.is_pinned, m.folder, m.draft, m.archived,
-            m.calls_enabled, m.is_favorite, m.vanish_mode,
+            m.calls_enabled, m.is_favorite, m.vanish_mode, m.notify_tone,
             MAX(c.last_seq - m.last_read_seq, 0) AS unread
         FROM chat_members AS m
         JOIN chats AS c ON c.id = m.chat_id
@@ -2714,9 +3039,24 @@ def list_chats(user: dict = Depends(current_user),
     reactions_by_message = chatstore.reactions_for_many(
         [row["id"] for row in last_messages.values()], user["id"])
 
+    # This caller's own labels on each chat on this page, batched the same
+    # way peers/last_messages are above.
+    labels_by_chat: dict[str, list[dict]] = defaultdict(list)
+    for row in db.query_all(
+        f"""
+        SELECT a.chat_id, l.id, l.name, l.color FROM chat_label_assignments AS a
+        JOIN chat_labels AS l ON l.id = a.label_id
+        WHERE a.user_id = ? AND a.chat_id IN ({placeholders})
+        """,
+        (user["id"], *chat_ids),
+    ):
+        labels_by_chat[row["chat_id"]].append(
+            {"id": row["id"], "name": row["name"], "color": row["color"]})
+
     chats = []
     for row in rows:
         chat = dict(row)
+        chat["labels"] = labels_by_chat.get(chat["id"], [])
 
         peer = peers.get(chat["id"])
         if peer:
@@ -3669,6 +4009,61 @@ async def set_send_policy(chat_id: str, admins_only: bool = Query(...),
     return {"send_policy": "admins" if admins_only else "all"}
 
 
+@app.put("/chats/{chat_id}/topics-policy")
+async def set_topics_policy(chat_id: str, enabled: bool = Query(...),
+                            user: dict = Depends(current_user)):
+    """Telegram's "Enable Topics" switch. Turning it off doesn't delete any
+    topic or re-file any message — it just stops the client from showing the
+    thread picker; every existing message keeps whatever topic_id it has,
+    ready to reappear correctly if Topics is turned back on later."""
+    chat = require_member(chat_id, user["id"])
+    if chat["type"] != "group":
+        raise HTTPException(400, "Topics only apply to groups")
+    require_manager(chat_id, user["id"])
+    db.execute("UPDATE chats SET topics_enabled = ? WHERE id = ?", (1 if enabled else 0, chat_id))
+    await hub.send_to_chat(chat_id, {"type": "chat_updated", "chat_id": chat_id})
+    return {"topics_enabled": enabled}
+
+
+@app.post("/chats/{chat_id}/topics")
+async def create_topic(chat_id: str, request: CreateTopicRequest, user: dict = Depends(current_user)):
+    chat = require_member(chat_id, user["id"])
+    if not chat["topics_enabled"]:
+        raise HTTPException(400, "Topics are not enabled for this chat")
+    topic_id = new_id("topic")
+    db.execute(
+        "INSERT INTO topics (id, chat_id, name, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+        (topic_id, chat_id, request.name.strip(), user["id"], time.time()),
+    )
+    topic = dict(db.query_one("SELECT * FROM topics WHERE id = ?", (topic_id,)))
+    await hub.send_to_chat(chat_id, {"type": "topic_created", "chat_id": chat_id, "topic": topic})
+    return topic
+
+
+@app.get("/chats/{chat_id}/topics")
+def list_topics(chat_id: str, user: dict = Depends(current_user)):
+    require_member(chat_id, user["id"])
+    rows = db.query_all(
+        "SELECT * FROM topics WHERE chat_id = ? ORDER BY created_at", (chat_id,))
+    return [dict(row) for row in rows]
+
+
+@app.delete("/chats/{chat_id}/topics/{topic_id}")
+async def close_topic(chat_id: str, topic_id: str, user: dict = Depends(current_user)):
+    """Closes a topic (no new posts) rather than deleting it — its messages
+    stay exactly where they are, same "leave the history intact" choice
+    archiving a chat makes. The creator or a manager may close it."""
+    require_member(chat_id, user["id"])
+    topic = db.query_one("SELECT * FROM topics WHERE id = ? AND chat_id = ?", (topic_id, chat_id))
+    if topic is None:
+        raise HTTPException(404, "Topic not found")
+    if topic["created_by"] != user["id"]:
+        require_manager(chat_id, user["id"])
+    db.execute("UPDATE topics SET closed_at = ? WHERE id = ?", (time.time(), topic_id))
+    await hub.send_to_chat(chat_id, {"type": "topic_closed", "chat_id": chat_id, "topic_id": topic_id})
+    return {"closed": True}
+
+
 @app.patch("/chats/{chat_id}/settings")
 def update_chat_settings(chat_id: str, request: ChatSettingsRequest,
                          user: dict = Depends(current_user)):
@@ -3704,16 +4099,23 @@ def clear_chat(chat_id: str, user: dict = Depends(current_user)):
 
 
 @app.put("/chats/{chat_id}/vanish-mode")
-def set_vanish_mode(chat_id: str, enabled: bool = Query(...), user: dict = Depends(current_user)):
+async def set_vanish_mode(chat_id: str, enabled: bool = Query(...), user: dict = Depends(current_user)):
     """
-    A one-sided, Instagram-"Vanish mode"-style preference: turning it on
-    only changes what happens to messages on the caller's OWN screen (see
-    leave_chat_view below) — it is never a shared/mutual chat setting, and
-    the other member(s) are not told and are not affected at all.
+    Instagram-style Vanish mode — a shared, chat-wide setting: whoever
+    flips it applies it for every member of the chat, not just themselves,
+    and everyone currently in the chat is told live so their own UI
+    reflects it immediately. The actual vanishing (see leave_chat_view
+    below) still happens per-member as each of them leaves the chat
+    screen — hiding only what THEY have already seen — but because every
+    member's own vanish_mode flag is now on, that happens for both sides
+    over the course of the conversation instead of just the toggler.
     """
     require_member(chat_id, user["id"])
-    db.execute("UPDATE chat_members SET vanish_mode = ? WHERE chat_id = ? AND user_id = ?",
-               (int(enabled), chat_id, user["id"]))
+    db.execute("UPDATE chat_members SET vanish_mode = ? WHERE chat_id = ?",
+               (int(enabled), chat_id))
+    await hub.send_to_chat(chat_id, {
+        "type": "chat_updated", "chat_id": chat_id, "vanish_mode": enabled,
+    })
     return {"vanish_mode": enabled}
 
 
@@ -3872,35 +4274,39 @@ def remove_chat_lock(chat_id: str, request: SetPinRequest, user: dict = Depends(
     return {"locked": False}
 
 
-def consume_view_once_text_messages(chat_id: str, reader_id: str, up_to_seq: int) -> list[dict]:
+@app.post("/messages/{message_id}/view-once-open")
+async def open_view_once_text(message_id: str, user: dict = Depends(current_user)):
     """
-    View-once TEXT messages have no separate "open" request the way a
-    view-once photo does (see download_file) — there's no file to fetch, so
-    there's nothing to tap. The recipient actually reading it — marking it
-    read — IS the view, so that's what stamps view_once_opened_at here.
-    Scoped to `kind = 'text'` and messages with no attachment_id: a
-    view-once PHOTO/video keeps using its existing tap-to-open flow even
-    though it's the same view_once column, so this must not double-consume it.
+    Explicit "I opened this" gesture for a view-once TEXT message — the
+    text equivalent of GET /uploads/{id}'s tap-to-reveal for a view-once
+    photo/video. Only fires when the recipient actually taps the bubble,
+    not merely because the chat's read watermark passed it (that used to be
+    the trigger, via mark_read, and could blank a message before the
+    recipient had even scrolled to it).
     """
-    rows = db.query_all(
-        """
-        SELECT id FROM messages
-        WHERE chat_id = ? AND seq <= ? AND sender_id != ? AND kind = 'text'
-          AND view_once = 1 AND view_once_opened_at IS NULL
-          AND deleted_at IS NULL AND unsent_at IS NULL
-        """,
-        (chat_id, up_to_seq, reader_id),
+    row = db.query_one("SELECT * FROM messages WHERE id = ?", (message_id,))
+    if row is None or not chatstore.is_member(row["chat_id"], user["id"]):
+        raise HTTPException(404, "Message not found")
+    message = dict(row)
+    if message["kind"] != "text" or not message["view_once"]:
+        raise HTTPException(400, "Not a view-once text message")
+    if message["sender_id"] == user["id"]:
+        raise HTTPException(403, "You cannot reopen a view-once message you sent")
+
+    # Same atomic-claim race protection as download_file's view-once photo
+    # gate: only whichever request's UPDATE actually changes a row wins.
+    claimed = db.execute(
+        "UPDATE messages SET view_once_opened_at = ? WHERE id = ? AND view_once_opened_at IS NULL",
+        (time.time(), message_id),
     )
-    consumed = []
-    for row in rows:
-        claimed = db.execute(
-            "UPDATE messages SET view_once_opened_at = ? WHERE id = ? AND view_once_opened_at IS NULL",
-            (time.time(), row["id"]),
-        )
-        if claimed.rowcount:
-            consumed.append(chatstore.serialise_message(
-                db.query_one("SELECT * FROM messages WHERE id = ?", (row["id"],)), reader_id))
-    return consumed
+    if claimed.rowcount == 0:
+        raise HTTPException(410, "This has already been opened")
+
+    text = message["text"]  # captured before serialise_message blanks it below
+    blanked = chatstore.serialise_message(
+        db.query_one("SELECT * FROM messages WHERE id = ?", (message_id,)), user["id"])
+    await hub.send_to_chat(message["chat_id"], {"type": "message_edited", "message": blanked})
+    return {"text": text}
 
 
 @app.post("/chats/{chat_id}/read")
@@ -3911,15 +4317,6 @@ async def mark_read(chat_id: str, request: ReadRequest, user: dict = Depends(cur
     # watermark at least as far along so a read tick never sits "behind" its
     # own delivery.
     chatstore.set_last_delivered(chat_id, user["id"], request.seq)
-
-    # Fire before the read receipt: a message that's about to be reported as
-    # read should already be blanked by the time anyone hears about it.
-    # "message_edited" (not a new event type) — the frontend already
-    # handles it generically as "replace this message by id," which is
-    # exactly what a freshly-blanked view-once text needs.
-    consumed = consume_view_once_text_messages(chat_id, user["id"], request.seq)
-    for message in consumed:
-        await hub.send_to_chat(chat_id, {"type": "message_edited", "message": message})
 
     # Only tell the room if this user allows read receipts. WhatsApp's rule:
     # switching them off means you stop sending them.
@@ -3989,15 +4386,22 @@ def list_messages(chat_id: str,
                   limit: int = Query(default=50, ge=1, le=200),
                   before_seq: int | None = None,
                   after_seq: int | None = None,
+                  topic_id: str | None = None,
+                  only_general: bool = False,
                   user: dict = Depends(current_user)):
     """
     A page of a chat.
 
     Pass after_seq to catch up after a reconnect: the client sends the highest
     sequence number it holds and receives only what came later.
+
+    topic_id/only_general narrow to one Topic thread — see load_messages.
+    Both omitted (the default) returns every message regardless of topic,
+    unchanged from before Topics existed.
     """
     require_member(chat_id, user["id"])
-    return chatstore.load_messages(chat_id, user["id"], limit, before_seq, after_seq)
+    return chatstore.load_messages(chat_id, user["id"], limit, before_seq, after_seq,
+                                   topic_id, only_general)
 
 
 @app.post("/messages")
@@ -4094,6 +4498,32 @@ async def send_message(
         sticker_id = payload.get("sticker_id")
         if not isinstance(sticker_id, str) or not sticker_id.strip():
             raise HTTPException(400, "A sticker needs a sticker_id")
+    elif request.kind == "gif":
+        # A GIF has no attachment_id of its own — same lightweight
+        # external-URL-in-payload shape MusicPicker's music_url already
+        # uses, rather than downloading and re-hosting Tenor's bytes.
+        gif_url = payload.get("gif_url")
+        if not isinstance(gif_url, str) or not gif_url.startswith("https://"):
+            raise HTTPException(400, "A gif needs an https gif_url")
+    elif request.kind == "product":
+        # Sharing a product INTO a chat copies its current name/price/image
+        # into this message's own payload rather than pointing at the
+        # products row live — so editing or deleting the listing afterward
+        # never rewrites (or blanks) a card someone already sent, same
+        # "snapshot at send time" reasoning as stories.audience_mode.
+        product_id = payload.get("product_id")
+        product = db.query_one(
+            "SELECT * FROM products WHERE id = ? AND owner_id = ?", (product_id, user["id"]))
+        if product is None:
+            raise HTTPException(400, "product_id must be one of your own products")
+        payload = {
+            "product_id": product["id"],
+            "name": product["name"],
+            "description": product["description"],
+            "price_cents": product["price_cents"],
+            "currency": product["currency"],
+            "image_attachment_id": product["image_attachment_id"],
+        }
 
     # An attachment is checked before the message is written, so a bad id fails
     # the send outright instead of leaving a message pointing at nothing.
@@ -4119,6 +4549,20 @@ async def send_message(
         if target is None or target["chat_id"] != request.chat_id:
             raise HTTPException(400, "reply_to_id must be a message in this chat")
 
+    # Same cross-chat-id concern as reply_to_id above, plus a closed topic
+    # refusing new posts (same idea as an archived folder) — but only in a
+    # chat that actually turned Topics on; elsewhere topic_id is silently
+    # meaningless rather than an error, since older/other clients never send it.
+    topic_id = request.topic_id
+    if topic_id and chat["topics_enabled"]:
+        topic = db.query_one("SELECT chat_id, closed_at FROM topics WHERE id = ?", (topic_id,))
+        if topic is None or topic["chat_id"] != request.chat_id:
+            raise HTTPException(400, "topic_id must be a topic in this chat")
+        if topic["closed_at"]:
+            raise HTTPException(400, "This topic is closed")
+    elif not chat["topics_enabled"]:
+        topic_id = None
+
     message, created = chatstore.insert_message(
         chat_id=request.chat_id,
         sender_id=user["id"],
@@ -4130,6 +4574,7 @@ async def send_message(
         disappear_secs=request.disappear_secs,
         view_once=request.view_once,
         silent=request.silent,
+        topic_id=topic_id,
     )
 
     # Bind the file to the message now that the message exists. Only on `created`
@@ -4161,12 +4606,13 @@ async def send_message(
             await notify_offline_members(
                 request.chat_id, user["id"], user["name"],
                 push_preview_text(request.kind, request.text, payload),
+                chat_type=chat["type"],
             )
 
         await dispatch_webhooks(background_tasks, request.chat_id, user["id"], message)
 
         if chat["type"] == "dm":
-            await maybe_send_away_reply(background_tasks, request.chat_id, user["id"])
+            await maybe_send_away_reply(background_tasks, request.chat_id, user["id"], request.text)
 
         if chat["type"] == "broadcast":
             await fan_out_broadcast(chat, user, request.text, request.kind, payload)
@@ -4642,8 +5088,7 @@ def download_file(attachment_id: str, user: dict = Depends(current_user)):
                 raise HTTPException(410, "This has already been opened")
     elif attachment["story_id"]:
         story = db.query_one(
-            "SELECT s.user_id, s.status, u.story_audience FROM stories AS s "
-            "JOIN users AS u ON u.id = s.user_id WHERE s.id = ?",
+            "SELECT user_id, status, audience_mode FROM stories WHERE id = ?",
             (attachment["story_id"],),
         )
         # Same audience /stories itself uses: the author, or anyone who shares
@@ -4654,7 +5099,7 @@ def download_file(attachment_id: str, user: dict = Depends(current_user)):
         visible = (
             story is not None and story["status"] == "live"
             and chatstore.shares_chat_with(user["id"], story["user_id"])
-            and _story_audience_allows(story["user_id"], story["story_audience"], user["id"])
+            and _story_audience_allows(story["user_id"], story["audience_mode"], user["id"])
         )
         if story is None or not (is_author or visible):
             raise HTTPException(404, "File not found")
@@ -5358,14 +5803,18 @@ def create_story(request: StoryRequest, user: dict = Depends(current_user)):
         INSERT INTO stories (id, user_id, text, emoji, background,
                              created_at, expires_at, status, publish_at,
                              kind, link_url, font, font_size, allow_share,
-                             music_url, music_title, music_artist, music_artwork)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             music_url, music_title, music_artist, music_artwork,
+                             audience_mode)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (story_id, user["id"], request.text, request.emoji, request.background,
          now, expires_at, status, publish_at, request.kind, link_url,
          request.font, request.font_size, request.allow_share,
          (request.music_url or "").strip(), (request.music_title or "").strip(),
-         (request.music_artist or "").strip(), (request.music_artwork or "").strip()),
+         (request.music_artist or "").strip(), (request.music_artwork or "").strip(),
+         # Snapshotted now, not read live later — see the audience_mode
+         # column's own migration comment in db.py.
+         user["story_audience"]),
     )
 
     if request.kind in ("photo", "video", "audio"):
@@ -5417,7 +5866,7 @@ def list_stories(user: dict = Depends(current_user)):
     """
     rows = db.query_all(
         """
-        SELECT s.*, u.name, u.avatar_letter, u.color, u.avatar_attachment_id, u.story_audience
+        SELECT s.*, u.name, u.avatar_letter, u.color, u.avatar_attachment_id
         FROM stories AS s
         JOIN users AS u ON u.id = s.user_id
         WHERE s.status = 'live'
@@ -5443,7 +5892,7 @@ def list_stories(user: dict = Depends(current_user)):
     for row in rows:
         row = dict(row)
         if row["user_id"] != user["id"] and not _story_audience_allows(
-            row["user_id"], row["story_audience"], user["id"],
+            row["user_id"], row["audience_mode"], user["id"],
         ):
             continue
         if row["user_id"] in muted:
@@ -5488,6 +5937,66 @@ def list_my_stories(user: dict = Depends(current_user)):
     return result
 
 
+@app.post("/stories/{story_id}/highlight")
+def highlight_story(story_id: str, request: HighlightStoryRequest, user: dict = Depends(current_user)):
+    """
+    Pin one of your own stories past its normal 24-hour lifetime — see
+    scheduler.py's expire_stories, which skips anything with highlighted_at
+    set. Author-only, and only while the story is still live: a story that
+    already expired had its attachment dropped by that same sweep, so
+    there'd be nothing left to keep.
+    """
+    story = db.query_one("SELECT * FROM stories WHERE id = ? AND status = 'live'", (story_id,))
+    if story is None or story["user_id"] != user["id"]:
+        raise HTTPException(404, "Story not found")
+    db.execute(
+        "UPDATE stories SET highlighted_at = ?, highlight_label = ? WHERE id = ?",
+        (time.time(), request.label.strip(), story_id),
+    )
+    return _expand_story(dict(db.query_one("SELECT * FROM stories WHERE id = ?", (story_id,))))
+
+
+@app.delete("/stories/{story_id}/highlight")
+def unhighlight_story(story_id: str, user: dict = Depends(current_user)):
+    """Un-pin it — its already-past expires_at then lets the next sweep
+    retire it normally, same as any other story whose 24 hours are up."""
+    story = db.query_one("SELECT * FROM stories WHERE id = ?", (story_id,))
+    if story is None or story["user_id"] != user["id"]:
+        raise HTTPException(404, "Story not found")
+    db.execute("UPDATE stories SET highlighted_at = NULL, highlight_label = '' WHERE id = ?", (story_id,))
+    return {"highlighted": False}
+
+
+@app.get("/users/{user_id}/highlights")
+def list_highlights(user_id: str, user: dict = Depends(current_user)):
+    """
+    A profile's permanent story reel — same audience rule an ordinary story
+    uses (shares a chat, plus the author's except/only list at the moment
+    THAT story was posted — see stories.audience_mode), just without the
+    24-hour status='live' cutoff that gates the ordinary /stories feed.
+
+    Checked per-highlight rather than once for the whole reel: a highlight
+    keeps whatever privacy it was posted under even if the author's default
+    audience mode has since changed — the same way removing someone from
+    Close Friends on Instagram cuts them off from Close-Friends highlights
+    specifically, not every highlight regardless of how it was shared.
+    """
+    if db.query_one("SELECT 1 FROM users WHERE id = ?", (user_id,)) is None:
+        raise HTTPException(404, "User not found")
+    if user_id != user["id"] and not chatstore.shares_chat_with(user["id"], user_id):
+        return []
+    rows = db.query_all(
+        "SELECT * FROM stories WHERE user_id = ? AND highlighted_at IS NOT NULL "
+        "ORDER BY highlighted_at DESC",
+        (user_id,),
+    )
+    return [
+        _expand_story(dict(row)) for row in rows
+        if row["user_id"] == user["id"]
+        or _story_audience_allows(row["user_id"], row["audience_mode"], user["id"])
+    ]
+
+
 def _visible_live_story_or_404(story_id: str, user_id: str) -> dict:
     """
     Shared by view/react/unreact: the story must exist, be live, and pass
@@ -5498,8 +6007,7 @@ def _visible_live_story_or_404(story_id: str, user_id: str) -> dict:
     actually set.
     """
     story = db.query_one(
-        "SELECT s.*, u.story_audience FROM stories AS s "
-        "JOIN users AS u ON u.id = s.user_id WHERE s.id = ? AND s.status = 'live'",
+        "SELECT * FROM stories WHERE id = ? AND status = 'live'",
         (story_id,),
     )
     if story is None:
@@ -5508,7 +6016,7 @@ def _visible_live_story_or_404(story_id: str, user_id: str) -> dict:
     is_author = story["user_id"] == user_id
     if not is_author and not (
         chatstore.shares_chat_with(user_id, story["user_id"])
-        and _story_audience_allows(story["user_id"], story["story_audience"], user_id)
+        and _story_audience_allows(story["user_id"], story["audience_mode"], user_id)
     ):
         raise HTTPException(404, "Story not found")
     return story
@@ -7362,6 +7870,268 @@ async def music_trending():
         {"key": "devotional", "label": "🙏 Devotional", "query": "devotional songs"},
     ]
     return {"categories": categories}
+
+
+# ── GIF search (Tenor proxy) ─────────────────────────────────────────────────
+# Same "proxy it server-side" reasoning as the music search above — plus this
+# one actually needs a key (TENOR_API_KEY), so it also follows fcm.py's
+# is_configured()-style pattern: absent the env var, the endpoints answer with
+# a clear "not set up" instead of a confusing generic failure, and the rest
+# of the app is completely unaffected either way.
+
+_gif_cache: dict[str, tuple] = {}
+GIF_CACHE_TTL = 3600
+
+
+def gif_search_configured() -> bool:
+    return bool(os.environ.get("TENOR_API_KEY"))
+
+
+@app.get("/api/gifs/search")
+async def gif_search(q: str = "", limit: int = 30):
+    if not gif_search_configured():
+        raise HTTPException(503, "GIF search isn't set up on this server yet")
+
+    cache_key = f"{q}:{limit}"
+    cached = _gif_cache.get(cache_key)
+    if cached and cached[1] > time.time():
+        return cached[0]
+
+    try:
+        params = {
+            "key": os.environ["TENOR_API_KEY"],
+            "q": q.strip() or "trending",
+            "limit": min(limit, 50),
+            "media_filter": "gif,tinygif",
+            "contentfilter": "medium",
+            "client_key": "talkex",
+        }
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get("https://tenor.googleapis.com/v2/search", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception:
+        logger.warning("Tenor search failed", exc_info=True)
+        return {"results": []}
+
+    results = []
+    for item in data.get("results", []):
+        media = item.get("media_formats", {})
+        full = media.get("gif") or {}
+        preview = media.get("tinygif") or full
+        if not full.get("url"):
+            continue
+        results.append({
+            "id": item.get("id"),
+            "gif_url": full["url"],
+            "preview_url": preview.get("url", full["url"]),
+            "width": (full.get("dims") or [0, 0])[0],
+            "height": (full.get("dims") or [0, 0])[1],
+        })
+    result = {"results": results}
+    _gif_cache[cache_key] = (result, time.time() + GIF_CACHE_TTL)
+    return result
+
+
+# ── Inline message translation (Google Cloud Translate proxy) ───────────────
+# Same is_configured()-gated shape as GIF search / FCM above: absent
+# GOOGLE_TRANSLATE_API_KEY, the endpoint answers 503 and the client's
+# "Translate" action shows a "not set up" message instead of a broken tap.
+
+def translate_configured() -> bool:
+    return bool(os.environ.get("GOOGLE_TRANSLATE_API_KEY"))
+
+
+@app.get("/api/translate")
+async def translate_text(text: str, target: str = "en"):
+    if not translate_configured():
+        raise HTTPException(503, "Translation isn't set up on this server yet")
+    text = text.strip()
+    if not text:
+        raise HTTPException(400, "Nothing to translate")
+    if len(text) > 4000:
+        raise HTTPException(400, "Message is too long to translate")
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                "https://translation.googleapis.com/language/translate2",
+                params={"key": os.environ["GOOGLE_TRANSLATE_API_KEY"]},
+                json={"q": text, "target": target, "format": "text"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        translation = data["data"]["translations"][0]
+    except Exception:
+        logger.warning("Translate request failed", exc_info=True)
+        raise HTTPException(502, "Translation failed — try again")
+
+    return {
+        "translated_text": translation["translatedText"],
+        "detected_source_lang": translation.get("detectedSourceLanguage", ""),
+    }
+
+
+# ── SFU (LiveKit) ───────────────────────────────────────────────────────────
+
+def livekit_configured():
+    return bool(os.environ.get("LIVEKIT_API_KEY") and os.environ.get("LIVEKIT_API_SECRET")
+                and os.environ.get("LIVEKIT_URL"))
+
+
+@app.get("/sfu/config")
+async def sfu_config():
+    return {"enabled": livekit_configured(), "url": os.environ.get("LIVEKIT_URL", "")}
+
+
+@app.post("/sfu/token")
+async def sfu_token(request: Request, user: dict = Depends(current_user)):
+    if not livekit_configured():
+        raise HTTPException(503, "SFU not configured — group calls use peer-to-peer mesh")
+    body = await request.json()
+    chat_id = body.get("chat_id", "")
+    if not chat_id:
+        raise HTTPException(400, "chat_id required")
+
+    membership = db.query_one(
+        "SELECT 1 FROM chat_members WHERE chat_id = ? AND user_id = ?", (chat_id, user["id"]))
+    if not membership:
+        raise HTTPException(403, "Not a member of this chat")
+
+    import jwt as pyjwt
+    api_key = os.environ["LIVEKIT_API_KEY"]
+    api_secret = os.environ["LIVEKIT_API_SECRET"]
+
+    now = time.time()
+    grant = {
+        "sub": user["id"],
+        "iss": api_key,
+        "nbf": int(now),
+        "exp": int(now + 86400),
+        "name": user.get("name", ""),
+        "video": {
+            "roomJoin": True,
+            "room": f"talkex_{chat_id}",
+            "canPublish": True,
+            "canSubscribe": True,
+            "canPublishData": True,
+        },
+    }
+    token = pyjwt.encode(grant, api_secret, algorithm="HS256")
+    return {"token": token, "url": os.environ["LIVEKIT_URL"], "room": f"talkex_{chat_id}"}
+
+
+# ── Payments (Razorpay) ─────────────────────────────────────────────────────
+
+RAZORPAY_PLANS = {
+    "business": {"amount_paise": 29900, "label": "TalkEx Business", "duration_days": 30},
+    "business_yearly": {"amount_paise": 299900, "label": "TalkEx Business (Annual)", "duration_days": 365},
+}
+
+def razorpay_configured():
+    return bool(os.environ.get("RAZORPAY_KEY_ID") and os.environ.get("RAZORPAY_KEY_SECRET"))
+
+
+@app.get("/payments/config")
+async def payments_config():
+    return {"configured": razorpay_configured(), "key_id": os.environ.get("RAZORPAY_KEY_ID", ""),
+            "plans": {k: {"amount_paise": v["amount_paise"], "label": v["label"]} for k, v in RAZORPAY_PLANS.items()}}
+
+
+@app.post("/payments/create-order")
+async def create_payment_order(request: Request, user: dict = Depends(current_user)):
+    if not razorpay_configured():
+        raise HTTPException(503, "Payments not configured on this server")
+    body = await request.json()
+    plan_key = body.get("plan", "business")
+    plan = RAZORPAY_PLANS.get(plan_key)
+    if not plan:
+        raise HTTPException(400, f"Unknown plan: {plan_key}")
+
+    import httpx, base64
+    key_id = os.environ["RAZORPAY_KEY_ID"]
+    key_secret = os.environ["RAZORPAY_KEY_SECRET"]
+    auth_header = base64.b64encode(f"{key_id}:{key_secret}".encode()).decode()
+
+    payment_id = secrets.token_hex(12)
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post("https://api.razorpay.com/v1/orders", headers={
+            "Authorization": f"Basic {auth_header}", "Content-Type": "application/json",
+        }, json={
+            "amount": plan["amount_paise"], "currency": "INR",
+            "receipt": payment_id, "notes": {"user_id": user["id"], "plan": plan_key},
+        })
+        if resp.status_code != 200:
+            logger.error("Razorpay order creation failed: %s", resp.text)
+            raise HTTPException(502, "Could not create payment order")
+        order = resp.json()
+
+    conn = db.get_connection()
+    conn.execute(
+        "INSERT INTO payments (id, user_id, razorpay_order_id, plan, amount_paise, currency, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (payment_id, user["id"], order["id"], plan_key, plan["amount_paise"], "INR", time.time()),
+    )
+    conn.commit()
+
+    return {"order_id": order["id"], "amount": plan["amount_paise"], "currency": "INR",
+            "key_id": key_id, "plan": plan_key, "payment_id": payment_id}
+
+
+@app.post("/payments/verify")
+async def verify_payment(request: Request, user: dict = Depends(current_user)):
+    if not razorpay_configured():
+        raise HTTPException(503, "Payments not configured on this server")
+    body = await request.json()
+    razorpay_order_id = body.get("razorpay_order_id", "")
+    razorpay_payment_id = body.get("razorpay_payment_id", "")
+    razorpay_signature = body.get("razorpay_signature", "")
+
+    if not all([razorpay_order_id, razorpay_payment_id, razorpay_signature]):
+        raise HTTPException(400, "Missing payment verification fields")
+
+    key_secret = os.environ["RAZORPAY_KEY_SECRET"]
+    msg = f"{razorpay_order_id}|{razorpay_payment_id}"
+    expected_sig = hmac.new(key_secret.encode(), msg.encode(), hashlib.sha256).hexdigest()
+
+    if not hmac.compare_digest(expected_sig, razorpay_signature):
+        raise HTTPException(400, "Payment verification failed — signature mismatch")
+
+    conn = db.get_connection()
+    row = conn.execute(
+        "SELECT id, plan FROM payments WHERE razorpay_order_id = ? AND user_id = ?",
+        (razorpay_order_id, user["id"]),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Payment record not found")
+
+    now = time.time()
+    plan = RAZORPAY_PLANS.get(row["plan"], RAZORPAY_PLANS["business"])
+    expires_at = now + plan["duration_days"] * 86400
+
+    conn.execute(
+        "UPDATE payments SET razorpay_payment_id = ?, razorpay_signature = ?, status = 'paid', verified_at = ? "
+        "WHERE id = ?",
+        (razorpay_payment_id, razorpay_signature, now, row["id"]),
+    )
+    conn.execute(
+        "UPDATE users SET plan = ?, plan_expires_at = ? WHERE id = ?",
+        (row["plan"], expires_at, user["id"]),
+    )
+    conn.commit()
+
+    return {"success": True, "plan": row["plan"], "expires_at": expires_at}
+
+
+@app.get("/payments/history")
+async def payment_history(user: dict = Depends(current_user)):
+    conn = db.get_connection()
+    rows = conn.execute(
+        "SELECT id, plan, amount_paise, currency, status, created_at, verified_at "
+        "FROM payments WHERE user_id = ? ORDER BY created_at DESC LIMIT 20",
+        (user["id"],),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ── E2EE Key Management ─────────────────────────────────────────────────────

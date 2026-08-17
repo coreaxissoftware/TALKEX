@@ -157,6 +157,7 @@ def insert_message(
     forwarded_from: str = "",
     view_once: bool = False,
     silent: bool = False,
+    topic_id: str | None = None,
 ) -> tuple[dict, bool]:
     """
     Store one message and return it, plus whether it was newly created.
@@ -201,14 +202,14 @@ def insert_message(
                 INSERT INTO messages (
                     id, chat_id, seq, sender_id, kind, text, payload,
                     reply_to_id, forwarded_from, created_at, expires_at, client_msg_id,
-                    view_once, silent
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    view_once, silent, topic_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message_id, chat_id, seq, sender_id, kind, text,
                     json.dumps(payload) if payload else None,
                     reply_to_id, forwarded_from, now, expires_at, client_msg_id,
-                    1 if view_once else 0, 1 if silent else 0,
+                    1 if view_once else 0, 1 if silent else 0, topic_id,
                 ),
             )
     except sqlite3.IntegrityError:
@@ -524,7 +525,8 @@ def reactions_for(message_id: str, viewer_id: str = "") -> list[dict]:
 
 
 def load_messages(chat_id: str, viewer_id: str, limit: int = 50,
-                  before_seq: int | None = None, after_seq: int | None = None) -> list[dict]:
+                  before_seq: int | None = None, after_seq: int | None = None,
+                  topic_id: str | None = None, only_general: bool = False) -> list[dict]:
     """
     Read a page of a chat.
 
@@ -535,6 +537,11 @@ def load_messages(chat_id: str, viewer_id: str, limit: int = 50,
 
     The old endpoint returned every message in the chat on every open, which got
     slower for the whole lifetime of the conversation.
+
+    `topic_id`/`only_general` narrow to one Topic thread (see topics table) —
+    both left at their defaults, every message in the chat comes back
+    regardless of topic, which is exactly today's behavior for a chat that
+    never turned Topics on at all.
     """
     limit = max(1, min(limit, 200))
 
@@ -548,37 +555,44 @@ def load_messages(chat_id: str, viewer_id: str, limit: int = 50,
         "AND m.unsent_at IS NULL "
         "AND m.id NOT IN (SELECT message_id FROM message_hidden_for WHERE user_id = ?)"
     )
+    topic_clause = ""
+    topic_params = ()
+    if only_general:
+        topic_clause = "AND m.topic_id IS NULL"
+    elif topic_id is not None:
+        topic_clause = "AND m.topic_id = ?"
+        topic_params = (topic_id,)
 
     if after_seq is not None:
         rows = db.query_all(
             f"""
             SELECT m.* FROM messages m
-            WHERE m.chat_id = ? AND m.seq > ? {hidden_clause}
+            WHERE m.chat_id = ? AND m.seq > ? {hidden_clause} {topic_clause}
             ORDER BY m.seq ASC
             LIMIT ?
             """,
-            (chat_id, after_seq, viewer_id, limit),
+            (chat_id, after_seq, viewer_id, *topic_params, limit),
         )
     elif before_seq is not None:
         rows = db.query_all(
             f"""
             SELECT m.* FROM messages m
-            WHERE m.chat_id = ? AND m.seq < ? {hidden_clause}
+            WHERE m.chat_id = ? AND m.seq < ? {hidden_clause} {topic_clause}
             ORDER BY m.seq DESC
             LIMIT ?
             """,
-            (chat_id, before_seq, viewer_id, limit),
+            (chat_id, before_seq, viewer_id, *topic_params, limit),
         )
         rows = list(reversed(rows))
     else:
         rows = db.query_all(
             f"""
             SELECT m.* FROM messages m
-            WHERE m.chat_id = ? {hidden_clause}
+            WHERE m.chat_id = ? {hidden_clause} {topic_clause}
             ORDER BY m.seq DESC
             LIMIT ?
             """,
-            (chat_id, viewer_id, limit),
+            (chat_id, viewer_id, *topic_params, limit),
         )
         rows = list(reversed(rows))
 

@@ -12,6 +12,7 @@ just broke.
 
 import base64
 import json
+import logging
 import os
 
 from cryptography.hazmat.primitives import serialization
@@ -19,6 +20,8 @@ from py_vapid import Vapid
 from pywebpush import WebPushException, webpush
 
 import db
+
+logger = logging.getLogger("talkex.push")
 
 VAPID_KEY_PATH = os.path.join(db.DATA_DIR, "vapid_private_key.pem")
 
@@ -79,7 +82,11 @@ def send(subscription: dict, title: str, body: str, data: dict | None = None) ->
         return "ok"
     except WebPushException as error:
         status = getattr(error.response, "status_code", None)
-        return "gone" if status in (404, 410) else "error"
+        if status in (404, 410):
+            return "gone"
+        logger.error("push.send: web push rejected — status=%s body=%s", status,
+                     str(getattr(error.response, "text", ""))[:500])
+        return "error"
     except Exception:
         # A subscription's endpoint is a URL on someone else's server (a real
         # push service in production, whatever a test hands in), and that
@@ -87,5 +94,7 @@ def send(subscription: dict, title: str, body: str, data: dict | None = None) ->
         # WebPushException — DNS failure, connection refused, timeout. None
         # of those are this send's fault, and none should be this send's
         # problem: one bad subscription must never take the whole message
-        # send down with it.
+        # send down with it. Still worth a log line — a systemic issue (bad
+        # VAPID key, outbound network blocked) would otherwise be invisible.
+        logger.exception("push.send: unexpected failure sending web push")
         return "error"

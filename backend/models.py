@@ -147,6 +147,13 @@ class UpdateProfileRequest(BaseModel):
     away_enabled: Optional[bool] = None
     away_message: Optional[str] = Field(default=None, max_length=500)
     calling_enabled: Optional[bool] = None
+    # Per-type push toggles, under the master push subscription itself
+    # (Settings > Notifications > Push notifications, a client-side
+    # subscribe/unsubscribe with no server column of its own). All default
+    # on — see notify_offline_members/notify_incoming_call in main.py.
+    notif_dm: Optional[bool] = None
+    notif_groups: Optional[bool] = None
+    notif_calls: Optional[bool] = None
     link_website: Optional[str] = Field(default=None, max_length=500)
     link_facebook: Optional[str] = Field(default=None, max_length=500)
     link_instagram: Optional[str] = Field(default=None, max_length=500)
@@ -209,6 +216,44 @@ class CreateCannedReplyRequest(BaseModel):
 class CreateTemplateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     content: str = Field(min_length=1, max_length=2000)
+
+
+class CreateLabelRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    color: str = Field(default="#6366f1", max_length=32)
+
+
+class SetChatLabelsRequest(BaseModel):
+    """Replaces the full set of your own labels on this one chat."""
+    label_ids: list[str] = Field(default_factory=list, max_length=20)
+
+
+class CreateProductRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=2000)
+    price_cents: int = Field(default=0, ge=0, le=10_000_000_00)
+    currency: str = Field(default="INR", min_length=3, max_length=3)
+    image_attachment_id: Optional[str] = None
+
+
+class CreateAutoReplyRuleRequest(BaseModel):
+    trigger_text: str = Field(min_length=1, max_length=100)
+    response_text: str = Field(min_length=1, max_length=2000)
+
+
+class UpdateAutoReplyRuleRequest(BaseModel):
+    trigger_text: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    response_text: Optional[str] = Field(default=None, min_length=1, max_length=2000)
+    position: Optional[int] = None
+
+
+class UpdateProductRequest(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    description: Optional[str] = Field(default=None, max_length=2000)
+    price_cents: Optional[int] = Field(default=None, ge=0, le=10_000_000_00)
+    currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
+    image_attachment_id: Optional[str] = None
+    archived: Optional[bool] = None
 
 
 # ── Superadmin ────────────────────────────────────────────────────────────────
@@ -306,6 +351,10 @@ class ChatSettingsRequest(BaseModel):
     draft: Optional[str] = Field(default=None, max_length=4000)
     archived: Optional[bool] = None
     calls_enabled: Optional[bool] = None
+    # One of notifyTone.js's synthesized presets. "default" resets it back
+    # explicitly (a bare omitted/null field is dropped by update_chat_settings'
+    # exclude_none=True and changes nothing); "none" is silent.
+    notify_tone: Optional[Literal["default", "chime", "pop", "marimba", "none"]] = None
 
 
 class DisappearingRequest(BaseModel):
@@ -321,7 +370,7 @@ class SetPinRequest(BaseModel):
 
 MessageKind = Literal[
     "text", "photo", "video", "voice", "document", "location", "contact",
-    "poll", "call", "sticker",
+    "poll", "call", "sticker", "gif", "product",
 ]
 
 
@@ -349,14 +398,31 @@ class SendMessageRequest(BaseModel):
     view_once: bool = False
     silent: bool = False
 
+    # Which Topic (see CreateTopicRequest) this message belongs to, in a
+    # chat that has Topics turned on. NULL/omitted means the "General"
+    # thread — meaningless (and ignored) in a chat without Topics enabled.
+    topic_id: Optional[str] = None
+
 
 class EditMessageRequest(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
 
 
+class CreateTopicRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+
+
 class LiveLocationUpdateRequest(BaseModel):
     lat: float = Field(ge=-90, le=90)
     lng: float = Field(ge=-180, le=180)
+
+
+class SetNearbyRequest(BaseModel):
+    """Opt in/out of Telegram-style People Nearby. lat/lng required when
+    enabling, ignored when turning it off."""
+    enabled: bool
+    lat: Optional[float] = Field(default=None, ge=-90, le=90)
+    lng: Optional[float] = Field(default=None, ge=-180, le=180)
 
 
 # ── Web Push ──────────────────────────────────────────────────────────────────
@@ -459,6 +525,11 @@ class StoryRequest(BaseModel):
     # same WhatsApp-style opt-in shape as a group's "allow members to send
     # messages" toggle, decided per-post rather than once for the account.
     allow_share: bool = False
+
+
+class HighlightStoryRequest(BaseModel):
+    """Pin a story past its normal 24h expiry — see stories.highlighted_at."""
+    label: str = Field(default="", max_length=40)
 
 
 # ── Meetings ──────────────────────────────────────────────────────────────────

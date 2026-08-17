@@ -1,9 +1,11 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Actions, Chats, Contacts, Me, Meetings, Messages, Pins, Report, Scheduled, Search, Uploads, Users,
+  Actions, Chats, Contacts, Me, Meetings, Messages, Pins, Products, Report, Scheduled, Search, Translate,
+  Uploads, Users,
   sendReliably, sendFileReliably, newClientMessageId, meetingLink,
 } from "../api.js";
 import * as offlineDb from "../offlineDb.js";
+import { playNotifyTone, TONE_OPTIONS } from "../notifyTone.js";
 import {
   Av, Button, ChatBackdrop, ContextMenu, CoverImage, EMOJIS, EMOJI_GROUPS, Field, G, I, SRow, SocialLinks,
   Spinner, Toggle,
@@ -15,9 +17,12 @@ import { canvasesToPdfBlob } from "../imageToPdf.js";
 import { STICKERS, STICKERS_BY_ID } from "../stickers.jsx";
 import { shouldAutoDownload } from "../mediaPrefs.js";
 import CameraCapture from "../CameraCapture.jsx";
+import GifPicker from "../GifPicker.jsx";
+import { contactsAvailable, pickContacts } from "../nativeContacts.js";
 import { COUNTRY_CODES, flagFor, samplePlaceholder, splitPhone } from "../countryCodes.js";
 import LocationMap from "../LocationMap.jsx";
 import PhotoEditor from "../PhotoEditor.jsx";
+import VideoTrimmer from "../VideoTrimmer.jsx";
 import QrView from "../QrView.jsx";
 // pdf.js is heavy; load the viewer/editor only when a PDF is actually opened.
 const PdfDoc = lazy(() => import("../PdfDoc.jsx"));
@@ -75,6 +80,26 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   const [selectMode, setSelectMode] = useState(false);
   const [selectedMsgIds, setSelectedMsgIds] = useState(new Set());
   const [pins, setPins] = useState([]);
+  // Translated text keyed by message id — kept local to this screen (never
+  // written back to the message itself, never synced), so it's naturally
+  // gone the moment the chat is reopened rather than something that has to
+  // be explicitly cleared.
+  const [translations, setTranslations] = useState({});
+  // Topics (see topics table / /chats/{id}/topics): "all" is today's
+  // ordinary unfiltered view, so a chat that never turns Topics on behaves
+  // exactly as it always has — this only changes anything once the user
+  // explicitly picks a specific thread from the strip below.
+  const [topics, setTopics] = useState([]);
+  const [activeTopicId, setActiveTopicId] = useState("all");
+  useEffect(() => {
+    if (!chat.topics_enabled) { setTopics([]); setActiveTopicId("all"); return; }
+    Chats.topics(chat.id).then(setTopics).catch(() => {});
+  }, [chat.id, chat.topics_enabled]);
+  const visibleMessages = useMemo(() => {
+    if (activeTopicId === "all") return messages;
+    if (activeTopicId === "general") return messages.filter((m) => !m.topic_id);
+    return messages.filter((m) => m.topic_id === activeTopicId);
+  }, [messages, activeTopicId]);
   // messages.find()/pins.some() inside the per-message render loop below
   // turned an O(n) list render into O(n * (n + pins.length)) — for a chat
   // with a few hundred messages that's on the order of 250k comparisons on
@@ -126,6 +151,11 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   const lastReadEvent = useRef(0);
 
   const highestSeq = messages.reduce((top, message) => Math.max(top, message.seq || 0), 0);
+  // A locked or vanish-mode chat is one you've marked as sensitive — forwarding
+  // its contents elsewhere defeats the point of either setting, so every
+  // forward entry point (bubble button, long-press menu, multi-select,
+  // lightbox) is gated on this rather than just hidden in one of them.
+  const canForwardHere = !chat.is_locked && !chat.vanish_mode;
 
   // Keep ref in sync so the unmount cleanup can read it without depending on state.
   useEffect(() => { inputRef.current = input; }, [input]);
@@ -343,6 +373,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
       const stored = await sendReliably({
         chatId: chat.id, text, replyToId: temporary.reply_to_id, clientMsgId,
         viewOnce: sendingViewOnce, silent: silentSend,
+        topicId: activeTopicId === "all" || activeTopicId === "general" ? null : activeTopicId,
       });
       setMessages((current) =>
         stored
@@ -688,13 +719,17 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
 
   const [uploading, setUploading] = useState(false);
 
-  function sendVoiceNote(blob) {
+  function sendVoiceNote(blob, transcript) {
     // MediaRecorder produces a Blob, not a File — Uploads.create needs
     // something with a filename, so wrap it. The extension is cosmetic; the
     // server trusts the declared content type, not the name, for playback.
     const extension = blob.type.includes("mp4") ? "m4a" : "webm";
     const file = new File([blob], `voice-note.${extension}`, { type: blob.type });
-    sendFile(file, "voice");
+    // The transcript rides in as the message's ordinary text/caption field —
+    // Attachment already renders message.text under a voice note, so this
+    // needs no new rendering path, just a label so it doesn't read as
+    // something the sender deliberately typed.
+    sendFile(file, "voice", transcript ? `📝 ${transcript}` : "");
   }
 
   async function sendFile(file, kindOverride, text = "", viewOnce = false) {
@@ -903,6 +938,52 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
     }
   }
 
+  async function translateMessage(message) {
+    if (!message?.text) return;
+    const target = (navigator.language || "en").split("-")[0];
+    try {
+      const result = await Translate.text(message.text, target);
+      setTranslations((current) => ({ ...current, [message.id]: result.translated_text }));
+    } catch (problem) {
+      toast(problem.status === 503
+        ? "Translation isn't set up on this server yet"
+        : (problem.message || "Could not translate"));
+    }
+  }
+
+  async function sendProduct(product) {
+    try {
+      const stored = await Messages.send({
+        chat_id: chat.id, kind: "product", text: "",
+        payload: { product_id: product.id },
+        client_msg_id: newClientMessageId(),
+      });
+      setMessages((current) => upsertMessage(current, stored));
+      onChanged();
+      setSheet(null);
+    } catch (problem) {
+      toast(problem.message || "Could not share product");
+    }
+  }
+
+  async function sendGif(gif) {
+    try {
+      const stored = await Messages.send({
+        chat_id: chat.id, kind: "gif", text: "",
+        payload: {
+          gif_url: gif.gif_url, preview_url: gif.preview_url,
+          width: gif.width, height: gif.height,
+        },
+        client_msg_id: newClientMessageId(),
+      });
+      setMessages((current) => upsertMessage(current, stored));
+      onChanged();
+      setSheet(null);
+    } catch (problem) {
+      toast(problem.message || "Could not send GIF");
+    }
+  }
+
   async function sendScanPdf(pdfBlob) {
     const pdfFile = new File([pdfBlob], "scan.pdf", { type: "application/pdf" });
     await sendFile(pdfFile, "document");
@@ -1063,15 +1144,17 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
           <div style={{ flex: 1, fontSize: 13, fontWeight: 600 }}>
             {selectedMsgIds.size} selected
           </div>
-          <div onClick={() => {
-            if (!selectedMsgIds.size) return;
-            setForwarding({ ids: [...selectedMsgIds] });
-            setSelectMode(false);
-            setSelectedMsgIds(new Set());
-          }} style={{ cursor: selectedMsgIds.size ? "pointer" : "default", opacity: selectedMsgIds.size ? 1 : 0.4 }}
-               title="Forward selected">
-            {I.send(G.accent, 18)}
-          </div>
+          {canForwardHere && (
+            <div onClick={() => {
+              if (!selectedMsgIds.size) return;
+              setForwarding({ ids: [...selectedMsgIds] });
+              setSelectMode(false);
+              setSelectedMsgIds(new Set());
+            }} style={{ cursor: selectedMsgIds.size ? "pointer" : "default", opacity: selectedMsgIds.size ? 1 : 0.4 }}
+                 title="Forward selected">
+              {I.send(G.accent, 18)}
+            </div>
+          )}
           <div onClick={async () => {
             if (!selectedMsgIds.size) return;
             await Promise.all([...selectedMsgIds].map((id) => Messages.hide(id)));
@@ -1084,6 +1167,12 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
             {I.trash(G.red, 18)}
           </div>
         </div>
+      )}
+
+      {chat.topics_enabled && (
+        <TopicStrip topics={topics} activeTopicId={activeTopicId} onSelect={setActiveTopicId}
+                    onCreated={(topic) => setTopics((current) => [...current, topic])}
+                    chatId={chat.id} toast={toast}/>
       )}
 
       <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
@@ -1139,7 +1228,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
             </div>
           </div>
         )}
-        {loading ? <Spinner/> : messages.map((message) => (
+        {loading ? <Spinner/> : visibleMessages.map((message) => (
           message.kind === "system" ? (
             <div key={message.id} style={{ textAlign: "center", margin: "8px 0" }}>
               <span style={{
@@ -1166,6 +1255,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
             )}
             <div style={{ flex: 1 }}>
               <Bubble message={message} me={me}
+                      translatedText={translations[message.id]}
                       replyTarget={messagesById.get(message.reply_to_id)}
                       meetingUpdates={meetingUpdates}
                       isPinned={pinnedIds.has(message.id)}
@@ -1187,8 +1277,12 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
                           setMenuFor(message);
                         }
                       }}
+                      onSwipeReply={() => {
+                        if (message.pending || message.queued) return;
+                        setReplyTo(message);
+                      }}
                       onVote={(index) => vote(message, index)}
-                      onForward={() => setForwarding(message)}
+                      onForward={canForwardHere ? () => setForwarding(message) : undefined}
                       onOpenMedia={openMedia}
                       signature={chat.signature_enabled && chat.type === "channel"
                         ? (members.find((m) => m.id === message.sender_id)?.name || "")
@@ -1239,6 +1333,8 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         onContact={() => setSheet("contact")}
         onPoll={() => setSheet("poll")}
         onSticker={() => setSheet("sticker")}
+        onGif={() => setSheet("gif")}
+        onProduct={() => setSheet("product")}
         onScanCaptured={(file) => { setScanFile(file); setSheet("scanEdit"); }}
         onFilesPicked={(files, kindOverride) => {
           setMediaPreview({ files, kindOverride });
@@ -1261,8 +1357,9 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
           onHide={() => hideForMe(menuFor)}
           onPin={() => togglePin(menuFor)}
           onStar={() => toggleStar(menuFor)}
-          onForward={() => { setForwarding(menuFor); setMenuFor(null); }}
-          onShare={() => { shareMessage(menuFor); setMenuFor(null); }}
+          onForward={canForwardHere ? () => { setForwarding(menuFor); setMenuFor(null); } : undefined}
+          onShare={canForwardHere ? () => { shareMessage(menuFor); setMenuFor(null); } : undefined}
+          onTranslate={() => { translateMessage(menuFor); setMenuFor(null); }}
           onCopy={() => {
             navigator.clipboard?.writeText(menuFor.text || "");
             toast("Copied");
@@ -1290,7 +1387,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         <ChatMediaLightbox items={mediaMessages} index={lightboxIndex}
                            onIndexChange={setLightboxIndex} onClose={() => setLightboxIndex(null)}
                            me={me} members={members}
-                           onForward={(m) => { setLightboxIndex(null); setForwarding(m); }}
+                           onForward={canForwardHere ? (m) => { setLightboxIndex(null); setForwarding(m); } : undefined}
                            toast={toast}/>
       )}
 
@@ -1328,6 +1425,14 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
 
       {sheet === "sticker" && (
         <StickerPickerSheet onClose={() => setSheet(null)} onPick={sendSticker}/>
+      )}
+
+      {sheet === "gif" && (
+        <GifPicker onClose={() => setSheet(null)} onSelect={sendGif}/>
+      )}
+
+      {sheet === "product" && (
+        <ProductPickerSheet onClose={() => setSheet(null)} onPick={sendProduct}/>
       )}
 
       {sheet === "location" && (
@@ -1818,8 +1923,11 @@ function LinkPreview({ text, mine }) {
   );
 }
 
-function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead, isDelivered, signature,
-                  commentsOn, onComments, onLongPress, onVote, onForward, onOpenMedia, onCallAgain, onJoinMeeting, toast }) {
+const SWIPE_REPLY_TRIGGER = 56;
+const SWIPE_REPLY_MAX = 74;
+
+function Bubble({ message, me, translatedText, replyTarget, meetingUpdates, isPinned, isRead, isDelivered, signature,
+                  commentsOn, onComments, onLongPress, onSwipeReply, onVote, onForward, onOpenMedia, onCallAgain, onJoinMeeting, toast }) {
   const mine = message.sender_id === me.id;
   const gone = message.deleted_at || message.expired;
   // A photo/video shows nearly edge-to-edge like WhatsApp — the bubble shrinks
@@ -1837,21 +1945,44 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead, is
   const longPressTimer = useRef(null);
   const longPressFired = useRef(false);
   const pressStart = useRef({ x: 0, y: 0 });
+  // Swipe-to-reply (WhatsApp-style): dragging a bubble rightward with a
+  // touch pointer reveals a reply arrow and, past SWIPE_REPLY_TRIGGER,
+  // releasing sets this message as the reply target directly — no menu.
+  // swipeAxis stays null until the gesture clearly commits to horizontal
+  // (vs. the list's normal vertical scroll), so a touch-scroll is never
+  // hijacked; only once committed do we capture the pointer and cancel the
+  // long-press timer, mirroring ChatList's ChatRow swipe-to-pin gesture.
+  const swipeAxis = useRef(null);
+  const [dragX, setDragX] = useState(0);
+  const canSwipe = Boolean(onSwipeReply) && !message.pending && !message.queued && !gone;
 
   function handlePointerDown(event) {
     if (event.pointerType !== "touch") return;
     longPressFired.current = false;
     pressStart.current = { x: event.clientX, y: event.clientY };
+    swipeAxis.current = null;
     longPressTimer.current = setTimeout(() => {
       longPressFired.current = true;
       onLongPress();
     }, 500);
   }
   function handlePointerMove(event) {
-    if (!longPressTimer.current) return;
-    if (Math.abs(event.clientX - pressStart.current.x) > 8 || Math.abs(event.clientY - pressStart.current.y) > 8) {
+    if (event.pointerType !== "touch") return;
+    const dx = event.clientX - pressStart.current.x;
+    const dy = event.clientY - pressStart.current.y;
+    if (longPressTimer.current && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
       clearTimeout(longPressTimer.current);
       longPressTimer.current = null;
+    }
+    if (!canSwipe) return;
+    if (swipeAxis.current === null) {
+      if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
+        swipeAxis.current = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+        if (swipeAxis.current === "x") event.currentTarget.setPointerCapture?.(event.pointerId);
+      }
+    }
+    if (swipeAxis.current === "x") {
+      setDragX(Math.max(0, Math.min(SWIPE_REPLY_MAX, dx)));
     }
   }
   function clearPressTimer() {
@@ -1870,12 +2001,32 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead, is
       onLongPress();
     }
     longPressFired.current = false;
+    if (swipeAxis.current === "x" && dragX >= SWIPE_REPLY_TRIGGER) onSwipeReply?.();
+    swipeAxis.current = null;
+    setDragX(0);
+  }
+  function handlePointerCancel() {
+    clearPressTimer();
+    swipeAxis.current = null;
+    setDragX(0);
   }
   const pressHandlers = {
     onPointerDown: handlePointerDown, onPointerMove: handlePointerMove,
-    onPointerUp: handlePointerUp, onPointerCancel: clearPressTimer,
+    onPointerUp: handlePointerUp, onPointerCancel: handlePointerCancel,
     onContextMenu: (event) => { event.preventDefault(); onLongPress(); },
   };
+  const swipeStyle = dragX ? {
+    transform: `translateX(${dragX}px)`,
+    transition: swipeAxis.current === "x" ? "none" : "transform 0.18s ease",
+  } : undefined;
+  const swipeReplyIcon = dragX > 0 && (
+    <div style={{
+      position: "absolute", left: -34, top: "50%", transform: "translateY(-50%)",
+      opacity: Math.min(1, dragX / SWIPE_REPLY_TRIGGER),
+      width: 26, height: 26, borderRadius: "50%", background: G.card,
+      display: "flex", alignItems: "center", justifyContent: "center",
+    }}>{I.reply(G.muted, 14)}</div>
+  );
 
   // The little "⌄" WhatsApp Web shows at a bubble's corner on hover — a
   // direct-click alternative to right-click/long-press, desktop-only by
@@ -1898,9 +2049,11 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead, is
   if (message.kind === "sticker" && !gone) {
     return (
       <div id={`msg-${message.id}`} {...pressHandlers} style={{
-             display: "flex", flexDirection: "column",
+             position: "relative", display: "flex", flexDirection: "column",
              alignItems: mine ? "flex-end" : "flex-start", marginBottom: 8, cursor: "pointer",
+             ...swipeStyle,
            }}>
+        {swipeReplyIcon}
         <StickerMessage message={message}/>
         <span style={{ fontSize: 10.5, color: G.muted, marginTop: 2 }}>{clockTime(message.created_at)}</span>
       </div>
@@ -1921,7 +2074,10 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead, is
           background: mine ? G.accent : G.card,
           border: mine ? "none" : `1px solid ${G.border}`,
           cursor: "pointer",
+          touchAction: "pan-y",
+          ...swipeStyle,
         }}>
+        {swipeReplyIcon}
 
         <div ref={chevronRef} onClick={(event) => { event.stopPropagation(); onLongPress(); }} style={{
           position: "absolute", top: 2, right: mine ? 2 : "auto", left: mine ? "auto" : 2,
@@ -1965,6 +2121,12 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead, is
           </div>
         ) : message.kind === "poll" ? (
           <Poll message={message} mine={mine} onVote={onVote}/>
+        ) : message.kind === "gif" ? (
+          <img src={message.payload?.gif_url} alt="GIF" style={{
+            maxWidth: "100%", maxHeight: 280, borderRadius: 10, display: "block",
+          }}/>
+        ) : message.kind === "product" ? (
+          <ProductCard message={message} mine={mine}/>
         ) : ["photo", "video", "voice", "document"].includes(message.kind) ? (
           <>
             {message.view_once && !message.payload?._localUrl
@@ -1992,33 +2154,25 @@ function Bubble({ message, me, replyTarget, meetingUpdates, isPinned, isRead, is
         ) : message.kind === "call" ? (
           <CallCard message={message} mine={mine} onCallAgain={onCallAgain}/>
         ) : message.kind === "text" && message.view_once ? (
-          message.view_once_consumed ? (
-            // Same "opened" treatment a view-once photo gets once it's been
-            // seen — the text itself is gone server-side by this point
-            // (chatstore.serialise_message blanks it the moment
-            // mark_read's consume_view_once_text_messages stamps it), so
-            // there's nothing left to render but the fact that there was
-            // something here.
-            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13.5, fontStyle: "italic", color: mine ? "#ffffff99" : G.muted }}>
-              {I.eye(mine ? "#ffffff99" : G.muted, 14)}
-              <span>Opened</span>
-            </div>
-          ) : (
-            <div>
-              <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 4, fontSize: 11, fontWeight: 600, color: mine ? "#ffffffcc" : G.accentText }}>
-                {I.eye(mine ? "#ffffffcc" : G.accentText, 13)}
-                <span>View once</span>
-              </div>
-              <div style={{ fontSize: 14.5, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>
-                {renderWithMentions(message.text, mine)}
-              </div>
-            </div>
-          )
+          <ViewOnceText message={message} mine={mine}/>
         ) : (
           <>
             <div style={{ fontSize: 14.5, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>
               {renderWithMentions(message.text, mine)}
             </div>
+            {translatedText && (
+              <div style={{
+                marginTop: 6, paddingTop: 6, borderTop: `1px solid ${mine ? "#ffffff26" : G.border}`,
+              }}>
+                <div style={{
+                  fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4,
+                  color: mine ? "#ffffff99" : G.muted, marginBottom: 2,
+                }}>Translated</div>
+                <div style={{ fontSize: 14.5, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>
+                  {renderWithMentions(translatedText, mine)}
+                </div>
+              </div>
+            )}
             <LinkPreview text={message.text} mine={mine}/>
           </>
         )}
@@ -2244,6 +2398,45 @@ function ContactMessage({ message, mine }) {
   );
 }
 
+function ProductCard({ message, mine }) {
+  const { name, description, price_cents: priceCents, currency, image_attachment_id: imageId } =
+    message.payload || {};
+  const [blobUrl, setBlobUrl] = useState(null);
+
+  // Downloading requires the bearer token, which a plain <img src> can't
+  // carry — same reason Attachment fetches its file as a blob instead of
+  // pointing an <img> straight at /uploads/{id}.
+  useEffect(() => {
+    if (!imageId) return undefined;
+    let cancelled = false;
+    Uploads.fetchBlobUrl(imageId).then((url) => { if (!cancelled) setBlobUrl(url); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [imageId]);
+  useEffect(() => () => { if (blobUrl) URL.revokeObjectURL(blobUrl); }, [blobUrl]);
+
+  if (!name) {
+    return <div style={{ fontSize: 13, fontStyle: "italic", opacity: 0.7 }}>Product unavailable</div>;
+  }
+  return (
+    <div style={{ minWidth: 200, maxWidth: 240 }}>
+      {blobUrl && (
+        <img src={blobUrl} alt={name} style={{
+          width: "100%", height: 140, objectFit: "cover", borderRadius: 8, marginBottom: 8, display: "block",
+        }}/>
+      )}
+      <div style={{ fontSize: 14.5, fontWeight: 700 }}>{name}</div>
+      <div style={{ fontSize: 13.5, fontWeight: 600, color: mine ? "#ffffffcc" : G.accentText, marginTop: 2 }}>
+        {currency === "INR" ? "₹" : (currency || "") + " "}{((priceCents || 0) / 100).toFixed(2)}
+      </div>
+      {description && (
+        <div style={{ fontSize: 12.5, color: mine ? "#ffffffaa" : G.muted, marginTop: 4 }}>
+          {description}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const CALL_STATUS_LABEL = {
   completed: "Call ended",
   declined: "Declined",
@@ -2360,6 +2553,85 @@ function ViewOnceAttachment({ message, mine }) {
       <div style={{ fontSize: 13.5, fontWeight: 600 }}>
         {revealing ? "Opening…" : `Tap to view ${message.kind === "video" ? "video" : "photo"} · once`}
       </div>
+    </div>
+  );
+}
+
+/**
+ * A view-once TEXT message. Mirrors ViewOnceAttachment's tap-to-reveal gate:
+ * the recipient's tap is what spends the one view (POST .../view-once-open),
+ * not merely the chat's read watermark passing it — that used to be the
+ * trigger (mark_read) and could blank the text before the recipient had even
+ * scrolled to it. The sender's own copy never needed a view to spend, so it
+ * keeps rendering plainly like it always has, until the recipient opens it.
+ */
+function ViewOnceText({ message, mine }) {
+  const [revealedText, setRevealedText] = useState(null);
+  const [revealing, setRevealing] = useState(false);
+  const [gone, setGone] = useState(false);
+
+  // Checked first so the realtime "message_edited" broadcast that follows a
+  // successful reveal (which blanks message.text and flips
+  // view_once_consumed for everyone) doesn't hide the text we just fetched.
+  if (revealedText != null) {
+    return (
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 4, fontSize: 11, fontWeight: 600, color: G.accentText }}>
+          {I.eye(G.accentText, 13)}
+          <span>View once</span>
+        </div>
+        <div style={{ fontSize: 14.5, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>
+          {renderWithMentions(revealedText, mine)}
+        </div>
+      </div>
+    );
+  }
+
+  if (mine) {
+    return (
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 4, fontSize: 11, fontWeight: 600, color: "#ffffffcc" }}>
+          {I.eye("#ffffffcc", 13)}
+          <span>View once</span>
+        </div>
+        <div style={{ fontSize: 14.5, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>
+          {renderWithMentions(message.text, mine)}
+        </div>
+      </div>
+    );
+  }
+
+  if (gone || message.view_once_consumed) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13.5, fontStyle: "italic", color: G.muted }}>
+        {I.eye(G.muted, 14)}
+        <span>Opened</span>
+      </div>
+    );
+  }
+
+  async function reveal() {
+    if (revealing) return;
+    setRevealing(true);
+    try {
+      const { text } = await Messages.openViewOnce(message.id);
+      setRevealedText(text);
+    } catch {
+      setGone(true);
+    } finally {
+      setRevealing(false);
+    }
+  }
+
+  return (
+    <div onClick={reveal} style={{
+      display: "flex", alignItems: "center", gap: 8, padding: "4px 2px",
+      cursor: revealing ? "default" : "pointer",
+    }}>
+      {revealing ? <Spinner small/> : I.eye(G.accentText, 16)}
+      <span style={{ fontSize: 13.5, fontWeight: 600, color: G.accentText }}>
+        {revealing ? "Opening…" : "Tap to view · once"}
+      </span>
     </div>
   );
 }
@@ -2807,8 +3079,9 @@ const MAX_ATTACHMENT_BYTES = 256 * 1024 * 1024;
 function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
                     disappearSecs, editing, members, toast, viewOnce, onToggleViewOnce,
                     canSilent, silent, onToggleSilent,
-                    onFile, onLocation, onContact, onPoll, onSticker, onScanCaptured, onFilesPicked }) {
-  const voice = useVoiceRecorder((blob) => onVoice(blob));
+                    onFile, onLocation, onContact, onPoll, onSticker, onGif, onProduct,
+                    onScanCaptured, onFilesPicked }) {
+  const voice = useVoiceRecorder((blob, transcript) => onVoice(blob, transcript));
   const enterToSend = useEnterToSend();
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
@@ -2927,7 +3200,12 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
 
   return (
     <div style={{
-      position: "relative", display: "flex", alignItems: "center", gap: 8, padding: "10px 12px",
+      position: "relative", display: "flex", alignItems: "center", gap: 8,
+      paddingTop: 10, paddingLeft: 12, paddingRight: 12,
+      // Reserve the device's own bottom inset (gesture bar / home indicator)
+      // so the composer never sits underneath it — a plain 10px was enough
+      // on some phones but got covered by the OS nav bar on others.
+      paddingBottom: "max(10px, env(safe-area-inset-bottom))",
       borderTop: `1px solid ${G.border}`, background: G.surface,
       // Lift the composer (and the emoji/attach/quick-reply panel it hosts)
       // above the tap-catcher below while a panel is open, so the input and its
@@ -2946,7 +3224,7 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
       {attachOpen && (
         <AttachPanel onClose={() => setAttachOpen(false)}
                      onFile={onFile} onLocation={onLocation} onContact={onContact}
-                     onPoll={onPoll} onSticker={onSticker}
+                     onPoll={onPoll} onSticker={onSticker} onGif={onGif} onProduct={onProduct}
                      onScanCaptured={onScanCaptured} onFilesPicked={onFilesPicked}/>
       )}
 
@@ -3004,16 +3282,6 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
       <IconButton onClick={onSchedule} label="Schedule this message">
         {I.clock(G.sub, 20)}
       </IconButton>
-      {!editing && (
-        <IconButton onClick={onToggleViewOnce}
-                    label={viewOnce ? "View once is on for this message" : "Send as view once"}
-                    style={{
-                      borderRadius: "50%",
-                      background: viewOnce ? G.accentSoft : "transparent",
-                    }}>
-          {I.eye(viewOnce ? G.accent : G.sub, 20)}
-        </IconButton>
-      )}
       {!editing && canSilent && (
         <IconButton onClick={onToggleSilent}
                     label={silent ? "Silent: won't notify subscribers" : "Post silently (no notification)"}
@@ -3044,6 +3312,16 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
           maxHeight: 120, overflowY: "auto",
         }}/>
 
+      {!editing && (
+        <IconButton onClick={onToggleViewOnce}
+                    label={viewOnce ? "View once is on for this message" : "Send as view once"}
+                    style={{
+                      borderRadius: "50%",
+                      background: viewOnce ? G.accentSoft : "transparent",
+                    }}>
+          {I.eye(viewOnce ? G.accent : G.sub, 20)}
+        </IconButton>
+      )}
       {value.trim() ? (
         <button onClick={onSend} style={{
           width: 42, height: 42, borderRadius: "50%", border: "none", cursor: "pointer",
@@ -3170,7 +3448,7 @@ function MenuRow({ icon, label, danger, onClick }) {
  */
 function MessageMenu({ message, me, isModerator, reactionsEnabled = true, isPinned, isStarred, onClose, onReact, onReply,
                       onEdit, onUnsend, onDeleteForEveryone, onHide, onPin, onStar, onForward, onShare,
-                      onCopy, onSelect, onDownload, onInfo }) {
+                      onCopy, onSelect, onDownload, onInfo, onTranslate }) {
   const mine = message.sender_id === me.id;
   const hasAttachment = Boolean(message.payload?.attachment_id);
   const canShare = typeof navigator !== "undefined" && navigator.share && !message.deleted_at;
@@ -3191,9 +3469,11 @@ function MessageMenu({ message, me, isModerator, reactionsEnabled = true, isPinn
     mine && !message.deleted_at && { key: "info", label: "Message info", icon: I.info, onClick: onInfo },
     { key: "reply", label: "Reply", icon: I.reply, onClick: onReply },
     message.text && { key: "copy", label: "Copy", icon: I.copy, onClick: onCopy },
-    { key: "forward", label: "Forward", icon: I.fwd, onClick: onForward },
+    !mine && message.text && !message.deleted_at
+      && { key: "translate", label: "Translate", icon: I.globe, onClick: onTranslate },
+    onForward && { key: "forward", label: "Forward", icon: I.fwd, onClick: onForward },
     hasAttachment && !message.deleted_at && { key: "download", label: "Download", icon: I.download, onClick: onDownload },
-    canShare && { key: "share", label: "Share", icon: I.share, onClick: onShare },
+    canShare && onShare && { key: "share", label: "Share", icon: I.share, onClick: onShare },
     !message.deleted_at && { key: "pin", label: isPinned ? "Unpin" : "Pin", icon: I.pin, onClick: onPin },
     !message.deleted_at && { key: "star", label: isStarred ? "Unstar" : "Star", icon: isStarred ? I.starFill : I.star, onClick: onStar },
     { key: "select", label: "Select", icon: I.select, onClick: onSelect },
@@ -3578,7 +3858,7 @@ function PollSheet({ chat, onClose, toast, onCreated }) {
 // action closes the panel; the ones that open a follow-up sheet (location,
 // contact, poll, sticker, caption preview, scan) do so through the parent's
 // handlers, which move ChatView's own `sheet` state.
-function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker,
+function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker, onGif, onProduct,
                        onScanCaptured, onFilesPicked }) {
   const [cameraOpen, setCameraOpen] = useState(false);
   const galleryInput = useRef(null);
@@ -3643,6 +3923,8 @@ function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker
     { label: "Audio", icon: I.musicNote, color: "#f59e0b", action: () => audioInput.current?.click() },
     { label: "Poll", icon: I.poll, color: "#f97316", action: () => { onPoll(); onClose(); } },
     { label: "Sticker", icon: I.sticker, color: "#a855f7", action: () => { onSticker(); onClose(); } },
+    { label: "GIF", icon: I.image, color: "#0ea5e9", action: () => { onGif(); onClose(); } },
+    { label: "Catalog", icon: I.tag, color: "#22c55e", action: () => { onProduct(); onClose(); } },
   ];
 
   if (cameraOpen) {
@@ -3697,6 +3979,7 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
   const [previewUrl, setPreviewUrl] = useState(null);
   const [viewOnce, setViewOnce] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [trimming, setTrimming] = useState(false);
   // Editing replaces this sheet's own working copy of the file(s) — the
   // caller's original array is left alone, so cancelling an edit can't
   // ever lose or mutate what was actually picked.
@@ -3710,6 +3993,7 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
   // a time keeps the crop/filter tool's scope to what it can actually do
   // well, rather than a half-built "apply to all" mode.
   const canEdit = workingFiles.length === 1 && isImage;
+  const canTrim = workingFiles.length === 1 && isVideo;
 
   useEffect(() => {
     if (!isImage && !isVideo) return;
@@ -3736,6 +4020,13 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
     );
   }
 
+  if (trimming) {
+    return (
+      <VideoTrimmer file={firstFile} onCancel={() => setTrimming(false)}
+                    onDone={(trimmed) => { setWorkingFiles([trimmed]); setTrimming(false); }}/>
+    );
+  }
+
   return (
     <Sheet title={workingFiles.length > 1 ? `${workingFiles.length} files` : (firstFile?.name || "Send file")}
            onClose={onClose}>
@@ -3755,10 +4046,19 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
             )}
           </>
         ) : isVideo && previewUrl ? (
-          <video src={previewUrl} controls style={{
-            maxWidth: "100%", maxHeight: 220, borderRadius: 10,
-            filter: viewOnce ? "blur(14px)" : "none",
-          }}/>
+          <>
+            <video src={previewUrl} controls style={{
+              maxWidth: "100%", maxHeight: 220, borderRadius: 10,
+              filter: viewOnce ? "blur(14px)" : "none",
+            }}/>
+            {canTrim && (
+              <div onClick={() => setTrimming(true)} title="Trim video" style={{
+                position: "absolute", top: 6, right: 6, width: 32, height: 32, borderRadius: "50%",
+                background: "#00000099", display: "flex", alignItems: "center", justifyContent: "center",
+                cursor: "pointer",
+              }}>{I.edit("#fff", 16)}</div>
+            )}
+          </>
         ) : (
           <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0" }}>
             {I.doc(G.accent, 28)}
@@ -4052,12 +4352,12 @@ function ScanEditSheet({ file, onClose, onSend, toast }) {
   );
 }
 
-// The Contact Picker API is a one-shot, user-gesture-triggered picker with
-// no background "sync" (a website never gets standing address-book access)
-// — Android Chrome/Edge only as of this writing. Same feature-detect
-// Discover.jsx's importFromDevice already uses.
-const canPickDeviceContacts = typeof navigator !== "undefined"
-  && "contacts" in navigator && "ContactsManager" in window;
+// pickContacts() is a one-shot, user-gesture-triggered picker with no
+// background "sync" (an app never gets standing address-book access) —
+// native Android uses a real plugin+permission, everywhere else falls back
+// to the browser's own Contact Picker API. Same helper Discover.jsx's
+// importFromDevice uses — see nativeContacts.js.
+const canPickDeviceContacts = contactsAvailable();
 
 /**
  * Picking a contact to share into a chat, WhatsApp-style: a searchable list
@@ -4093,7 +4393,7 @@ function ContactSheet({ onClose, onSave, toast }) {
 
   async function importFromDevice() {
     try {
-      const picked = await navigator.contacts.select(["name", "tel"], { multiple: true });
+      const picked = await pickContacts();
       let imported = 0;
       for (const person of picked) {
         const personName = person.name?.[0]?.trim();
@@ -4483,7 +4783,16 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
   const [archived, setArchived] = useState(Boolean(chat.archived));
   const [callsEnabled, setCallsEnabled] = useState(Boolean(chat.calls_enabled));
   const [vanishMode, setVanishMode] = useState(Boolean(chat.vanish_mode));
+  // Vanish mode is chat-wide now — the OTHER member flipping it shows up
+  // here as a fresh `chat` prop (App.jsx refetches the open chat on its
+  // own chat_updated event), not just when this device is the one that
+  // toggled it. useState's initial value alone would miss that.
+  useEffect(() => { setVanishMode(Boolean(chat.vanish_mode)); }, [chat.vanish_mode]);
   const [muteSheet, setMuteSheet] = useState(false);
+  const [toneSheet, setToneSheet] = useState(false);
+  const [notifyTone, setNotifyTone] = useState(chat.notify_tone || "default");
+  const [labelSheet, setLabelSheet] = useState(false);
+  const [chatLabels, setChatLabels] = useState(chat.labels || []);
   const [mediaSheet, setMediaSheet] = useState(false);
   const [inviteSheet, setInviteSheet] = useState(false);
   const [mutedUntil, setMutedUntil] = useState(chat.muted_until || 0);
@@ -4493,6 +4802,7 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
   const [reactionsOn, setReactionsOn] = useState(chat.reactions_enabled !== 0);
   const [commentsOn, setCommentsOn] = useState(chat.comments_enabled !== 0);
   const [adminsOnlySend, setAdminsOnlySend] = useState(chat.send_policy === "admins");
+  const [topicsOn, setTopicsOn] = useState(Boolean(chat.topics_enabled));
   const [editingInfo, setEditingInfo] = useState(false);
   const [infoForm, setInfoForm] = useState({ name: chat.name || "", description: chat.description || "" });
   const [handle, setHandle] = useState(chat.public_username || "");
@@ -4562,6 +4872,60 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
       toast("Contact deleted");
     } catch (problem) {
       toast(problem.message || "Could not delete contact");
+    }
+  }
+
+  const [exportBusy, setExportBusy] = useState(false);
+
+  // A plain-text transcript, same shape WhatsApp's own "export chat without
+  // media" produces — the honest scope for a client-only export with no new
+  // backend storage: message content is what "will I lose everything
+  // switching phones" is actually about, not the attachment bytes
+  // themselves (those would need a zip of every file, a much bigger and
+  // slower operation this button doesn't attempt).
+  async function exportChat() {
+    if (exportBusy) return;
+    setExportBusy(true);
+    try {
+      const all = [];
+      let page = await Messages.list(chat.id, 200);
+      all.unshift(...page);
+      // Messages.list returns newest-last; page backward via the oldest
+      // seq on hand until the server has nothing older left to give.
+      while (page.length > 0 && all.length < 20000) {
+        const oldestSeq = page[0].seq;
+        page = await Messages.before(chat.id, oldestSeq, 200);
+        if (page.length === 0) break;
+        all.unshift(...page);
+      }
+
+      // Messages carry only sender_id — names come from the member list
+      // (fetched for groups/channels/communities as `full`) or, for a DM,
+      // the peer's name is just the chat's own name.
+      const nameFor = (id) => {
+        if (id === me.id) return "You";
+        return full?.members?.find((mem) => mem.id === id)?.name || chat.name || "Them";
+      };
+      const lines = all.map((m) => {
+        const when = new Date((m.created_at || 0) * 1000).toLocaleString();
+        const who = nameFor(m.sender_id);
+        const body = m.deleted_at ? "[deleted]"
+          : m.kind === "text" ? (m.text || "")
+          : `[${m.kind}]${m.text ? " " + m.text : ""}`;
+        return `[${when}] ${who}: ${body}`;
+      });
+      const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `talkex-${(chat.name || "chat").replace(/[^\w-]+/g, "_")}.txt`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast(`Exported ${all.length} messages`);
+    } catch {
+      toast("Could not export this chat");
+    } finally {
+      setExportBusy(false);
     }
   }
 
@@ -4953,6 +5317,13 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
               {mutedUntil > Date.now() / 1000 ? "On" : "Off"}
             </span>}/>
 
+      <SRow icon={I.bell(G.accent, 18)} label="Notification sound"
+            sub="For this chat, while the app is open"
+            onClick={() => setToneSheet(true)}
+            right={<span style={{ fontSize: 13, color: G.sub, textTransform: "capitalize" }}>
+              {notifyTone}
+            </span>}/>
+
       <SRow icon={I.archive(G.accent, 18)} label="Archive chat"
             sub="Off the main list until a new message arrives"
             right={<Toggle on={archived} onChange={toggleArchive}/>}/>
@@ -4962,6 +5333,23 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
             right={<Toggle on={callsEnabled} onChange={toggleCallsEnabled}/>}/>
 
       <SRow icon={I.image(G.accent, 18)} label="Shared media" onClick={() => setMediaSheet(true)}/>
+
+      <SRow icon={I.download(G.accent, 18)} label={exportBusy ? "Exporting…" : "Export chat"}
+            sub="Downloads a text transcript to this device — no media files"
+            onClick={exportChat}/>
+
+      <SRow icon={I.tag(G.accent, 18)} label="Labels"
+            sub="Personal tags — only you see these, like a CRM"
+            onClick={() => setLabelSheet(true)}
+            right={chatLabels.length > 0 && (
+              <div style={{ display: "flex", gap: 4 }}>
+                {chatLabels.slice(0, 3).map((l) => (
+                  <span key={l.id} style={{
+                    width: 10, height: 10, borderRadius: "50%", background: l.color,
+                  }}/>
+                ))}
+              </div>
+            )}/>
 
       {["group", "channel", "community"].includes(chat.type) && canManage && (
         <SRow icon={I.link(G.accent, 18)} label="Invite link"
@@ -5091,6 +5479,30 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
             } catch (problem) {
               setAdminsOnlySend(!value);
               toast(problem.message || "Could not update send policy");
+            }
+          }}/>
+        </div>
+      )}
+
+      {chat.type === "group" && canManage && (
+        <div style={{
+          padding: "14px 4px", borderTop: `1px solid ${G.border}`,
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+        }}>
+          <div>
+            <div style={{ fontSize: 13.5 }}>Topics</div>
+            <div style={{ fontSize: 11.5, color: G.muted }}>
+              Split this group into named threads, Telegram-style
+            </div>
+          </div>
+          <Toggle on={topicsOn} onChange={async (value) => {
+            setTopicsOn(value);
+            try {
+              await Chats.setTopicsPolicy(chat.id, value);
+              onChanged?.();
+            } catch (problem) {
+              setTopicsOn(!value);
+              toast(problem.message || "Could not update Topics");
             }
           }}/>
         </div>
@@ -5373,6 +5785,21 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
         <MuteSheet mutedUntil={mutedUntil} onClose={() => setMuteSheet(false)} onPicked={setMuteUntil}/>
       )}
 
+      {toneSheet && (
+        <ToneSheet current={notifyTone} onClose={() => setToneSheet(false)}
+                   onPicked={async (tone) => {
+                     setNotifyTone(tone);
+                     setToneSheet(false);
+                     await Chats.settings(chat.id, { notify_tone: tone });
+                   }}/>
+      )}
+
+      {labelSheet && (
+        <LabelSheet chatId={chat.id} applied={chatLabels} toast={toast}
+                    onClose={() => setLabelSheet(false)}
+                    onSaved={(labels) => { setChatLabels(labels); setLabelSheet(false); onChanged?.(); }}/>
+      )}
+
       {mediaSheet && (
         <MediaGallerySheet chatId={chat.id} onClose={() => setMediaSheet(false)}/>
       )}
@@ -5395,6 +5822,191 @@ export function muteLabel(mutedUntil) {
   if (secondsLeft > 50 * 365 * 24 * 3600) return "Muted";
   if (secondsLeft > 24 * 3600) return `Muted for ${Math.round(secondsLeft / (24 * 3600))}d`;
   return `Muted for ${Math.round(secondsLeft / 3600)}h`;
+}
+
+const TONE_LABELS = { default: "Default", chime: "Chime", pop: "Pop", marimba: "Marimba", none: "Silent" };
+
+function ToneSheet({ current, onClose, onPicked }) {
+  return (
+    <Sheet title="Notification sound" onClose={onClose}>
+      {TONE_OPTIONS.map((tone) => (
+        <div key={tone}
+             onClick={() => { if (tone !== "none") playNotifyTone(tone); onPicked(tone); }}
+             style={{
+               display: "flex", alignItems: "center", justifyContent: "space-between",
+               padding: "13px 14px", borderRadius: 12, marginBottom: 8, cursor: "pointer",
+               background: G.dim, border: `1px solid ${tone === current ? G.accent : G.border}`,
+               fontSize: 14,
+             }}>
+          {TONE_LABELS[tone]}
+          {tone === current && I.check(G.accent, 16)}
+        </div>
+      ))}
+    </Sheet>
+  );
+}
+
+/** Telegram-style Topics chip strip: "All", "General", then each open topic. */
+function TopicStrip({ topics, activeTopicId, onSelect, onCreated, chatId, toast }) {
+  const open = topics.filter((t) => !t.closed_at);
+  async function newTopic() {
+    const name = (window.prompt("New topic name") || "").trim();
+    if (!name) return;
+    try {
+      const topic = await Chats.createTopic(chatId, name);
+      onCreated(topic);
+      onSelect(topic.id);
+    } catch (problem) {
+      toast?.(problem.message || "Could not create topic");
+    }
+  }
+  const chips = [
+    { id: "all", label: "All" },
+    { id: "general", label: "General" },
+    ...open.map((t) => ({ id: t.id, label: t.name })),
+  ];
+  return (
+    <div style={{
+      display: "flex", gap: 6, padding: "8px 12px", overflowX: "auto",
+      borderBottom: `1px solid ${G.border}`, flexShrink: 0,
+    }}>
+      {chips.map((chip) => (
+        <div key={chip.id} onClick={() => onSelect(chip.id)} style={{
+          padding: "6px 12px", borderRadius: 16, fontSize: 12.5, fontWeight: 600,
+          whiteSpace: "nowrap", cursor: "pointer", flexShrink: 0,
+          border: `1px solid ${activeTopicId === chip.id ? G.accent : G.border}`,
+          background: activeTopicId === chip.id ? G.accentSoft : "transparent",
+          color: activeTopicId === chip.id ? G.accentText : G.sub,
+        }}>{chip.label}</div>
+      ))}
+      <div onClick={newTopic} style={{
+        padding: "6px 12px", borderRadius: 16, fontSize: 12.5, fontWeight: 600,
+        whiteSpace: "nowrap", cursor: "pointer", flexShrink: 0,
+        border: `1px dashed ${G.border}`, color: G.muted,
+      }}>+ Topic</div>
+    </div>
+  );
+}
+
+const LABEL_COLORS = ["#22c55e", "#f59e0b", "#ef4444", "#6366f1", "#06b6d4", "#ec4899"];
+
+/**
+ * WhatsApp-Business-style chat labels — a personal taxonomy (Me.labels)
+ * applied to any number of chats, many-per-chat. Only the account that set
+ * them ever sees them; the other side of the chat has no idea.
+ */
+function LabelSheet({ chatId, applied, onClose, onSaved, toast }) {
+  const [all, setAll] = useState(null);
+  const [selected, setSelected] = useState(new Set(applied.map((l) => l.id)));
+  const [saving, setSaving] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  useEffect(() => { Me.labels().then(setAll).catch(() => setAll([])); }, []);
+
+  function toggle(id) {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  async function createLabel() {
+    const name = newName.trim();
+    if (!name || creating) return;
+    setCreating(true);
+    try {
+      const color = LABEL_COLORS[(all?.length || 0) % LABEL_COLORS.length];
+      const label = await Me.createLabel(name, color);
+      setAll((current) => [...(current || []), label]);
+      setSelected((current) => new Set(current).add(label.id));
+      setNewName("");
+    } catch (problem) {
+      toast?.(problem.message || "Could not create label");
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function save() {
+    setSaving(true);
+    try {
+      const labelIds = [...selected];
+      await Chats.setLabels(chatId, labelIds);
+      onSaved((all || []).filter((l) => selected.has(l.id)));
+    } catch (problem) {
+      toast?.(problem.message || "Could not save labels");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Sheet title="Labels" onClose={onClose}>
+      {all === null ? <Spinner small/> : (
+        <>
+          {all.length === 0 && (
+            <div style={{ fontSize: 13, color: G.muted, padding: "4px 0 12px" }}>
+              No labels yet — create your first one below.
+            </div>
+          )}
+          {all.map((label) => (
+            <label key={label.id} onClick={(e) => e.stopPropagation()} style={{
+              display: "flex", alignItems: "center", gap: 10, padding: "10px 2px", cursor: "pointer",
+            }}>
+              <input type="checkbox" checked={selected.has(label.id)} onChange={() => toggle(label.id)}/>
+              <span style={{ width: 12, height: 12, borderRadius: "50%", background: label.color }}/>
+              <span style={{ fontSize: 14 }}>{label.name}</span>
+            </label>
+          ))}
+          <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+            <input value={newName} onChange={(e) => setNewName(e.target.value)}
+                   placeholder="New label name" maxLength={40}
+                   onKeyDown={(e) => { if (e.key === "Enter") createLabel(); }}
+                   style={{
+                     flex: 1, padding: "9px 12px", borderRadius: 10, border: `1px solid ${G.border}`,
+                     background: G.dim, color: G.text, fontSize: 13.5,
+                   }}/>
+            <Button variant="ghost" onClick={createLabel} disabled={!newName.trim() || creating}>+ Add</Button>
+          </div>
+          <Button onClick={save} disabled={saving} style={{ width: "100%", marginTop: 14 }}>
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        </>
+      )}
+    </Sheet>
+  );
+}
+
+function ProductPickerSheet({ onClose, onPick }) {
+  const [products, setProducts] = useState(null);
+
+  useEffect(() => { Products.mine().then(setProducts).catch(() => setProducts([])); }, []);
+
+  return (
+    <Sheet title="Share a product" onClose={onClose}>
+      {products === null ? <Spinner small/> : products.length === 0 ? (
+        <div style={{ fontSize: 13, color: G.muted, padding: "10px 0" }}>
+          No products in your catalog yet — add one from Settings &gt; Business &amp; Automation.
+        </div>
+      ) : products.map((product) => (
+        <div key={product.id} onClick={() => onPick(product)} style={{
+          display: "flex", alignItems: "center", gap: 10, padding: "10px 2px", cursor: "pointer",
+          borderBottom: `1px solid ${G.border}`,
+        }}>
+          <div style={{
+            width: 40, height: 40, borderRadius: 8, background: G.dim, flexShrink: 0,
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}>{I.tag(G.sub, 18)}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 600 }}>{product.name}</div>
+            <div style={{ fontSize: 12.5, color: G.muted }}>₹{(product.price_cents / 100).toFixed(2)}</div>
+          </div>
+        </div>
+      ))}
+    </Sheet>
+  );
 }
 
 export function MuteSheet({ mutedUntil, onClose, onPicked }) {

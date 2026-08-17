@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Auth, setToken, clearStoredReferral } from "../api.js";
-import { Button, Field, G, I, ParticleNetwork, Screen, Spinner, useIsDesktop } from "../ui.jsx";
+import { Auth, Me, setToken, clearStoredReferral } from "../api.js";
+import { Av, Button, Field, G, I, ParticleNetwork, Screen, Spinner, useIsDesktop } from "../ui.jsx";
 import { COUNTRY_CODES, flagFor, samplePlaceholder } from "../countryCodes.js";
 
 /**
@@ -172,13 +172,18 @@ export default function Login({ onAuthenticated }) {
  * only so accounts made before this flow existed can still sign in.
  */
 function PhoneAuth({ onAuthenticated }) {
-  const [step, setStep] = useState("phone"); // phone | code | name
+  const [step, setStep] = useState("phone"); // phone | code | name | profile
   const [country, setCountry] = useState(COUNTRY_CODES[0]);
   const [phone, setPhone] = useState("");
   const [code, setCode] = useState("");
   const [name, setName] = useState("");
+  const [bio, setBio] = useState("");
+  const [designation, setDesignation] = useState("");
+  const [avatarFile, setAvatarFile] = useState(null);
+  const [avatarPreview, setAvatarPreview] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const avatarInputRef = useRef(null);
 
   // The number actually sent to the server: whatever country was picked,
   // plus only the digits the person typed (in case they paste a number
@@ -190,6 +195,8 @@ function PhoneAuth({ onAuthenticated }) {
     // no more "type as many digits as you want" free-for-all.
     setPhone(event.target.value.replace(/\D/g, "").slice(0, country.len));
   }
+
+  const pendingResult = useRef(null);
 
   function finish(result) {
     setToken(result.token);
@@ -237,11 +244,47 @@ function PhoneAuth({ onAuthenticated }) {
     setError("");
     try {
       const result = await Auth.verifyPhoneOtp(fullPhone, code.trim(), name.trim());
-      finish(result);
+      setToken(result.token);
+      localStorage.setItem("ht_user", JSON.stringify(result.user));
+      pendingResult.current = result;
+      setStep("profile");
     } catch (problem) {
       setError(problem.message || "Could not create your account");
     } finally {
       setBusy(false);
+    }
+  }
+
+  function onAvatarChosen(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setAvatarFile(file);
+    const reader = new FileReader();
+    reader.onload = () => setAvatarPreview(reader.result);
+    reader.readAsDataURL(file);
+  }
+
+  async function finishProfile() {
+    setBusy(true);
+    setError("");
+    try {
+      const result = pendingResult.current;
+      let user = result.user;
+      const updates = {};
+      if (bio.trim()) updates.bio = bio.trim();
+      if (designation.trim()) updates.business_category = designation.trim();
+      if (Object.keys(updates).length) {
+        user = await Me.update(updates);
+      }
+      if (avatarFile) {
+        user = await Me.setAvatar(avatarFile);
+      }
+      localStorage.setItem("ht_user", JSON.stringify(user));
+      onAuthenticated(user, Boolean(result.account_disabled));
+    } catch {
+      const result = pendingResult.current;
+      onAuthenticated(result.user, Boolean(result.account_disabled));
     }
   }
 
@@ -331,19 +374,76 @@ function PhoneAuth({ onAuthenticated }) {
     );
   }
 
+  if (step === "profile") {
+    return (
+      <>
+        <div style={{ fontSize: 19, fontWeight: 700, marginBottom: 4 }}>Set up your profile</div>
+        <div style={{ fontSize: 13, color: G.sub, marginBottom: 18 }}>
+          Add a photo and a few details so people recognize you.
+        </div>
+
+        {/* Avatar picker */}
+        <div style={{ display: "flex", justifyContent: "center", marginBottom: 18 }}>
+          <div onClick={() => avatarInputRef.current?.click()} style={{
+            width: 88, height: 88, borderRadius: "50%", cursor: "pointer",
+            background: avatarPreview ? `url(${avatarPreview}) center/cover` : G.dim,
+            border: `2px dashed ${G.border}`, display: "flex", alignItems: "center",
+            justifyContent: "center", position: "relative", overflow: "hidden",
+          }}>
+            {!avatarPreview && (
+              <div style={{ textAlign: "center" }}>
+                {I.camera(G.muted, 24)}
+                <div style={{ fontSize: 10, color: G.muted, marginTop: 2 }}>Add photo</div>
+              </div>
+            )}
+            {avatarPreview && (
+              <div style={{
+                position: "absolute", bottom: 0, left: 0, right: 0,
+                background: "#00000088", padding: "3px 0", textAlign: "center",
+                fontSize: 9, color: "#fff",
+              }}>Change</div>
+            )}
+          </div>
+          <input ref={avatarInputRef} type="file" accept="image/*" style={{ display: "none" }}
+                 onChange={onAvatarChosen}/>
+        </div>
+
+        <Field label="Bio" value={bio}
+               onChange={(event) => setBio(event.target.value)}
+               placeholder="Hey there! I am using TalkEx"/>
+        <Field label="Business / Services / Designation" value={designation}
+               onChange={(event) => setDesignation(event.target.value)}
+               placeholder="e.g. Freelance Designer, Kirana Store, Student"/>
+
+        {error && <ErrorBox>{error}</ErrorBox>}
+        <Button onClick={finishProfile} disabled={busy}
+                style={{ width: "100%", padding: 14 }}>
+          {busy ? "Saving…" : "Continue"}
+        </Button>
+        <Button variant="ghost" onClick={() => {
+          const result = pendingResult.current;
+          onAuthenticated(result.user, Boolean(result.account_disabled));
+        }} style={{ width: "100%", marginTop: 6 }}>
+          Skip for now
+        </Button>
+      </>
+    );
+  }
+
   return (
     <>
-      <div style={{ fontSize: 12.5, color: G.muted, marginBottom: 14 }}>
-        {phone} is new here — what should we call you?
+      <div style={{ fontSize: 19, fontWeight: 700, marginBottom: 4 }}>Create your account</div>
+      <div style={{ fontSize: 13, color: G.sub, marginBottom: 14 }}>
+        {phone} is new — let's get you set up.
       </div>
       <Field label="Your name" value={name}
              onChange={(event) => setName(event.target.value)}
-             placeholder="Rahul Sharma"
+             placeholder="Enter your name"
              onKeyDown={(event) => event.key === "Enter" && createAccount()}/>
       {error && <ErrorBox>{error}</ErrorBox>}
       <Button onClick={createAccount} disabled={busy || !name.trim()}
               style={{ width: "100%", padding: 14 }}>
-        {busy ? "Creating…" : "Create account"}
+        {busy ? "Creating…" : "Next"}
       </Button>
     </>
   );
