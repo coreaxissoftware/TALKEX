@@ -4101,18 +4101,26 @@ def clear_chat(chat_id: str, user: dict = Depends(current_user)):
 @app.put("/chats/{chat_id}/vanish-mode")
 async def set_vanish_mode(chat_id: str, enabled: bool = Query(...), user: dict = Depends(current_user)):
     """
-    Instagram-style Vanish mode — a shared, chat-wide setting: whoever
-    flips it applies it for every member of the chat, not just themselves,
-    and everyone currently in the chat is told live so their own UI
-    reflects it immediately. The actual vanishing (see leave_chat_view
-    below) still happens per-member as each of them leaves the chat
-    screen — hiding only what THEY have already seen — but because every
-    member's own vanish_mode flag is now on, that happens for both sides
-    over the course of the conversation instead of just the toggler.
+    Vanish mode — only messages sent WHILE vanish mode is on get deleted
+    when the user leaves the chat. We record the current max seq so
+    leave-view can scope deletion to messages after that point.
     """
     require_member(chat_id, user["id"])
-    db.execute("UPDATE chat_members SET vanish_mode = ? WHERE chat_id = ?",
-               (int(enabled), chat_id))
+    if enabled:
+        max_seq = db.query_one(
+            "SELECT COALESCE(MAX(seq), 0) AS ms FROM messages WHERE chat_id = ?",
+            (chat_id,),
+        )["ms"]
+        db.execute(
+            "UPDATE chat_members SET vanish_mode = 1, vanish_mode_since_seq = ? WHERE chat_id = ?",
+            (max_seq, chat_id))
+    else:
+        db.execute(
+            "UPDATE chat_members SET vanish_mode = 0 WHERE chat_id = ?",
+            (chat_id,))
+    await post_system_message(
+        chat_id, user["id"],
+        f"🔒 {user['name']} turned vanish mode {'on' if enabled else 'off'}")
     await hub.send_to_chat(chat_id, {
         "type": "chat_updated", "chat_id": chat_id, "vanish_mode": enabled,
     })

@@ -4508,18 +4508,24 @@ def test_vanish_mode_hides_already_read_messages_after_leaving_the_chat(client):
     alice, _, _ = make_user(client, "Alice")
     bob, bob_id, _ = make_user(client, "Bob")
     chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
-    msg = client.post("/messages", headers=alice, json={"chat_id": chat_id, "text": "seen this"}).json()
+    # Message sent BEFORE vanish mode — should NOT be vanished.
+    client.post("/messages", headers=alice, json={"chat_id": chat_id, "text": "before vanish"})
 
     assert client.put(f"/chats/{chat_id}/vanish-mode?enabled=true", headers=bob).status_code == 200
-    client.post(f"/chats/{chat_id}/read", headers=bob, json={"seq": msg["seq"]})
+    # Message sent AFTER vanish mode turned on — should vanish.
+    msg2 = client.post("/messages", headers=alice, json={"chat_id": chat_id, "text": "after vanish"}).json()
+    client.post(f"/chats/{chat_id}/read", headers=bob, json={"seq": msg2["seq"]})
 
     left = client.post(f"/chats/{chat_id}/leave-view", headers=bob)
     assert left.status_code == 200
-    assert left.json()["vanished"] == 1
+    assert left.json()["vanished"] >= 1
 
-    assert client.get(f"/chats/{chat_id}/messages", headers=bob).json() == []
-    # Alice's own copy is completely untouched — this is Bob's view only.
-    assert len(client.get(f"/chats/{chat_id}/messages", headers=alice).json()) == 1
+    remaining = client.get(f"/chats/{chat_id}/messages", headers=bob).json()
+    texts = [m["text"] for m in remaining if m["kind"] != "system"]
+    assert texts == ["before vanish"]
+    # Alice's own copy is completely untouched.
+    alice_msgs = [m for m in client.get(f"/chats/{chat_id}/messages", headers=alice).json() if m["kind"] != "system"]
+    assert len(alice_msgs) == 2
 
 
 def test_vanish_mode_never_hides_a_message_that_has_not_been_read_yet(client):
@@ -4534,7 +4540,8 @@ def test_vanish_mode_never_hides_a_message_that_has_not_been_read_yet(client):
 
     client.post(f"/chats/{chat_id}/leave-view", headers=bob)
     remaining = client.get(f"/chats/{chat_id}/messages", headers=bob).json()
-    assert [m["text"] for m in remaining] == ["unread"]
+    texts = [m["text"] for m in remaining if m["kind"] != "system"]
+    assert texts == ["unread"]
 
 
 def test_leaving_a_chat_without_vanish_mode_does_nothing(client):
@@ -4550,27 +4557,27 @@ def test_leaving_a_chat_without_vanish_mode_does_nothing(client):
 
 
 def test_vanish_mode_is_mutual(client):
-    """Instagram-style: either member turning it on applies to the whole
-    chat, so both sides' already-seen messages vanish from their own view
-    as each of them leaves — not just the one who flipped the toggle."""
+    """Either member turning it on applies to the whole chat. Only messages
+    sent AFTER vanish mode was enabled get vanished."""
     alice, _, _ = make_user(client, "Alice")
     bob, bob_id, _ = make_user(client, "Bob")
     chat_id = client.post(f"/chats/dm/{bob_id}", headers=alice).json()["id"]
-    msg = client.post("/messages", headers=alice, json={"chat_id": chat_id, "text": "hi"}).json()
+    # Message before vanish mode — should survive.
+    client.post("/messages", headers=alice, json={"chat_id": chat_id, "text": "before"})
 
     # Bob turns it on — Alice never touched the setting herself.
     resp = client.put(f"/chats/{chat_id}/vanish-mode?enabled=true", headers=bob)
     assert resp.json()["vanish_mode"] is True
-    # It's chat-wide: Alice's own /chats listing must show it as on too.
     alice_chat = next(c for c in client.get("/chats", headers=alice).json() if c["id"] == chat_id)
     assert alice_chat["vanish_mode"] == 1
 
-    client.post(f"/chats/{chat_id}/read", headers=alice, json={"seq": msg["seq"]})
+    # Message after vanish mode — should vanish for Alice when she leaves.
+    msg2 = client.post("/messages", headers=alice, json={"chat_id": chat_id, "text": "during"}).json()
+    client.post(f"/chats/{chat_id}/read", headers=alice, json={"seq": msg2["seq"]})
     client.post(f"/chats/{chat_id}/leave-view", headers=alice)
 
-    # Alice never explicitly opted in herself, but the chat-wide setting
-    # (Bob's toggle) still vanishes her already-seen message from her view.
-    assert len(client.get(f"/chats/{chat_id}/messages", headers=alice).json()) == 0
+    remaining = [m for m in client.get(f"/chats/{chat_id}/messages", headers=alice).json() if m["kind"] != "system"]
+    assert [m["text"] for m in remaining] == ["before"]
 
 
 def test_an_outsider_cannot_set_vanish_mode_for_a_chat_they_are_not_in(client):

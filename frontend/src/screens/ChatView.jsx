@@ -3295,39 +3295,42 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
         {emojiOpen ? I.keyboard(G.sub, 20) : "🙂"}
       </IconButton>
 
-      <textarea
-        ref={inputRef}
-        value={value}
-        rows={1}
-        onChange={(event) => onChange(event.target.value)}
-        onKeyDown={onInputKeyDown}
-        onFocus={() => {
-          setTimeout(() => {
-            window.scrollTo(0, 0);
-            document.documentElement.scrollTop = 0;
-            document.body.scrollTop = 0;
-          }, 50);
-        }}
-        placeholder={disappearSecs
-          ? `Disappears after ${durationLabel(disappearSecs)}…`
-          : editing ? "Edit message…" : "Message"}
-        style={{
-          flex: 1, padding: "11px 14px", borderRadius: 22, background: G.dim,
-          border: `1px solid ${G.border}`, color: G.text, fontSize: 14.5,
-          outline: "none", resize: "none", fontFamily: "inherit", lineHeight: 1.35,
-          maxHeight: 120, overflowY: "auto",
-        }}/>
-
-      {!editing && (
-        <IconButton onClick={onToggleViewOnce}
-                    label={viewOnce ? "View once is on for this message" : "Send as view once"}
-                    style={{
-                      borderRadius: "50%",
-                      background: viewOnce ? G.accentSoft : "transparent",
-                    }}>
-          {I.eye(viewOnce ? G.accent : G.sub, 20)}
-        </IconButton>
-      )}
+      <div style={{ flex: 1, position: "relative", display: "flex", alignItems: "center" }}>
+        <textarea
+          ref={inputRef}
+          value={value}
+          rows={1}
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={onInputKeyDown}
+          onFocus={() => {
+            setTimeout(() => {
+              window.scrollTo(0, 0);
+              document.documentElement.scrollTop = 0;
+              document.body.scrollTop = 0;
+            }, 50);
+          }}
+          placeholder={disappearSecs
+            ? `Disappears after ${durationLabel(disappearSecs)}…`
+            : editing ? "Edit message…" : "Message"}
+          style={{
+            width: "100%", padding: !editing && value.trim() ? "11px 38px 11px 14px" : "11px 14px",
+            borderRadius: 22, background: G.dim,
+            border: `1px solid ${G.border}`, color: G.text, fontSize: 14.5,
+            outline: "none", resize: "none", fontFamily: "inherit", lineHeight: 1.35,
+            maxHeight: 120, overflowY: "auto",
+          }}/>
+        {!editing && value.trim() && (
+          <div onClick={onToggleViewOnce}
+               style={{
+                 position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)",
+                 cursor: "pointer", padding: 2, borderRadius: "50%",
+                 background: viewOnce ? G.accentSoft : "transparent",
+               }}
+               title={viewOnce ? "View once is on" : "Send as view once"}>
+            {I.eye(viewOnce ? G.accent : G.sub, 18)}
+          </div>
+        )}
+      </div>
       {value.trim() ? (
         <button onClick={onSend} style={{
           width: 42, height: 42, borderRadius: "50%", border: "none", cursor: "pointer",
@@ -5369,7 +5372,7 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
             right={<span style={{ fontSize: 13, color: G.sub }}>{locked ? "On" : "Off"}</span>}/>
 
       <SRow icon={I.eye(vanishMode ? G.accent : G.sub, 18)} label="Vanish mode"
-            sub="Already-read messages disappear from your view when you leave this chat — only for you"
+            sub="Messages sent while on will disappear when you leave the chat"
             right={<Toggle on={vanishMode} onChange={toggleVanishMode}/>}/>
 
       <SRow icon={I.broom(G.accent, 18)} label="Clear chat" sub="Clears your own copy only" onClick={clearChat}/>

@@ -262,17 +262,10 @@ def clear_chat_for_user(chat_id: str, user_id: str) -> int:
 
 def vanish_seen_messages_for_user(chat_id: str, user_id: str) -> int:
     """
-    Vanish mode's actual effect: hide every message this member has
-    already read (seq <= their own last_read_seq), the moment they leave
-    the chat — so the NEXT time they open it, everything they'd already
-    seen is gone, same one-sided message_hidden_for mechanism
-    clear_chat_for_user uses for "Clear chat."
-
-    Scoped to last_read_seq rather than the whole history (unlike Clear
-    chat): a message that arrived while this member was elsewhere and
-    hasn't been read yet must still be there to actually read — vanishing
-    it before it was ever seen would make the chat feel broken rather than
-    private.
+    Vanish mode: hide only messages sent AFTER vanish mode was turned on
+    (seq > vanish_mode_since_seq) that this member has already read
+    (seq <= last_read_seq). Messages from before vanish mode was enabled
+    are never touched.
     """
     now = time.time()
     changed = db.execute(
@@ -281,7 +274,9 @@ def vanish_seen_messages_for_user(chat_id: str, user_id: str) -> int:
         SELECT m.id, ?, ?
         FROM messages AS m
         JOIN chat_members AS cm ON cm.chat_id = m.chat_id AND cm.user_id = ?
-        WHERE m.chat_id = ? AND m.seq <= cm.last_read_seq
+        WHERE m.chat_id = ?
+          AND m.seq <= cm.last_read_seq
+          AND m.seq > cm.vanish_mode_since_seq
         """,
         (user_id, now, user_id, chat_id),
     )
