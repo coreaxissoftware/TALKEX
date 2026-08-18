@@ -79,6 +79,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
   const [pushEnabled, setPushEnabled] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
   const [activeSection, setActiveSection] = useState(null);
+  const [subSection, setSubSection] = useState(null);
   const [autoDownload, setAutoDownloadState] = useState(getAutoDownload);
   const [wallpaper, setWallpaperState] = useState(getWallpaper);
   const [blur, setBlurState] = useState(getWallpaperBlur);
@@ -858,12 +859,10 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
       )}
 
       {/* ── Help & Support ──────────────────────────────────── */}
-      <GroupLabel label={t("settings.group.help_support")} activeSection={activeSection}/>
-
-      <Section id="help" icon={I.info(G.text, 20)} title="Help and feedback"
+      <Section id="help" icon={I.info(G.text, 20)} title={t("settings.group.help_support")}
                sub="Contact support, app info"
                activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
+               onBack={() => { setActiveSection(null); setSubSection(null); }}>
         <div style={{ padding: "8px 20px 18px" }}>
           <SRow icon={I.mail(G.text, 18)} label="Contact support"
                 sub="Questions, bugs or feedback"
@@ -902,48 +901,51 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
       {helpView === "privacy" && <PrivacySheet onClose={() => setHelpView(null)}/>}
 
       {/* ── General ─────────────────────────────────────────── */}
-      <GroupLabel label={t("settings.group.general")} activeSection={activeSection}/>
+      <Section id="general" icon={I.palette(G.text, 20)} title={t("settings.group.general")}
+               sub="QR code, appearance, language"
+               activeSection={activeSection} onOpen={(id) => { setActiveSection(id); setSubSection(null); }}
+               onBack={() => { setActiveSection(null); setSubSection(null); }}>
 
-      <Section id="myqr" icon={I.search(G.text, 20)} title="My QR code"
-               sub="Let people scan to add you"
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
-        <div style={{ padding: "12px 20px 20px", textAlign: "center" }}>
-          <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
-            <QrView value={`${window.location.origin}/?user=${me.username}`} size={220}/>
-          </div>
-          <div style={{ fontSize: 16, fontWeight: 700, color: G.text }}>{me.name}</div>
-          <div style={{ fontSize: 13, color: G.muted, marginBottom: 16 }}>@{me.username}</div>
-          <Button style={{ width: "100%", marginBottom: 8 }} onClick={async () => {
-            const url = `${window.location.origin}/?user=${me.username}`;
-            if (navigator.share) { try { await navigator.share({ title: me.name, url }); } catch { /* cancelled */ } }
-            else { navigator.clipboard?.writeText(url); toast("Profile link copied"); }
-          }}>Share my code</Button>
-
-          {qrScanOpen ? (
-            <div style={{ marginTop: 8 }}>
-              <div style={{ fontSize: 12.5, color: G.muted, marginBottom: 10 }}>
-                Point the camera at someone's TalkEx QR code.
-              </div>
-              <QrScanner onDecode={onUserQrScanned}
-                         onError={(message) => { setQrScanOpen(false); toast(message || "Camera error"); }}/>
-              <Button variant="ghost" style={{ width: "100%", marginTop: 10 }}
-                      onClick={() => setQrScanOpen(false)}>Cancel</Button>
+        <Section id="myqr" icon={I.search(G.text, 20)} title="My QR code"
+                 sub="Let people scan to add you"
+                 activeSection={subSection} onOpen={setSubSection}
+                 onBack={() => setSubSection(null)}>
+          <div style={{ padding: "12px 20px 20px", textAlign: "center" }}>
+            <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
+              <QrView value={`${window.location.origin}/?user=${me.username}`} size={220}/>
             </div>
-          ) : (
-            <Button variant="ghost" style={{ width: "100%", marginBottom: 8 }}
-                    onClick={() => setQrScanOpen(true)}>Scan a code</Button>
-          )}
+            <div style={{ fontSize: 16, fontWeight: 700, color: G.text }}>{me.name}</div>
+            <div style={{ fontSize: 13, color: G.muted, marginBottom: 16 }}>@{me.username}</div>
+            <Button style={{ width: "100%", marginBottom: 8 }} onClick={async () => {
+              const url = `${window.location.origin}/?user=${me.username}`;
+              if (navigator.share) { try { await navigator.share({ title: me.name, url }); } catch { /* cancelled */ } }
+              else { navigator.clipboard?.writeText(url); toast("Profile link copied"); }
+            }}>Share my code</Button>
 
-          <div style={{ fontSize: 11.5, color: G.muted }}>
-            Scanning this opens a chat with you.
+            {qrScanOpen ? (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontSize: 12.5, color: G.muted, marginBottom: 10 }}>
+                  Point the camera at someone's TalkEx QR code.
+                </div>
+                <QrScanner onDecode={onUserQrScanned}
+                           onError={(message) => { setQrScanOpen(false); toast(message || "Camera error"); }}/>
+                <Button variant="ghost" style={{ width: "100%", marginTop: 10 }}
+                        onClick={() => setQrScanOpen(false)}>Cancel</Button>
+              </div>
+            ) : (
+              <Button variant="ghost" style={{ width: "100%", marginBottom: 8 }}
+                      onClick={() => setQrScanOpen(true)}>Scan a code</Button>
+            )}
+
+            <div style={{ fontSize: 11.5, color: G.muted }}>
+              Scanning this opens a chat with you.
+            </div>
           </div>
-        </div>
-      </Section>
+        </Section>
 
-      <Section id="appearance" icon={I.palette(G.text, 20)} title="Appearance" sub="Theme, color and wallpaper"
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
+        <Section id="appearance" icon={I.palette(G.text, 20)} title="Appearance" sub="Theme, color and wallpaper"
+                 activeSection={subSection} onOpen={setSubSection}
+                 onBack={() => setSubSection(null)}>
         <div style={{ padding: "4px 20px 18px" }}>
           <div style={{
             display: "flex", gap: 6, padding: 4, background: G.dim,
@@ -1077,86 +1079,87 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
           </div>
         </div>
       </Section>
+      </Section>
 
       {/* ── Chats & Privacy ──────────────────────────────────── */}
-      <GroupLabel label={t("settings.group.chats_privacy")} activeSection={activeSection}/>
+      <Section id="chats_privacy" icon={I.eye(G.text, 20)} title={t("settings.group.chats_privacy")}
+               sub="Notifications, privacy, data"
+               activeSection={activeSection} onOpen={(id) => { setActiveSection(id); setSubSection(null); }}
+               onBack={() => { setActiveSection(null); setSubSection(null); }}>
 
-      <Section id="notifications" icon={I.bell(G.text, 20)} title="Notifications" sub="Push alerts"
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
-        <SRow icon={I.bell(G.text, 18)} label="Push notifications"
-              sub={isPushSupported()
-                ? "Get notified even when this tab isn't open"
-                : "Not supported in this browser"}
-              right={isPushSupported()
-                ? <Toggle on={pushEnabled} onChange={pushBusy ? () => {} : togglePush}/>
-                : null}/>
-        <div style={{ padding: "2px 20px 6px", fontSize: 12, color: G.muted }}>
-          These narrow which of the above actually notify you — turning
-          Push off above silences all three regardless of these.
-        </div>
-        <SRow icon={I.chat(G.text, 18)} label="Direct messages"
-              right={<Toggle on={Boolean(me.notif_dm)}
-                             onChange={(value) => togglePrivacy("notif_dm", value)}/>}/>
-        <SRow icon={I.chat(G.text, 18)} label="Groups & channels"
-              right={<Toggle on={Boolean(me.notif_groups)}
-                             onChange={(value) => togglePrivacy("notif_groups", value)}/>}/>
-        <SRow icon={I.phone(G.text, 18)} label="Calls"
-              right={<Toggle on={Boolean(me.notif_calls)}
-                             onChange={(value) => togglePrivacy("notif_calls", value)}/>}/>
-      </Section>
+        <Section id="notifications" icon={I.bell(G.text, 20)} title="Notifications" sub="Push alerts"
+                 activeSection={subSection} onOpen={setSubSection}
+                 onBack={() => setSubSection(null)}>
+          <SRow icon={I.bell(G.text, 18)} label="Push notifications"
+                sub={isPushSupported()
+                  ? "Get notified even when this tab isn't open"
+                  : "Not supported in this browser"}
+                right={isPushSupported()
+                  ? <Toggle on={pushEnabled} onChange={pushBusy ? () => {} : togglePush}/>
+                  : null}/>
+          <div style={{ padding: "2px 20px 6px", fontSize: 12, color: G.muted }}>
+            These narrow which of the above actually notify you — turning
+            Push off above silences all three regardless of these.
+          </div>
+          <SRow icon={I.chat(G.text, 18)} label="Direct messages"
+                right={<Toggle on={Boolean(me.notif_dm)}
+                               onChange={(value) => togglePrivacy("notif_dm", value)}/>}/>
+          <SRow icon={I.chat(G.text, 18)} label="Groups & channels"
+                right={<Toggle on={Boolean(me.notif_groups)}
+                               onChange={(value) => togglePrivacy("notif_groups", value)}/>}/>
+          <SRow icon={I.phone(G.text, 18)} label="Calls"
+                right={<Toggle on={Boolean(me.notif_calls)}
+                               onChange={(value) => togglePrivacy("notif_calls", value)}/>}/>
+        </Section>
 
-      <Section id="privacy" icon={I.eye(G.text, 20)} title="Privacy" sub="Last seen, read receipts and calling"
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
-        <SRow icon={I.eye(G.text, 18)} label="Last seen and online"
-              sub="When off, nobody is told when you come or go"
-              right={<Toggle on={Boolean(me.show_last_seen)}
-                             onChange={(value) => togglePrivacy("show_last_seen", value)}/>}/>
+        <Section id="privacy" icon={I.eye(G.text, 20)} title="Privacy" sub="Last seen, read receipts and calling"
+                 activeSection={subSection} onOpen={setSubSection}
+                 onBack={() => setSubSection(null)}>
+          <SRow icon={I.eye(G.text, 18)} label="Last seen and online"
+                sub="When off, nobody is told when you come or go"
+                right={<Toggle on={Boolean(me.show_last_seen)}
+                               onChange={(value) => togglePrivacy("show_last_seen", value)}/>}/>
+          <SRow icon={I.checkDouble(G.text, 18)} label="Read receipts"
+                sub="When off, you stop sending them"
+                right={<Toggle on={Boolean(me.show_read_receipts)}
+                               onChange={(value) => togglePrivacy("show_read_receipts", value)}/>}/>
+          <SRow icon={I.phoneOff(G.text, 18)} label="Hide phone number"
+                sub="When on, others can't see your number — only your name and username"
+                right={<Toggle on={!Boolean(me.show_phone_number)}
+                               onChange={(hideOn) => togglePrivacy("show_phone_number", !hideOn)}/>}/>
+          <SRow icon={I.phone(G.text, 18)} label="Calling"
+                sub="When off, you can't be called and can't call anyone — scheduled meetings still work"
+                right={<Toggle on={Boolean(me.calling_enabled)}
+                               onChange={(value) => togglePrivacy("calling_enabled", value)}/>}/>
+        </Section>
 
-        <SRow icon={I.checkDouble(G.text, 18)} label="Read receipts"
-              sub="When off, you stop sending them"
-              right={<Toggle on={Boolean(me.show_read_receipts)}
-                             onChange={(value) => togglePrivacy("show_read_receipts", value)}/>}/>
-
-        <SRow icon={I.phoneOff(G.text, 18)} label="Hide phone number"
-              sub="When on, others can't see your number — only your name and username"
-              right={<Toggle on={!Boolean(me.show_phone_number)}
-                             onChange={(hideOn) => togglePrivacy("show_phone_number", !hideOn)}/>}/>
-
-        <SRow icon={I.phone(G.text, 18)} label="Calling"
-              sub="When off, you can't be called and can't call anyone — scheduled meetings still work"
-              right={<Toggle on={Boolean(me.calling_enabled)}
-                             onChange={(value) => togglePrivacy("calling_enabled", value)}/>}/>
-      </Section>
-
-      <Section id="data" icon={I.wifi(G.text, 20)} title="Data usage" sub="Auto-download media"
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
-        <div style={{ padding: "0 20px 14px", fontSize: 12.5, color: G.muted }}>
-          When to automatically download photos, videos, voice notes and
-          documents in chats. Files you don't auto-download can still be
-          fetched any time with a tap.
-        </div>
-        <div style={{ padding: "0 20px 16px", display: "flex", gap: 6 }}>
-          {[["always", "Always"], ["wifi", "Wi-Fi only"], ["never", "Never"]].map(([value, label]) => (
-            <button key={value} onClick={() => changeAutoDownload(value)} style={{
-              flex: 1, padding: "9px 4px", borderRadius: 10, cursor: "pointer",
-              fontSize: 12.5, fontWeight: 600,
-              border: `1px solid ${autoDownload === value ? G.accent : G.border}`,
-              background: autoDownload === value ? G.accentSoft : "transparent",
-              color: autoDownload === value ? G.accentText : G.sub,
-            }}>{label}</button>
-          ))}
-        </div>
+        <Section id="data" icon={I.wifi(G.text, 20)} title="Data usage" sub="Auto-download media"
+                 activeSection={subSection} onOpen={setSubSection}
+                 onBack={() => setSubSection(null)}>
+          <div style={{ padding: "0 20px 14px", fontSize: 12.5, color: G.muted }}>
+            When to automatically download photos, videos, voice notes and
+            documents in chats. Files you don't auto-download can still be
+            fetched any time with a tap.
+          </div>
+          <div style={{ padding: "0 20px 16px", display: "flex", gap: 6 }}>
+            {[["always", "Always"], ["wifi", "Wi-Fi only"], ["never", "Never"]].map(([value, label]) => (
+              <button key={value} onClick={() => changeAutoDownload(value)} style={{
+                flex: 1, padding: "9px 4px", borderRadius: 10, cursor: "pointer",
+                fontSize: 12.5, fontWeight: 600,
+                border: `1px solid ${autoDownload === value ? G.accent : G.border}`,
+                background: autoDownload === value ? G.accentSoft : "transparent",
+                color: autoDownload === value ? G.accentText : G.sub,
+              }}>{label}</button>
+            ))}
+          </div>
+        </Section>
       </Section>
 
       {/* ── Security ─────────────────────────────────────────── */}
-      <GroupLabel label={t("settings.group.security")} activeSection={activeSection}/>
 
-      <Section id="security" icon={I.shield(G.text, 20)} title="Security" sub="Two-step verification and app lock"
+      <Section id="security" icon={I.shield(G.text, 20)} title={t("settings.group.security")} sub="Two-step verification and app lock"
                activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
+               onBack={() => { setActiveSection(null); setSubSection(null); }}>
         <SRow icon={I.shield(G.text, 18)} label="Two-step verification"
               sub={twoStep ? (twoStep.enabled ? "On — a PIN is asked for at login" : "Off")
                             : "Loading…"}
@@ -1194,75 +1197,82 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
       </Section>
 
       {/* ── Account ──────────────────────────────────────────── */}
-      <GroupLabel label={t("settings.group.account")} activeSection={activeSection}/>
+      <Section id="account_group" icon={I.user(G.text, 20)} title={t("settings.group.account")}
+               sub="Blocked, sign out, phone, password"
+               activeSection={activeSection} onOpen={(id) => { setActiveSection(id); setSubSection(null); }}
+               onBack={() => { setActiveSection(null); setSubSection(null); }}>
 
-      <Section id="blocked" icon={I.ban(G.text, 20)} title="Blocked" sub={`${blocked.length} blocked`}
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
-        {blocked.length === 0 ? (
-          <div style={{ padding: "14px 20px", fontSize: 13, color: G.muted }}>
-            Nobody is blocked.
-          </div>
-        ) : blocked.map((person) => (
-          <SRow key={person.id} icon={I.user(G.text, 18)} label={person.name} sub={`@${person.username}`}
-                right={
-                  <Button variant="ghost" style={{ padding: "6px 12px", fontSize: 12 }}
-                          onClick={async () => {
-                            await Users.unblock(person.id);
-                            setBlocked((current) => current.filter((p) => p.id !== person.id));
-                            toast("Unblocked");
-                          }}>Unblock</Button>
-                }/>
-        ))}
-      </Section>
+        <Section id="blocked" icon={I.ban(G.text, 20)} title="Blocked" sub={`${blocked.length} blocked`}
+                 activeSection={subSection} onOpen={setSubSection}
+                 onBack={() => setSubSection(null)}>
+          {blocked.length === 0 ? (
+            <div style={{ padding: "14px 20px", fontSize: 13, color: G.muted }}>
+              Nobody is blocked.
+            </div>
+          ) : blocked.map((person) => (
+            <SRow key={person.id} icon={I.user(G.text, 18)} label={person.name} sub={`@${person.username}`}
+                  right={
+                    <Button variant="ghost" style={{ padding: "6px 12px", fontSize: 12 }}
+                            onClick={async () => {
+                              await Users.unblock(person.id);
+                              setBlocked((current) => current.filter((p) => p.id !== person.id));
+                              toast("Unblocked");
+                            }}>Unblock</Button>
+                  }/>
+          ))}
+        </Section>
 
-      <Section id="account" icon={I.logOut(G.text, 20)} title="Account" sub={me.phone || "Sign out, deactivate or delete"}
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
-        {savedAccounts.filter((account) => account.userId !== me.id).map((account) => (
-          <SRow key={account.userId}
-                icon={<Av av={account.avatarLetter} color={account.color} size={30}/>}
-                label={account.name} sub={`@${account.username}`}
-                onClick={() => switchToAccount(account.userId)}
-                right={
-                  <Button variant="ghost" style={{ padding: "6px 12px", fontSize: 12 }}
-                          onClick={(event) => { event.stopPropagation(); removeSavedAccount(account.userId); }}>
-                    Forget
-                  </Button>
-                }/>
-        ))}
-        <SRow icon={I.user(G.text, 18)} label="Add another account"
-              sub="Switch between accounts on this device"
-              onClick={() => {
-                rememberAccount(me, getToken());
-                setAddingAccount(true);
-              }}/>
-        <SRow icon={I.phone(G.text, 18)} label="Change phone number" sub={me.phone || "Not set"}
-              onClick={() => setChangingPhone(true)}/>
-        <SRow icon={I.lock(G.text, 18)} label="Set password"
-              sub="For signing in with a username, without a phone code"
-              onClick={() => setSettingPassword(true)}/>
-        <SRow icon={I.mail(G.text, 18)} label="Email address"
-              sub={me.email_verified_at ? `${me.email} · verified` : "Not connected — used to recover a forgotten PIN"}
-              onClick={() => setConnectingEmail(true)}/>
-        <SRow icon={I.logOut(G.red, 18)} label="Sign out" danger onClick={signOut}/>
-        <SRow icon={I.moon(G.red, 18)} label="Deactivate account"
-              sub="Hides your account until you sign back in"
-              danger onClick={() => setDeactivating(true)}/>
-        <SRow icon={I.trash(G.red, 18)} label="Delete account" sub="Permanent — cannot be undone"
-              danger onClick={() => setDeletingAccount(true)}/>
+        <Section id="account" icon={I.logOut(G.text, 20)} title="Account" sub={me.phone || "Sign out, deactivate or delete"}
+                 activeSection={subSection} onOpen={setSubSection}
+                 onBack={() => setSubSection(null)}>
+          {savedAccounts.filter((account) => account.userId !== me.id).map((account) => (
+            <SRow key={account.userId}
+                  icon={<Av av={account.avatarLetter} color={account.color} size={30}/>}
+                  label={account.name} sub={`@${account.username}`}
+                  onClick={() => switchToAccount(account.userId)}
+                  right={
+                    <Button variant="ghost" style={{ padding: "6px 12px", fontSize: 12 }}
+                            onClick={(event) => { event.stopPropagation(); removeSavedAccount(account.userId); }}>
+                      Forget
+                    </Button>
+                  }/>
+          ))}
+          <SRow icon={I.user(G.text, 18)} label="Add another account"
+                sub="Switch between accounts on this device"
+                onClick={() => {
+                  rememberAccount(me, getToken());
+                  setAddingAccount(true);
+                }}/>
+          <SRow icon={I.phone(G.text, 18)} label="Change phone number" sub={me.phone || "Not set"}
+                onClick={() => setChangingPhone(true)}/>
+          <SRow icon={I.lock(G.text, 18)} label="Set password"
+                sub="For signing in with a username, without a phone code"
+                onClick={() => setSettingPassword(true)}/>
+          <SRow icon={I.mail(G.text, 18)} label="Email address"
+                sub={me.email_verified_at ? `${me.email} · verified` : "Not connected — used to recover a forgotten PIN"}
+                onClick={() => setConnectingEmail(true)}/>
+          <SRow icon={I.logOut(G.red, 18)} label="Sign out" danger onClick={signOut}/>
+          <SRow icon={I.moon(G.red, 18)} label="Deactivate account"
+                sub="Hides your account until you sign back in"
+                danger onClick={() => setDeactivating(true)}/>
+          <SRow icon={I.trash(G.red, 18)} label="Delete account" sub="Permanent — cannot be undone"
+                danger onClick={() => setDeletingAccount(true)}/>
+        </Section>
       </Section>
 
       {/* ── Business Tools ───────────────────────────────────── */}
-      <GroupLabel label={t("settings.group.business")} activeSection={activeSection}/>
+      <Section id="business" icon={I.star(G.text, 20)} title={t("settings.group.business")}
+               sub="Catalog, automation, API"
+               activeSection={activeSection} onOpen={(id) => { setActiveSection(id); setSubSection(null); }}
+               onBack={() => { setActiveSection(null); setSubSection(null); }}>
 
       {payConfig?.configured && (
         <Section id="subscription" icon={I.star(G.text, 20)} title="Subscription"
                  sub={me.plan && me.plan !== "free"
                    ? `${me.plan.replace("_", " ")} — expires ${me.plan_expires_at ? new Date(me.plan_expires_at * 1000).toLocaleDateString() : "—"}`
                    : "Free plan"}
-                 activeSection={activeSection} onOpen={setActiveSection}
-                 onBack={() => setActiveSection(null)}>
+                 activeSection={subSection} onOpen={setSubSection}
+                 onBack={() => setSubSection(null)}>
           <div style={{ padding: "0 20px 12px" }}>
             {me.plan && me.plan !== "free" ? (
               <div style={{ padding: "12px 16px", borderRadius: 10, background: G.accent + "18", border: `1px solid ${G.accent}44` }}>
@@ -1306,8 +1316,8 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
 
       <Section id="catalog" icon={I.tag(G.text, 20)} title="Product catalog"
                sub={`${products.length} product${products.length === 1 ? "" : "s"}`}
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
+               activeSection={subSection} onOpen={setSubSection}
+               onBack={() => setSubSection(null)}>
         <div style={{ padding: "0 20px 8px", fontSize: 12.5, color: G.muted }}>
           Like WhatsApp Business's catalog — list items here, then share one into
           any chat from the composer's attach menu.
@@ -1338,8 +1348,8 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
 
       <Section id="replies" icon={I.checkDouble(G.text, 20)} title="Quick replies & Templates"
                sub={`${cannedReplies.length} replies, ${templates.length} templates`}
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
+               activeSection={subSection} onOpen={setSubSection}
+               onBack={() => setSubSection(null)}>
         <div style={{ padding: "0 20px 8px", fontSize: 12.5, color: G.muted }}>
           Saved snippets you can drop into any chat from the composer's quick-reply picker.
         </div>
@@ -1396,8 +1406,8 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
 
       <Section id="automation" icon={I.bolt(G.text, 20)} title="Automation"
                sub={me.away_enabled ? "Away mode on" : `${autoReplyRules.length} auto-reply rule${autoReplyRules.length === 1 ? "" : "s"}`}
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
+               activeSection={subSection} onOpen={setSubSection}
+               onBack={() => setSubSection(null)}>
         <div style={{ padding: "0 20px 8px", fontSize: 12.5, color: G.muted }}>
           When a DM contains one of these words or phrases, the matching reply
           is sent automatically — checked in order, first match wins, before
@@ -1444,8 +1454,8 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
 
       <Section id="api" icon={I.key(G.text, 20)} title="API & Integrations"
                sub={`${apiKeys.length} key${apiKeys.length === 1 ? "" : "s"}, ${webhooks.length} webhook${webhooks.length === 1 ? "" : "s"}`}
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
+               activeSection={subSection} onOpen={setSubSection}
+               onBack={() => setSubSection(null)}>
         <div style={{ padding: "0 20px 8px", fontSize: 12.5, color: G.muted }}>
           Send messages from a script — like WhatsApp's Business API. A key
           authenticates as you for sending only; it cannot read your chats,
@@ -1491,20 +1501,25 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
                 }/>
         ))}
       </Section>
+      </Section>
 
       {/* ── Storage ────────────────────────────────────────── */}
-      <GroupLabel label={t("settings.group.storage")} activeSection={activeSection}/>
+      <Section id="storage_group" icon={I.barChart(G.text, 20)} title={t("settings.group.storage")}
+               sub="Storage, live location"
+               activeSection={activeSection} onOpen={(id) => { setActiveSection(id); setSubSection(null); }}
+               onBack={() => { setActiveSection(null); setSubSection(null); }}>
 
       <Section id="storage" icon={I.barChart(G.text, 20)} title="Storage and data" sub="See what's using space, chat by chat"
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
+               activeSection={subSection} onOpen={setSubSection}
+               onBack={() => setSubSection(null)}>
         <StorageUsage/>
       </Section>
 
       <Section id="livelocation" icon={I.mapPin(G.text, 20)} title="Live Location" sub="Who's sharing, and with you"
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
+               activeSection={subSection} onOpen={setSubSection}
+               onBack={() => setSubSection(null)}>
         <LiveLocationList toast={toast}/>
+      </Section>
       </Section>
 
       {activeSection === null && (

@@ -3172,7 +3172,9 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
   if (voice.state === "recording") {
     return (
       <div style={{
-        display: "flex", alignItems: "center", gap: 12, padding: "10px 16px",
+        display: "flex", alignItems: "center", gap: 12,
+        paddingTop: 10, paddingLeft: 16, paddingRight: 16,
+        paddingBottom: "max(10px, env(safe-area-inset-bottom))",
         borderTop: `1px solid ${G.border}`, background: G.surface,
       }}>
         <div onClick={voice.cancel} style={{ cursor: "pointer" }} title="Cancel">
@@ -3299,6 +3301,13 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
         rows={1}
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={onInputKeyDown}
+        onFocus={() => {
+          setTimeout(() => {
+            window.scrollTo(0, 0);
+            document.documentElement.scrollTop = 0;
+            document.body.scrollTop = 0;
+          }, 50);
+        }}
         placeholder={disappearSecs
           ? `Disappears after ${durationLabel(disappearSecs)}…`
           : editing ? "Edit message…" : "Message"}
@@ -3306,9 +3315,6 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
           flex: 1, padding: "11px 14px", borderRadius: 22, background: G.dim,
           border: `1px solid ${G.border}`, color: G.text, fontSize: 14.5,
           outline: "none", resize: "none", fontFamily: "inherit", lineHeight: 1.35,
-          // Grow with content up to a few lines, then scroll inside — so a
-          // multi-line draft (Enter-to-send OFF) doesn't push the whole
-          // composer off-screen.
           maxHeight: 120, overflowY: "auto",
         }}/>
 
