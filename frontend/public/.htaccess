@@ -13,12 +13,11 @@
     Header set Expires "0"
   </FilesMatch>
 
-  # The hashed bundle in assets/ is the opposite case: a new build always
-  # produces new filenames, so a cached copy of an old one is never stale
-  # — safe to cache aggressively for a whole year. Explicitly excludes
-  # service-worker.js (matched above instead) even though it also ends in
-  # .js, so the two rules can't fight over which one wins.
-  <FilesMatch "^(?!service-worker\.js$).+\.(js|css)$">
-    Header set Cache-Control "public, max-age=31536000, immutable"
+  # JS/CSS use fixed (unhashed) filenames, so browsers must revalidate
+  # on every visit — the server returns 304 if unchanged, full body if
+  # a new deploy landed. Without this, a cached index.js can survive
+  # for up to a year and the user never sees the update.
+  <FilesMatch "^(?!service-worker\.js$).+\.(js|css|mjs)$">
+    Header set Cache-Control "no-cache, must-revalidate"
   </FilesMatch>
 </IfModule>
