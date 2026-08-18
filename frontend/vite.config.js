@@ -28,14 +28,11 @@ export default defineConfig({
         manualChunks: {
           vendor: ['react', 'react-dom'],
         },
-        // Fixed, hash-free filenames (index.js, vendor.js, PdfDoc.js,
-        // index.css, pdf.worker.min.mjs) instead of Vite's content-hashed
-        // names. NOTE: this removes automatic cache-busting — the
-        // service-worker cache version (SHELL_CACHE in service-worker.js) MUST
-        // be bumped on every deploy or browsers can serve the old files.
-        entryFileNames: 'assets/[name].js',
-        chunkFileNames: 'assets/[name].js',
-        assetFileNames: 'assets/[name][extname]',
+        // Content-hashed filenames (index-abc123.js) so every deploy
+        // produces new URLs and browsers always fetch the latest code.
+        entryFileNames: 'assets/[name]-[hash].js',
+        chunkFileNames: 'assets/[name]-[hash].js',
+        assetFileNames: 'assets/[name]-[hash][extname]',
       },
     },
   },
