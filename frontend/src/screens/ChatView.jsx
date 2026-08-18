@@ -3303,11 +3303,21 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={onInputKeyDown}
           onFocus={() => {
-            setTimeout(() => {
+            const kill = () => {
               window.scrollTo(0, 0);
               document.documentElement.scrollTop = 0;
               document.body.scrollTop = 0;
-            }, 50);
+            };
+            kill();
+            const t1 = setTimeout(kill, 50);
+            const t2 = setTimeout(kill, 150);
+            const t3 = setTimeout(kill, 300);
+            const onScroll = () => kill();
+            window.addEventListener("scroll", onScroll);
+            setTimeout(() => {
+              window.removeEventListener("scroll", onScroll);
+              clearTimeout(t1); clearTimeout(t2); clearTimeout(t3);
+            }, 500);
           }}
           placeholder={disappearSecs
             ? `Disappears after ${durationLabel(disappearSecs)}…`
