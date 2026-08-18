@@ -13,9 +13,7 @@
     Header set Expires "0"
   </FilesMatch>
 
-  # Content-hashed bundles (index-abc123.js): a new build produces new
-  # filenames, so a cached copy is never stale — safe to cache for a year.
   <FilesMatch "^(?!service-worker\.js$).+\.(js|css|mjs)$">
-    Header set Cache-Control "public, max-age=31536000, immutable"
+    Header set Cache-Control "no-cache, must-revalidate"
   </FilesMatch>
 </IfModule>
