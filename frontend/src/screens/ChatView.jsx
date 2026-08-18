@@ -1169,7 +1169,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         </div>
       )}
 
-      {chat.topics_enabled && (
+      {!!chat.topics_enabled && (
         <TopicStrip topics={topics} activeTopicId={activeTopicId} onSelect={setActiveTopicId}
                     onCreated={(topic) => setTopics((current) => [...current, topic])}
                     chatId={chat.id} toast={toast}/>

@@ -842,21 +842,13 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
         ))}
       </Section>
 
-      {/* ── Invite a friend (direct action) ──────────────────── */}
-      {activeSection === null && (
-        <SRow icon={I.share(G.text, 20)} label="Invite a friend"
-              sub="Share TalkEx with your contacts"
-              onClick={async () => {
-                const url = `${window.location.origin}/?ref=${me.username}`;
-                const text = `Hey! Join me on TalkEx — free, fast, and secure messaging & calling.\n${url}`;
-                if (navigator.share) {
-                  try { await navigator.share({ title: "TalkEx", text }); } catch { /* cancelled */ }
-                } else {
-                  navigator.clipboard?.writeText(text);
-                  toast("Invite link copied");
-                }
-              }}/>
-      )}
+      {/* ── Invite a friend ─────────────────────────────────── */}
+      <Section id="invite" icon={I.share(G.text, 20)} title="Invite a friend"
+               sub="Share TalkEx with your contacts"
+               activeSection={activeSection} onOpen={setActiveSection}
+               onBack={() => { setActiveSection(null); setSubSection(null); }}>
+        <InviteFriend me={me} toast={toast}/>
+      </Section>
 
       {/* ── Help & Support ──────────────────────────────────── */}
       <Section id="help" icon={I.info(G.text, 20)} title={t("settings.group.help_support")}
@@ -904,7 +896,8 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
       <Section id="general" icon={I.palette(G.text, 20)} title={t("settings.group.general")}
                sub="QR code, appearance, language"
                activeSection={activeSection} onOpen={(id) => { setActiveSection(id); setSubSection(null); }}
-               onBack={() => { setActiveSection(null); setSubSection(null); }}>
+               onBack={() => { setActiveSection(null); setSubSection(null); }}
+               hideHeader={!!subSection}>
 
         <Section id="myqr" icon={I.search(G.text, 20)} title="My QR code"
                  sub="Let people scan to add you"
@@ -1085,7 +1078,8 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
       <Section id="chats_privacy" icon={I.eye(G.text, 20)} title={t("settings.group.chats_privacy")}
                sub="Notifications, privacy, data"
                activeSection={activeSection} onOpen={(id) => { setActiveSection(id); setSubSection(null); }}
-               onBack={() => { setActiveSection(null); setSubSection(null); }}>
+               onBack={() => { setActiveSection(null); setSubSection(null); }}
+               hideHeader={!!subSection}>
 
         <Section id="notifications" icon={I.bell(G.text, 20)} title="Notifications" sub="Push alerts"
                  activeSection={subSection} onOpen={setSubSection}
@@ -1200,7 +1194,8 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
       <Section id="account_group" icon={I.user(G.text, 20)} title={t("settings.group.account")}
                sub="Blocked, sign out, phone, password"
                activeSection={activeSection} onOpen={(id) => { setActiveSection(id); setSubSection(null); }}
-               onBack={() => { setActiveSection(null); setSubSection(null); }}>
+               onBack={() => { setActiveSection(null); setSubSection(null); }}
+               hideHeader={!!subSection}>
 
         <Section id="blocked" icon={I.ban(G.text, 20)} title="Blocked" sub={`${blocked.length} blocked`}
                  activeSection={subSection} onOpen={setSubSection}
@@ -1264,7 +1259,8 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
       <Section id="business" icon={I.star(G.text, 20)} title={t("settings.group.business")}
                sub="Catalog, automation, API"
                activeSection={activeSection} onOpen={(id) => { setActiveSection(id); setSubSection(null); }}
-               onBack={() => { setActiveSection(null); setSubSection(null); }}>
+               onBack={() => { setActiveSection(null); setSubSection(null); }}
+               hideHeader={!!subSection}>
 
       {payConfig?.configured && (
         <Section id="subscription" icon={I.star(G.text, 20)} title="Subscription"
@@ -1507,7 +1503,8 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
       <Section id="storage_group" icon={I.barChart(G.text, 20)} title={t("settings.group.storage")}
                sub="Storage, live location"
                activeSection={activeSection} onOpen={(id) => { setActiveSection(id); setSubSection(null); }}
-               onBack={() => { setActiveSection(null); setSubSection(null); }}>
+               onBack={() => { setActiveSection(null); setSubSection(null); }}
+               hideHeader={!!subSection}>
 
       <Section id="storage" icon={I.barChart(G.text, 20)} title="Storage and data" sub="See what's using space, chat by chat"
                activeSection={subSection} onOpen={setSubSection}
@@ -2264,7 +2261,7 @@ function GroupLabel({ label, activeSection }) {
   );
 }
 
-function Section({ id, icon, title, sub, activeSection, onOpen, onBack, children }) {
+function Section({ id, icon, title, sub, activeSection, onOpen, onBack, hideHeader, children }) {
   if (activeSection === null) {
     return (
       <div onClick={() => onOpen(id)} style={{
@@ -2288,18 +2285,19 @@ function Section({ id, icon, title, sub, activeSection, onOpen, onBack, children
     );
   }
 
-  // A different category is currently open — this one renders nothing at all.
   if (activeSection !== id) return null;
 
   return (
     <div>
-      <div onClick={onBack} style={{
-        display: "flex", alignItems: "center", gap: 12, padding: "14px 20px",
-        cursor: "pointer", borderBottom: `1px solid ${G.border}`, background: G.surface,
-      }}>
-        {I.back()}
-        <div style={{ fontSize: 17, fontWeight: 700 }}>{title}</div>
-      </div>
+      {!hideHeader && (
+        <div onClick={onBack} style={{
+          display: "flex", alignItems: "center", gap: 12, padding: "14px 20px",
+          cursor: "pointer", borderBottom: `1px solid ${G.border}`, background: G.surface,
+        }}>
+          {I.back()}
+          <div style={{ fontSize: 17, fontWeight: 700 }}>{title}</div>
+        </div>
+      )}
       <div>{children}</div>
     </div>
   );
