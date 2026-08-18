@@ -80,6 +80,8 @@ export default function App() {
   useEffect(() => { Sfu.config().then((c) => setSfuEnabled(c.enabled)).catch(() => {}); }, []);
   const [theme, setThemeState] = useState(getStoredTheme);
   const [accent, setAccentState] = useState(getStoredAccent);
+  const [settingsNavDepth, setSettingsNavDepth] = useState(0);
+  const settingsGoBackRef = useRef(null);
 
   // The "chat with N people to earn the blue tick" nudge — { chatted_with,
   // target } while still working toward it, cleared (never re-fetched) once
@@ -365,6 +367,7 @@ export default function App() {
   const changeTab = useCallback((key) => {
     setTab(key);
     setSearchResults(null);
+    if (key !== "settings") { setSettingsNavDepth(0); settingsGoBackRef.current = null; }
     if (key === "calls" && missedCalls > 0) {
       setMissedCalls(0);
       Calls.markSeen().catch(() => {});
@@ -387,7 +390,15 @@ export default function App() {
   // native app has. Works in a desktop browser too (the browser Back button
   // drives the same popstate), so there's nothing Capacitor-specific here.
   const backLayers = [];
-  if (tab !== "chats" && !openChat) backLayers.push(() => changeTab("chats"));
+  if (tab !== "chats" && !openChat) backLayers.push(() => {
+    if (tab === "settings" && settingsGoBackRef.current) { settingsGoBackRef.current(); return; }
+    changeTab("chats");
+  });
+  if (tab === "settings" && settingsNavDepth > 0) {
+    for (let i = 0; i < settingsNavDepth; i++) {
+      backLayers.push(() => settingsGoBackRef.current?.());
+    }
+  }
   if (openChat) backLayers.push(() => setOpenChat(null));
   if (discoverOpen) backLayers.push(() => setDiscoverOpen(false));
   if (searchResults) backLayers.push(() => setSearchResults(null));
@@ -910,7 +921,8 @@ export default function App() {
                       theme={theme} onThemeChange={setTheme}
                       accent={accent} onAccentChange={setAccent}
                       onOpenChat={(chat) => { reloadChats(); setOpenChat(chat); }}
-                      onSignedOut={() => { setMe(null); setChats([]); setTab("chats"); }}/>
+                      onSignedOut={() => { setMe(null); setChats([]); setTab("chats"); }}
+                      onNavigationChange={() => {}}/>
           )}
           {tab === "admin" && me.is_superadmin && <AdminPanel toast={toast}/>}
         </>
@@ -1400,7 +1412,8 @@ function DesktopShell({
                         theme={theme} onThemeChange={onThemeChange}
                         accent={accent} onAccentChange={onAccentChange}
                         onOpenChat={onOpenChat}
-                        onSignedOut={onSignedOut}/>
+                        onSignedOut={onSignedOut}
+                        onNavigationChange={(nav) => { setSettingsNavDepth(nav.depth); settingsGoBackRef.current = nav.goBack; }}/>
             )}
             {tab === "admin" && me.is_superadmin && <AdminPanel toast={toast}/>}
           </>

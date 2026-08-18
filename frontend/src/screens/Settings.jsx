@@ -32,7 +32,8 @@ import { COUNTRY_CODES, flagFor, samplePlaceholder, splitPhone } from "../countr
  * these toggles wired to nothing.
  */
 export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat,
-                                    theme, onThemeChange, accent, onAccentChange }) {
+                                    theme, onThemeChange, accent, onAccentChange,
+                                    onNavigationChange }) {
   const { t, lang, setLang } = useT();
   const [editing, setEditing] = useState(false);
   const [helpView, setHelpView] = useState(null); // 'blog' | 'feedback' | null
@@ -80,6 +81,19 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
   const [pushBusy, setPushBusy] = useState(false);
   const [activeSection, setActiveSection] = useState(null);
   const [subSection, setSubSection] = useState(null);
+
+  useEffect(() => {
+    if (onNavigationChange) {
+      const depth = (activeSection ? 1 : 0) + (subSection ? 1 : 0);
+      onNavigationChange({
+        depth,
+        goBack: () => {
+          if (subSection) { setSubSection(null); }
+          else if (activeSection) { setActiveSection(null); }
+        },
+      });
+    }
+  }, [activeSection, subSection, onNavigationChange]);
   const [autoDownload, setAutoDownloadState] = useState(getAutoDownload);
   const [wallpaper, setWallpaperState] = useState(getWallpaper);
   const [blur, setBlurState] = useState(getWallpaperBlur);
@@ -632,96 +646,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
             </div>
           </div>
 
-          {editing ? (
-            <div style={{ padding: 20 }}>
-              <Field label="Name" value={form.name}
-                     onChange={(event) => setForm({ ...form, name: event.target.value })}/>
-              <Field label="Bio" value={form.bio}
-                     onChange={(event) => setForm({ ...form, bio: event.target.value })}/>
-
-              <div style={{ marginTop: 14, marginBottom: 4, fontSize: 13, fontWeight: 700, color: G.sub }}>
-                Business / Services / Designation
-              </div>
-              <div style={{ fontSize: 11.5, color: G.muted, marginBottom: 8 }}>
-                Choose any that apply — they show on your profile.
-              </div>
-
-              {/* Selected items shown as removable chips above the dropdown. */}
-              {form.business.length > 0 && (
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginBottom: 8 }}>
-                  {form.business.map((cat) => (
-                    <span key={cat} onClick={() => toggleBusiness(cat)} title="Remove" style={{
-                      display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
-                      padding: "6px 10px", borderRadius: 16, fontSize: 12.5,
-                      background: G.accent, color: G.accentText, border: `1px solid ${G.accent}`,
-                    }}>{cat} <span style={{ fontSize: 13, opacity: 0.8 }}>✕</span></span>
-                  ))}
-                </div>
-              )}
-
-              {/* Collapsed dropdown — opens a scrollable checklist. */}
-              <div style={{ position: "relative", marginBottom: 4 }}>
-                <div onClick={() => setBusinessOpen((v) => !v)} style={{
-                  display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
-                  padding: "10px 12px", borderRadius: 10, cursor: "pointer",
-                  background: G.dim, border: `1px solid ${businessOpen ? G.accent : G.border}`,
-                  fontSize: 13.5, color: form.business.length ? G.text : G.muted,
-                }}>
-                  <span>{form.business.length ? `${form.business.length} selected` : "Select category…"}</span>
-                  <span style={{ transform: businessOpen ? "rotate(180deg)" : "none", transition: "transform .15s" }}>
-                    {I.chevronDown ? I.chevronDown(G.sub, 16) : "▾"}
-                  </span>
-                </div>
-                {businessOpen && (
-                  <div style={{
-                    marginTop: 6, borderRadius: 10, border: `1px solid ${G.border}`,
-                    background: G.surface, maxHeight: 240, overflowY: "auto",
-                  }}>
-                    {BUSINESS_CATEGORIES.map((cat) => {
-                      const on = form.business.includes(cat);
-                      return (
-                        <div key={cat} onClick={() => toggleBusiness(cat)} style={{
-                          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
-                          padding: "9px 12px", cursor: "pointer", fontSize: 13.5,
-                          color: on ? G.accentText : G.text,
-                          borderBottom: `1px solid ${G.border}`,
-                          background: on ? `${G.accent}14` : "transparent",
-                        }}>
-                          <span>{cat}</span>
-                          {on && <span>{I.check ? I.check(G.accent, 15) : "✓"}</span>}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              <div style={{ marginTop: 14, marginBottom: 6, fontSize: 13, fontWeight: 700, color: G.sub }}>
-                Social Links
-              </div>
-              {SOCIAL_PLATFORMS.map((platform) => (
-                <div key={platform.key} style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
-                  <span style={{
-                    width: 26, height: 26, borderRadius: "50%", flexShrink: 0, marginBottom: 12,
-                    background: platform.brand, display: "flex", alignItems: "center", justifyContent: "center",
-                  }}>{platform.glyph("#fff", 16)}</span>
-                  <Field label={platform.label} value={form[platform.field]}
-                         placeholder={`https://…`} style={{ flex: 1 }}
-                         onChange={(event) => setForm({ ...form, [platform.field]: event.target.value })}/>
-                </div>
-              ))}
-
-              <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
-                <Button onClick={saveProfile} style={{ flex: 1 }}>Save</Button>
-                <Button variant="ghost" onClick={() => setEditing(false)} style={{ flex: 1 }}>
-                  Cancel
-                </Button>
-              </div>
-            </div>
-          ) : (
-            <SRow icon={I.edit(G.text, 18)} label="Edit profile" sub="Name, bio and social links"
-                  onClick={() => setEditing(true)}/>
-          )}
+          {/* Edit profile is now inside Account section */}
         </>
       )}
 
@@ -811,130 +736,165 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
         );
       })()}
 
-      {/* ── Linked devices (prominent, top) ────────────────── */}
-      <Section id="devices" icon={I.monitor(G.text, 20)} title="Linked devices" sub={`${sessions.length} device${sessions.length === 1 ? "" : "s"}`}
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => setActiveSection(null)}>
-        <SRow icon={I.link(G.text, 18)} label="Link a device" sub="Approve a sign-in using a code from another device"
-              onClick={() => setLinkingDevice(true)}/>
-
-        {sessions.map((session) => (
-          <SRow key={session.session_id}
-                icon={session.is_current ? I.mapPin(G.accent, 18) : I.monitor(G.accent, 18)}
-                label={session.device_label + (session.is_current ? " (this device)" : "")}
-                sub={`Linked ${whenLabel(session.created_at)}`
-                  + (!session.is_current && session.short_lived ? " · auto sign-out in 4h" : "")}
-                right={
-                  !session.is_current && (
-                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                      <div title="Auto sign out after 4 hours" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        <span style={{ fontSize: 11, color: G.muted }}>4h</span>
-                        <Toggle on={session.short_lived}
-                                onChange={(value) => toggleSessionShortLived(session.session_id, value)}/>
-                      </div>
-                      <Button variant="ghost" style={{ padding: "6px 12px", fontSize: 12 }}
-                              onClick={() => revokeSession(session.session_id)}>
-                        Sign out
-                      </Button>
-                    </div>
-                  )
-                }/>
-        ))}
-      </Section>
-
-      {/* ── Invite a friend ─────────────────────────────────── */}
-      <Section id="invite" icon={I.share(G.text, 20)} title="Invite a friend"
-               sub="Share TalkEx with your contacts"
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => { setActiveSection(null); setSubSection(null); }}>
-        <InviteFriend me={me} toast={toast}/>
-      </Section>
-
-      {/* ── Help & Support ──────────────────────────────────── */}
-      <Section id="help" icon={I.info(G.text, 20)} title={t("settings.group.help_support")}
-               sub="Contact support, app info"
-               activeSection={activeSection} onOpen={setActiveSection}
-               onBack={() => { setActiveSection(null); setSubSection(null); }}>
-        <div style={{ padding: "8px 20px 18px" }}>
-          <SRow icon={I.mail(G.text, 18)} label="Contact support"
-                sub="Questions, bugs or feedback"
-                onClick={() => {
-                  const subject = encodeURIComponent("TalkEx feedback");
-                  window.location.href = `mailto:support@coreaxis.cloud?subject=${subject}`;
-                }}/>
-          <SRow icon={I.star(G.text, 18)} label="Send feedback"
-                sub="Answer a few quick questions"
-                onClick={() => setHelpView("feedback")}/>
-          <SRow icon={I.info(G.text, 18)} label="TalkEx Blog"
-                sub="News, tips and updates"
-                onClick={() => setHelpView("blog")}/>
-          <SRow icon={I.shield(G.text, 18)} label="Terms and privacy"
-                sub="How TalkEx handles your data"
-                onClick={() => setHelpView("privacy")}/>
-
-          <div style={{ marginTop: 14, marginBottom: 6, fontSize: 13, fontWeight: 700, color: G.sub }}>
-            More from CoreAxis
-          </div>
-          <SRow icon={<span style={{ fontSize: 18 }}>🛒</span>} label="CoreAxis ePOS"
-                sub="coreaxis.cloud"
-                onClick={() => window.open("https://coreaxis.cloud", "_blank", "noopener")}/>
-          <SRow icon={<span style={{ fontSize: 18 }}>🚀</span>} label="CoreAxis Ventures"
-                sub="ventures.coreaxis.cloud"
-                onClick={() => window.open("https://ventures.coreaxis.cloud", "_blank", "noopener")}/>
-
-          <div style={{ fontSize: 12, color: G.muted, textAlign: "center", marginTop: 16 }}>
-            TalkEx — Made from Bihar, connecting the world
-          </div>
-        </div>
-      </Section>
-
-      {helpView === "feedback" && <FeedbackForm onClose={() => setHelpView(null)} toast={toast}/>}
-      {helpView === "blog" && <BlogSheet onClose={() => setHelpView(null)}/>}
-      {helpView === "privacy" && <PrivacySheet onClose={() => setHelpView(null)}/>}
-
-      {/* ── General ─────────────────────────────────────────── */}
-      <Section id="general" icon={I.palette(G.text, 20)} title={t("settings.group.general")}
-               sub="QR code, appearance, language"
+      {/* ── Account (top) ───────────────────────────────────── */}
+      <Section id="account_group" icon={I.user(G.text, 20)} title={t("settings.group.account")}
+               sub="Profile, blocked, sign out"
                activeSection={activeSection} onOpen={(id) => { setActiveSection(id); setSubSection(null); }}
                onBack={() => { setActiveSection(null); setSubSection(null); }}
                hideHeader={!!subSection}>
 
-        <Section id="myqr" icon={I.search(G.text, 20)} title="My QR code"
-                 sub="Let people scan to add you"
-                 activeSection={subSection} onOpen={setSubSection}
-                 onBack={() => setSubSection(null)}>
-          <div style={{ padding: "12px 20px 20px", textAlign: "center" }}>
-            <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
-              <QrView value={`${window.location.origin}/?user=${me.username}`} size={220}/>
-            </div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: G.text }}>{me.name}</div>
-            <div style={{ fontSize: 13, color: G.muted, marginBottom: 16 }}>@{me.username}</div>
-            <Button style={{ width: "100%", marginBottom: 8 }} onClick={async () => {
-              const url = `${window.location.origin}/?user=${me.username}`;
-              if (navigator.share) { try { await navigator.share({ title: me.name, url }); } catch { /* cancelled */ } }
-              else { navigator.clipboard?.writeText(url); toast("Profile link copied"); }
-            }}>Share my code</Button>
+        <Section id="editprofile" icon={I.edit(G.text, 20)} title="Edit Profile" sub="Name, bio and social links"
+                 activeSection={subSection} onOpen={() => { setSubSection("editprofile"); setEditing(true); }}
+                 onBack={() => { setSubSection(null); setEditing(false); }}>
+          <div style={{ padding: 20 }}>
+            <Field label="Name" value={form.name}
+                   onChange={(event) => setForm({ ...form, name: event.target.value })}/>
+            <Field label="Bio" value={form.bio}
+                   onChange={(event) => setForm({ ...form, bio: event.target.value })}/>
 
-            {qrScanOpen ? (
-              <div style={{ marginTop: 8 }}>
-                <div style={{ fontSize: 12.5, color: G.muted, marginBottom: 10 }}>
-                  Point the camera at someone's TalkEx QR code.
-                </div>
-                <QrScanner onDecode={onUserQrScanned}
-                           onError={(message) => { setQrScanOpen(false); toast(message || "Camera error"); }}/>
-                <Button variant="ghost" style={{ width: "100%", marginTop: 10 }}
-                        onClick={() => setQrScanOpen(false)}>Cancel</Button>
+            <div style={{ marginTop: 14, marginBottom: 4, fontSize: 13, fontWeight: 700, color: G.sub }}>
+              Business / Services / Designation
+            </div>
+            <div style={{ fontSize: 11.5, color: G.muted, marginBottom: 8 }}>
+              Choose any that apply — they show on your profile.
+            </div>
+
+            {form.business.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginBottom: 8 }}>
+                {form.business.map((cat) => (
+                  <span key={cat} onClick={() => toggleBusiness(cat)} title="Remove" style={{
+                    display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
+                    padding: "6px 10px", borderRadius: 16, fontSize: 12.5,
+                    background: G.accent, color: G.accentText, border: `1px solid ${G.accent}`,
+                  }}>{cat} <span style={{ fontSize: 13, opacity: 0.8 }}>✕</span></span>
+                ))}
               </div>
-            ) : (
-              <Button variant="ghost" style={{ width: "100%", marginBottom: 8 }}
-                      onClick={() => setQrScanOpen(true)}>Scan a code</Button>
             )}
 
-            <div style={{ fontSize: 11.5, color: G.muted }}>
-              Scanning this opens a chat with you.
+            <div style={{ position: "relative", marginBottom: 4 }}>
+              <div onClick={() => setBusinessOpen((v) => !v)} style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
+                padding: "10px 12px", borderRadius: 10, cursor: "pointer",
+                background: G.dim, border: `1px solid ${businessOpen ? G.accent : G.border}`,
+                fontSize: 13.5, color: form.business.length ? G.text : G.muted,
+              }}>
+                <span>{form.business.length ? `${form.business.length} selected` : "Select category…"}</span>
+                <span style={{ transform: businessOpen ? "rotate(180deg)" : "none", transition: "transform .15s" }}>
+                  {I.chevronDown ? I.chevronDown(G.sub, 16) : "▾"}
+                </span>
+              </div>
+              {businessOpen && (
+                <div style={{
+                  marginTop: 6, borderRadius: 10, border: `1px solid ${G.border}`,
+                  background: G.surface, maxHeight: 240, overflowY: "auto",
+                }}>
+                  {BUSINESS_CATEGORIES.map((cat) => {
+                    const on = form.business.includes(cat);
+                    return (
+                      <div key={cat} onClick={() => toggleBusiness(cat)} style={{
+                        display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
+                        padding: "9px 12px", cursor: "pointer", fontSize: 13.5,
+                        color: on ? G.accentText : G.text,
+                        borderBottom: `1px solid ${G.border}`,
+                        background: on ? `${G.accent}14` : "transparent",
+                      }}>
+                        <span>{cat}</span>
+                        {on && <span>{I.check ? I.check(G.accent, 15) : "✓"}</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div style={{ marginTop: 14, marginBottom: 6, fontSize: 13, fontWeight: 700, color: G.sub }}>
+              Social Links
+            </div>
+            {SOCIAL_PLATFORMS.map((platform) => (
+              <div key={platform.key} style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
+                <span style={{
+                  width: 26, height: 26, borderRadius: "50%", flexShrink: 0, marginBottom: 12,
+                  background: platform.brand, display: "flex", alignItems: "center", justifyContent: "center",
+                }}>{platform.glyph("#fff", 16)}</span>
+                <Field label={platform.label} value={form[platform.field]}
+                       placeholder={`https://…`} style={{ flex: 1 }}
+                       onChange={(event) => setForm({ ...form, [platform.field]: event.target.value })}/>
+              </div>
+            ))}
+
+            <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
+              <Button onClick={() => { saveProfile(); setSubSection(null); setEditing(false); }} style={{ flex: 1 }}>Save</Button>
+              <Button variant="ghost" onClick={() => { setSubSection(null); setEditing(false); }} style={{ flex: 1 }}>
+                Cancel
+              </Button>
             </div>
           </div>
         </Section>
+
+        <Section id="blocked" icon={I.ban(G.text, 20)} title="Blocked" sub={`${blocked.length} blocked`}
+                 activeSection={subSection} onOpen={setSubSection}
+                 onBack={() => setSubSection(null)}>
+          {blocked.length === 0 ? (
+            <div style={{ padding: "14px 20px", fontSize: 13, color: G.muted }}>
+              Nobody is blocked.
+            </div>
+          ) : blocked.map((person) => (
+            <SRow key={person.id} icon={I.user(G.text, 18)} label={person.name} sub={`@${person.username}`}
+                  right={
+                    <Button variant="ghost" style={{ padding: "6px 12px", fontSize: 12 }}
+                            onClick={async () => {
+                              await Users.unblock(person.id);
+                              setBlocked((current) => current.filter((p) => p.id !== person.id));
+                              toast("Unblocked");
+                            }}>Unblock</Button>
+                  }/>
+          ))}
+        </Section>
+
+        <Section id="account" icon={I.logOut(G.text, 20)} title="Account" sub={me.phone || "Sign out, deactivate or delete"}
+                 activeSection={subSection} onOpen={setSubSection}
+                 onBack={() => setSubSection(null)}>
+          {savedAccounts.filter((account) => account.userId !== me.id).map((account) => (
+            <SRow key={account.userId}
+                  icon={<Av av={account.avatarLetter} color={account.color} size={30}/>}
+                  label={account.name} sub={`@${account.username}`}
+                  onClick={() => switchToAccount(account.userId)}
+                  right={
+                    <Button variant="ghost" style={{ padding: "6px 12px", fontSize: 12 }}
+                            onClick={(event) => { event.stopPropagation(); removeSavedAccount(account.userId); }}>
+                      Forget
+                    </Button>
+                  }/>
+          ))}
+          <SRow icon={I.user(G.text, 18)} label="Add another account"
+                sub="Switch between accounts on this device"
+                onClick={() => {
+                  rememberAccount(me, getToken());
+                  setAddingAccount(true);
+                }}/>
+          <SRow icon={I.phone(G.text, 18)} label="Change phone number" sub={me.phone || "Not set"}
+                onClick={() => setChangingPhone(true)}/>
+          <SRow icon={I.lock(G.text, 18)} label="Set password"
+                sub="For signing in with a username, without a phone code"
+                onClick={() => setSettingPassword(true)}/>
+          <SRow icon={I.mail(G.text, 18)} label="Email address"
+                sub={me.email_verified_at ? `${me.email} · verified` : "Not connected — used to recover a forgotten PIN"}
+                onClick={() => setConnectingEmail(true)}/>
+          <SRow icon={I.logOut(G.red, 18)} label="Sign out" danger onClick={signOut}/>
+          <SRow icon={I.moon(G.red, 18)} label="Deactivate account"
+                sub="Hides your account until you sign back in"
+                danger onClick={() => setDeactivating(true)}/>
+          <SRow icon={I.trash(G.red, 18)} label="Delete account" sub="Permanent — cannot be undone"
+                danger onClick={() => setDeletingAccount(true)}/>
+        </Section>
+      </Section>
+
+      {/* ── General ─────────────────────────────────────────── */}
+      <Section id="general" icon={I.palette(G.text, 20)} title={t("settings.group.general")}
+               sub="Appearance, language, theme"
+               activeSection={activeSection} onOpen={(id) => { setActiveSection(id); setSubSection(null); }}
+               onBack={() => { setActiveSection(null); setSubSection(null); }}
+               hideHeader={!!subSection}>
 
         <Section id="appearance" icon={I.palette(G.text, 20)} title="Appearance" sub="Theme, color and wallpaper"
                  activeSection={subSection} onOpen={setSubSection}
@@ -1042,9 +1002,13 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
           <input type="range" min={0} max={20} value={blur}
                  onChange={(event) => changeWallpaperBlur(Number(event.target.value))}
                  style={{ width: "100%", accentColor: G.accent }}/>
+        </div>
+      </Section>
 
-          <div style={{ fontSize: 12, color: G.muted, margin: "16px 0 10px" }}>{t("settings.appearance.language")}</div>
-          <div style={{ display: "flex", gap: 6 }}>
+        {!subSection && (<>
+          <SRow icon={I.globe(G.text, 18)} label={t("settings.appearance.language")}
+                sub={LANGUAGES.find((l) => l.code === lang)?.nativeLabel || lang}/>
+          <div style={{ padding: "0 20px 14px", display: "flex", gap: 6 }}>
             {LANGUAGES.map((l) => (
               <button key={l.code} onClick={() => setLang(l.code)} style={{
                 flex: 1, padding: "9px 4px", borderRadius: 10, cursor: "pointer",
@@ -1056,22 +1020,69 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
             ))}
           </div>
 
-          <div style={{
-            display: "flex", alignItems: "center", justifyContent: "space-between",
-            gap: 12, marginTop: 20, paddingTop: 16, borderTop: `1px solid ${G.border}`,
-          }}>
-            <div>
-              <div style={{ fontSize: 14 }}>{t("settings.appearance.enter_to_send")}</div>
-              <div style={{ fontSize: 11.5, color: G.muted, marginTop: 2 }}>
-                {enterToSend
-                  ? t("settings.appearance.enter_on")
-                  : t("settings.appearance.enter_off")}
+          <div style={{ padding: "0 20px 14px" }}>
+            <div style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+            }}>
+              <div>
+                <div style={{ fontSize: 14 }}>{t("settings.appearance.enter_to_send")}</div>
+                <div style={{ fontSize: 11.5, color: G.muted, marginTop: 2 }}>
+                  {enterToSend
+                    ? t("settings.appearance.enter_on")
+                    : t("settings.appearance.enter_off")}
+                </div>
               </div>
+              <Toggle on={enterToSend} onChange={(value) => { setEnterToSend(value); saveEnterToSend(value); }}/>
             </div>
-            <Toggle on={enterToSend} onChange={(value) => { setEnterToSend(value); saveEnterToSend(value); }}/>
           </div>
-        </div>
+        </>)}
       </Section>
+
+      {/* ── Invite a Friend ─────────────────────────────────── */}
+      <Section id="invite" icon={I.share(G.text, 20)} title="Invite a friend"
+               sub="QR code, share link, invite contacts"
+               activeSection={activeSection} onOpen={(id) => { setActiveSection(id); setSubSection(null); }}
+               onBack={() => { setActiveSection(null); setSubSection(null); }}
+               hideHeader={!!subSection}>
+
+        <Section id="myqr" icon={I.search(G.text, 20)} title="My QR code"
+                 sub="Let people scan to add you"
+                 activeSection={subSection} onOpen={setSubSection}
+                 onBack={() => setSubSection(null)}>
+          <div style={{ padding: "12px 20px 20px", textAlign: "center" }}>
+            <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
+              <QrView value={`${window.location.origin}/?user=${me.username}`} size={220}/>
+            </div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: G.text }}>{me.name}</div>
+            <div style={{ fontSize: 13, color: G.muted, marginBottom: 16 }}>@{me.username}</div>
+            <Button style={{ width: "100%", marginBottom: 8 }} onClick={async () => {
+              const url = `${window.location.origin}/?user=${me.username}`;
+              if (navigator.share) { try { await navigator.share({ title: me.name, url }); } catch { /* cancelled */ } }
+              else { navigator.clipboard?.writeText(url); toast("Profile link copied"); }
+            }}>Share my code</Button>
+
+            {qrScanOpen ? (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontSize: 12.5, color: G.muted, marginBottom: 10 }}>
+                  Point the camera at someone's TalkEx QR code.
+                </div>
+                <QrScanner onDecode={onUserQrScanned}
+                           onError={(message) => { setQrScanOpen(false); toast(message || "Camera error"); }}/>
+                <Button variant="ghost" style={{ width: "100%", marginTop: 10 }}
+                        onClick={() => setQrScanOpen(false)}>Cancel</Button>
+              </div>
+            ) : (
+              <Button variant="ghost" style={{ width: "100%", marginBottom: 8 }}
+                      onClick={() => setQrScanOpen(true)}>Scan a code</Button>
+            )}
+
+            <div style={{ fontSize: 11.5, color: G.muted }}>
+              Scanning this opens a chat with you.
+            </div>
+          </div>
+        </Section>
+
+        {!subSection && <InviteFriend me={me} toast={toast}/>}
       </Section>
 
       {/* ── Chats & Privacy ──────────────────────────────────── */}
@@ -1190,69 +1201,35 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
         )}
       </Section>
 
-      {/* ── Account ──────────────────────────────────────────── */}
-      <Section id="account_group" icon={I.user(G.text, 20)} title={t("settings.group.account")}
-               sub="Blocked, sign out, phone, password"
-               activeSection={activeSection} onOpen={(id) => { setActiveSection(id); setSubSection(null); }}
-               onBack={() => { setActiveSection(null); setSubSection(null); }}
-               hideHeader={!!subSection}>
+      {/* ── Linked devices ───────────────────────────────────── */}
+      <Section id="devices" icon={I.monitor(G.text, 20)} title="Linked devices" sub={`${sessions.length} device${sessions.length === 1 ? "" : "s"}`}
+               activeSection={activeSection} onOpen={setActiveSection}
+               onBack={() => setActiveSection(null)}>
+        <SRow icon={I.link(G.text, 18)} label="Link a device" sub="Approve a sign-in using a code from another device"
+              onClick={() => setLinkingDevice(true)}/>
 
-        <Section id="blocked" icon={I.ban(G.text, 20)} title="Blocked" sub={`${blocked.length} blocked`}
-                 activeSection={subSection} onOpen={setSubSection}
-                 onBack={() => setSubSection(null)}>
-          {blocked.length === 0 ? (
-            <div style={{ padding: "14px 20px", fontSize: 13, color: G.muted }}>
-              Nobody is blocked.
-            </div>
-          ) : blocked.map((person) => (
-            <SRow key={person.id} icon={I.user(G.text, 18)} label={person.name} sub={`@${person.username}`}
-                  right={
-                    <Button variant="ghost" style={{ padding: "6px 12px", fontSize: 12 }}
-                            onClick={async () => {
-                              await Users.unblock(person.id);
-                              setBlocked((current) => current.filter((p) => p.id !== person.id));
-                              toast("Unblocked");
-                            }}>Unblock</Button>
-                  }/>
-          ))}
-        </Section>
-
-        <Section id="account" icon={I.logOut(G.text, 20)} title="Account" sub={me.phone || "Sign out, deactivate or delete"}
-                 activeSection={subSection} onOpen={setSubSection}
-                 onBack={() => setSubSection(null)}>
-          {savedAccounts.filter((account) => account.userId !== me.id).map((account) => (
-            <SRow key={account.userId}
-                  icon={<Av av={account.avatarLetter} color={account.color} size={30}/>}
-                  label={account.name} sub={`@${account.username}`}
-                  onClick={() => switchToAccount(account.userId)}
-                  right={
-                    <Button variant="ghost" style={{ padding: "6px 12px", fontSize: 12 }}
-                            onClick={(event) => { event.stopPropagation(); removeSavedAccount(account.userId); }}>
-                      Forget
-                    </Button>
-                  }/>
-          ))}
-          <SRow icon={I.user(G.text, 18)} label="Add another account"
-                sub="Switch between accounts on this device"
-                onClick={() => {
-                  rememberAccount(me, getToken());
-                  setAddingAccount(true);
-                }}/>
-          <SRow icon={I.phone(G.text, 18)} label="Change phone number" sub={me.phone || "Not set"}
-                onClick={() => setChangingPhone(true)}/>
-          <SRow icon={I.lock(G.text, 18)} label="Set password"
-                sub="For signing in with a username, without a phone code"
-                onClick={() => setSettingPassword(true)}/>
-          <SRow icon={I.mail(G.text, 18)} label="Email address"
-                sub={me.email_verified_at ? `${me.email} · verified` : "Not connected — used to recover a forgotten PIN"}
-                onClick={() => setConnectingEmail(true)}/>
-          <SRow icon={I.logOut(G.red, 18)} label="Sign out" danger onClick={signOut}/>
-          <SRow icon={I.moon(G.red, 18)} label="Deactivate account"
-                sub="Hides your account until you sign back in"
-                danger onClick={() => setDeactivating(true)}/>
-          <SRow icon={I.trash(G.red, 18)} label="Delete account" sub="Permanent — cannot be undone"
-                danger onClick={() => setDeletingAccount(true)}/>
-        </Section>
+        {sessions.map((session) => (
+          <SRow key={session.session_id}
+                icon={session.is_current ? I.mapPin(G.accent, 18) : I.monitor(G.accent, 18)}
+                label={session.device_label + (session.is_current ? " (this device)" : "")}
+                sub={`Linked ${whenLabel(session.created_at)}`
+                  + (!session.is_current && session.short_lived ? " · auto sign-out in 4h" : "")}
+                right={
+                  !session.is_current && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <div title="Auto sign out after 4 hours" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 11, color: G.muted }}>4h</span>
+                        <Toggle on={session.short_lived}
+                                onChange={(value) => toggleSessionShortLived(session.session_id, value)}/>
+                      </div>
+                      <Button variant="ghost" style={{ padding: "6px 12px", fontSize: 12 }}
+                              onClick={() => revokeSession(session.session_id)}>
+                        Sign out
+                      </Button>
+                    </div>
+                  )
+                }/>
+        ))}
       </Section>
 
       {/* ── Business Tools ───────────────────────────────────── */}
@@ -1518,6 +1495,48 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
         <LiveLocationList toast={toast}/>
       </Section>
       </Section>
+
+      {/* ── Help & Support ──────────────────────────────────── */}
+      <Section id="help" icon={I.info(G.text, 20)} title={t("settings.group.help_support")}
+               sub="Contact support, app info"
+               activeSection={activeSection} onOpen={setActiveSection}
+               onBack={() => { setActiveSection(null); setSubSection(null); }}>
+        <div style={{ padding: "8px 20px 18px" }}>
+          <SRow icon={I.mail(G.text, 18)} label="Contact support"
+                sub="Questions, bugs or feedback"
+                onClick={() => {
+                  const subject = encodeURIComponent("TalkEx feedback");
+                  window.location.href = `mailto:support@coreaxis.cloud?subject=${subject}`;
+                }}/>
+          <SRow icon={I.star(G.text, 18)} label="Send feedback"
+                sub="Answer a few quick questions"
+                onClick={() => setHelpView("feedback")}/>
+          <SRow icon={I.info(G.text, 18)} label="TalkEx Blog"
+                sub="News, tips and updates"
+                onClick={() => setHelpView("blog")}/>
+          <SRow icon={I.shield(G.text, 18)} label="Terms and privacy"
+                sub="How TalkEx handles your data"
+                onClick={() => setHelpView("privacy")}/>
+
+          <div style={{ marginTop: 14, marginBottom: 6, fontSize: 13, fontWeight: 700, color: G.sub }}>
+            More from CoreAxis
+          </div>
+          <SRow icon={<span style={{ fontSize: 18 }}>🛒</span>} label="CoreAxis ePOS"
+                sub="coreaxis.cloud"
+                onClick={() => window.open("https://coreaxis.cloud", "_blank", "noopener")}/>
+          <SRow icon={<span style={{ fontSize: 18 }}>🚀</span>} label="CoreAxis Ventures"
+                sub="ventures.coreaxis.cloud"
+                onClick={() => window.open("https://ventures.coreaxis.cloud", "_blank", "noopener")}/>
+
+          <div style={{ fontSize: 12, color: G.muted, textAlign: "center", marginTop: 16 }}>
+            TalkEx — Made from Bihar, connecting the world
+          </div>
+        </div>
+      </Section>
+
+      {helpView === "feedback" && <FeedbackForm onClose={() => setHelpView(null)} toast={toast}/>}
+      {helpView === "blog" && <BlogSheet onClose={() => setHelpView(null)}/>}
+      {helpView === "privacy" && <PrivacySheet onClose={() => setHelpView(null)}/>}
 
       {activeSection === null && (
         <div style={{ padding: 20, fontSize: 11.5, color: G.muted, lineHeight: 1.6 }}>

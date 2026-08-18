@@ -4397,6 +4397,10 @@ function ContactSheet({ onClose, onSave, toast }) {
     Contacts.list().then(setContacts).catch(() => setContacts([]));
   }, []);
 
+  useEffect(() => {
+    if (canPickDeviceContacts) importFromDevice();
+  }, []);
+
   const filtered = (contacts || []).filter((contact) =>
     !query.trim()
     || contact.name.toLowerCase().includes(query.trim().toLowerCase())
@@ -4449,19 +4453,19 @@ function ContactSheet({ onClose, onSave, toast }) {
   }
 
   return (
-    <Sheet title="Share a contact" onClose={onClose}>
+    <Sheet title={
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span>Share a contact</span>
+        <div onClick={() => setAddingNew(true)} style={{
+          cursor: "pointer", padding: 4, borderRadius: "50%", display: "flex",
+          alignItems: "center", justifyContent: "center",
+        }} title="New contact">
+          {I.plus(G.accent, 22)}
+        </div>
+      </div>
+    } onClose={onClose}>
       <Field value={query} onChange={(e) => setQuery(e.target.value)}
              placeholder="Search your contacts" style={{ marginBottom: 10 }}/>
-      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-        <Button variant="ghost" onClick={() => setAddingNew(true)} style={{ flex: 1 }}>
-          + New contact
-        </Button>
-        {canPickDeviceContacts && (
-          <Button variant="ghost" onClick={importFromDevice} style={{ flex: 1 }}>
-            Import from phone
-          </Button>
-        )}
-      </div>
       {contacts === null ? (
         <div style={{ fontSize: 13, color: G.sub, textAlign: "center", padding: 20 }}>Loading…</div>
       ) : filtered.length === 0 ? (
