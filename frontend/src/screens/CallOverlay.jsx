@@ -289,7 +289,7 @@ export function MoreMenu({ items, onClose }) {
  */
 export default function CallOverlay({
   call, onAccept, onReject, onEnd, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen, onEffect,
-  onAddParticipant,
+  onAddParticipant, onToggleHold,
 }) {
   const [sinkId, setSinkId] = useState(undefined);
   const [minimized, setMinimized] = useState(false);
@@ -569,7 +569,12 @@ function IncomingCall({ call, onAccept, onReject }) {
 
 const VIDEO_EFFECTS = [
   { key: "none", label: "None", filter: "none" },
-  { key: "blur", label: "Blur", filter: "blur(6px)" },
+  { key: "bgblur_light", label: "Bg Blur Light", filter: "bgblur:6" },
+  { key: "bgblur_heavy", label: "Bg Blur Heavy", filter: "bgblur:14" },
+  { key: "vbg_dark", label: "Dark Room", filter: "vbg:#1a1a2e" },
+  { key: "vbg_office", label: "Office", filter: "vbg:#e2e8f0" },
+  { key: "vbg_green", label: "Nature", filter: "vbg:#166534" },
+  { key: "blur", label: "Full Blur", filter: "blur(6px)" },
   { key: "bright", label: "Bright", filter: "brightness(1.25) contrast(1.05)" },
   { key: "warm", label: "Warm", filter: "sepia(0.35) saturate(1.3)" },
   { key: "cool", label: "Cool", filter: "hue-rotate(-15deg) saturate(1.2) brightness(1.05)" },
@@ -667,7 +672,7 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
 
         {!showMainVideo && (
           <PeerIdentity call={call}
-            subtitle={call.phase === "active" ? mmss(call.duration) : (call.ringConfirmed ? "Ringing…" : "Calling…")}/>
+            subtitle={call.onHold ? "On Hold" : call.phase === "active" ? mmss(call.duration) : (call.ringConfirmed ? "Ringing…" : "Calling…")}/>
         )}
 
         {showMainVideo && (
@@ -675,7 +680,7 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
             position: "absolute", top: isLandscape ? 8 : 16, left: 0, right: 0,
             textAlign: "center", fontSize: 13, color: "#ffffffcc",
           }}>
-            {call.peerName} · {mmss(call.duration)}
+            {call.peerName} · {call.onHold ? "On Hold" : mmss(call.duration)}
           </div>
         )}
 
@@ -798,6 +803,11 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
             icon: I.screenShare("#fff", 18),
             disabled: call.callKind !== "video",
             onClick: onShareScreen,
+          },
+          {
+            label: call.onHold ? "Resume call" : "Hold",
+            icon: call.onHold ? I.play("#fff", 18) : I.pause("#fff", 18),
+            onClick: onToggleHold,
           },
         ]}/>
       )}

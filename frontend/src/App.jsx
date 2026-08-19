@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError, Auth, Calls, Chats, Contacts, E2EE, Me, Meetings, Messages, Scheduled, Search, Users,
   clearToken, flushEverything, getToken, rememberAccount,
@@ -20,17 +20,18 @@ import { playNotifyTone } from "./notifyTone.js";
 import { useT } from "./i18n.jsx";
 import * as offlineDb from "./offlineDb.js";
 
-import AdminPanel from "./screens/AdminPanel.jsx";
-import CallOverlay from "./screens/CallOverlay.jsx";
-import CallsScreen from "./screens/Calls.jsx";
-import GroupCallOverlay from "./screens/GroupCallOverlay.jsx";
 import ChatList from "./screens/ChatList.jsx";
 import ChatView from "./screens/ChatView.jsx";
-import Discover from "./screens/Discover.jsx";
 import Login from "./screens/Login.jsx";
-import Planner from "./screens/Planner.jsx";
-import Settings from "./screens/Settings.jsx";
-import Status from "./screens/Status.jsx";
+
+const AdminPanel = lazy(() => import("./screens/AdminPanel.jsx"));
+const CallOverlay = lazy(() => import("./screens/CallOverlay.jsx"));
+const CallsScreen = lazy(() => import("./screens/Calls.jsx"));
+const GroupCallOverlay = lazy(() => import("./screens/GroupCallOverlay.jsx"));
+const Discover = lazy(() => import("./screens/Discover.jsx"));
+const Planner = lazy(() => import("./screens/Planner.jsx"));
+const Settings = lazy(() => import("./screens/Settings.jsx"));
+const Status = lazy(() => import("./screens/Status.jsx"));
 
 // "Discover" (people/contacts/channels/communities/join-via-code) used to be
 // its own bottom tab. It's really a set of "start something new" actions, not
@@ -251,6 +252,12 @@ export default function App() {
 
   const reloadChats = useCallback(() => {
     if (!getToken()) return;
+    offlineDb.getChats().then((cached) => {
+      if (cached.length > 0) {
+        setChats(cached);
+        setLoadingChats(false);
+      }
+    });
     Chats.list()
       .then(setChats)
       .catch(() => {})
@@ -806,7 +813,8 @@ export default function App() {
         chatListMenuPos={chatListMenuPos} onChatListMenuPos={setChatListMenuPos}
         newCallOpen={newCallOpen} onNewCallOpen={() => setNewCallOpen(true)}
         onNewCallClose={() => setNewCallOpen(false)}
-        callsMenuPos={callsMenuPos} onCallsMenuPos={setCallsMenuPos}/>
+        callsMenuPos={callsMenuPos} onCallsMenuPos={setCallsMenuPos}
+        onSettingsNavChange={(nav) => { setSettingsNavDepth(nav.depth); settingsGoBackRef.current = nav.goBack; }}/>
     );
   }
 
@@ -844,24 +852,26 @@ export default function App() {
           onStartGroupCall={(kind, password) => groupCall.join(resolvedChat.id, kind, password)}
           toast={toast}/>
         <Toast text={toastText}/>
-        <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
-                     onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
-                     onSwitchCamera={call.switchCamera} onEffect={call.setVideoEffect} onAddParticipant={addParticipantToCall}
-                     onShareScreen={call.shareScreen}/>
-        <GroupCallOverlay call={groupCall.call} myUserId={me?.id}
-                          onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
-                          onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
-                          onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
-                          onSwitchCamera={groupCall.switchCamera}
-                          onShareScreen={groupCall.shareScreen} onSetScreenOptimization={groupCall.setScreenOptimization} onForceMuteAll={groupCall.forceMuteAll}
-                          onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}
-                          onToggleWhiteboard={groupCall.toggleWhiteboard} events={events} send={realtime.send}
-                          onSendReaction={groupCall.sendReaction} onToggleRaiseHand={groupCall.toggleRaiseHand}
-                          onToggleCaptions={groupCall.toggleCaptions} onCaptionText={groupCall.sendCaption}
-                          onJoinBreakoutRoom={groupCall.joinBreakoutRoom} onReturnToMainCall={groupCall.returnToMainCall}
-                          onAdmitParticipant={groupCall.admitParticipant} onDenyParticipant={groupCall.denyParticipant}
-                          onSetPermission={groupCall.setPermission} onMuteParticipant={groupCall.muteParticipant}
-                          onSpotlight={groupCall.spotlight} onTransferHost={groupCall.transferHost}/>
+        <Suspense fallback={null}>
+          <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
+                       onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
+                       onSwitchCamera={call.switchCamera} onEffect={call.setVideoEffect} onAddParticipant={addParticipantToCall}
+                       onShareScreen={call.shareScreen} onToggleHold={call.toggleHold}/>
+          <GroupCallOverlay call={groupCall.call} myUserId={me?.id}
+                            onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
+                            onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
+                            onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
+                            onSwitchCamera={groupCall.switchCamera}
+                            onShareScreen={groupCall.shareScreen} onSetScreenOptimization={groupCall.setScreenOptimization} onForceMuteAll={groupCall.forceMuteAll}
+                            onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}
+                            onToggleWhiteboard={groupCall.toggleWhiteboard} events={events} send={realtime.send}
+                            onSendReaction={groupCall.sendReaction} onToggleRaiseHand={groupCall.toggleRaiseHand}
+                            onToggleCaptions={groupCall.toggleCaptions} onCaptionText={groupCall.sendCaption}
+                            onJoinBreakoutRoom={groupCall.joinBreakoutRoom} onReturnToMainCall={groupCall.returnToMainCall}
+                            onAdmitParticipant={groupCall.admitParticipant} onDenyParticipant={groupCall.denyParticipant}
+                            onSetPermission={groupCall.setPermission} onMuteParticipant={groupCall.muteParticipant}
+                            onSpotlight={groupCall.spotlight} onTransferHost={groupCall.transferHost}/>
+        </Suspense>
       </Screen>
     );
   }
@@ -887,9 +897,9 @@ export default function App() {
                          if (chat) { setSearchResults(null); setOpenChat(chat); }
                        }}/>
       ) : (
-        <>
+        <Suspense fallback={<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center"}}><Spinner/></div>}>
           {tab === "chats" && (
-            <ChatList chats={chats} loading={loadingChats} typingBy={typingBy}
+            <ChatList chats={chats} loading={loadingChats} typingBy={typingBy} me={me}
                       onOpen={setOpenChat} onChanged={reloadChats} toast={toast}
                       onNewChat={() => setDiscoverOpen(true)} onLogout={signOut}
                       headerMenuPos={chatListMenuPos} onHeaderMenuClose={() => setChatListMenuPos(null)}
@@ -922,10 +932,10 @@ export default function App() {
                       accent={accent} onAccentChange={setAccent}
                       onOpenChat={(chat) => { reloadChats(); setOpenChat(chat); }}
                       onSignedOut={() => { setMe(null); setChats([]); setTab("chats"); }}
-                      onNavigationChange={() => {}}/>
+                      onNavigationChange={(nav) => { setSettingsNavDepth(nav.depth); settingsGoBackRef.current = nav.goBack; }}/>
           )}
           {tab === "admin" && me.is_superadmin && <AdminPanel toast={toast}/>}
-        </>
+        </Suspense>
       )}
       </div>
 
@@ -933,28 +943,32 @@ export default function App() {
               unread={chats.reduce((total, chat) => total + (chat.unread || 0), 0)}
               plannerCount={plannerCount} missedCalls={missedCalls} tabs={tabs}/>
       <Toast text={toastText}/>
-      <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
-                   onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
-                     onSwitchCamera={call.switchCamera} onEffect={call.setVideoEffect} onAddParticipant={addParticipantToCall}
-                   onShareScreen={call.shareScreen}/>
-      <GroupCallOverlay call={groupCall.call} myUserId={me?.id}
-                        onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
-                        onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
-                        onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
-                          onSwitchCamera={groupCall.switchCamera}
-                        onShareScreen={groupCall.shareScreen} onSetScreenOptimization={groupCall.setScreenOptimization} onForceMuteAll={groupCall.forceMuteAll}
-                        onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}
-                        onToggleWhiteboard={groupCall.toggleWhiteboard} events={events} send={realtime.send}
-                          onSendReaction={groupCall.sendReaction} onToggleRaiseHand={groupCall.toggleRaiseHand}
-                          onToggleCaptions={groupCall.toggleCaptions} onCaptionText={groupCall.sendCaption}
-                          onJoinBreakoutRoom={groupCall.joinBreakoutRoom} onReturnToMainCall={groupCall.returnToMainCall}
-                          onAdmitParticipant={groupCall.admitParticipant} onDenyParticipant={groupCall.denyParticipant}
-                          onSetPermission={groupCall.setPermission} onMuteParticipant={groupCall.muteParticipant}
-                          onSpotlight={groupCall.spotlight} onTransferHost={groupCall.transferHost}/>
+      <Suspense fallback={null}>
+        <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
+                     onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
+                       onSwitchCamera={call.switchCamera} onEffect={call.setVideoEffect} onAddParticipant={addParticipantToCall}
+                     onShareScreen={call.shareScreen} onToggleHold={call.toggleHold}/>
+        <GroupCallOverlay call={groupCall.call} myUserId={me?.id}
+                          onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
+                          onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
+                          onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
+                            onSwitchCamera={groupCall.switchCamera}
+                          onShareScreen={groupCall.shareScreen} onSetScreenOptimization={groupCall.setScreenOptimization} onForceMuteAll={groupCall.forceMuteAll}
+                          onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}
+                          onToggleWhiteboard={groupCall.toggleWhiteboard} events={events} send={realtime.send}
+                            onSendReaction={groupCall.sendReaction} onToggleRaiseHand={groupCall.toggleRaiseHand}
+                            onToggleCaptions={groupCall.toggleCaptions} onCaptionText={groupCall.sendCaption}
+                            onJoinBreakoutRoom={groupCall.joinBreakoutRoom} onReturnToMainCall={groupCall.returnToMainCall}
+                            onAdmitParticipant={groupCall.admitParticipant} onDenyParticipant={groupCall.denyParticipant}
+                            onSetPermission={groupCall.setPermission} onMuteParticipant={groupCall.muteParticipant}
+                            onSpotlight={groupCall.spotlight} onTransferHost={groupCall.transferHost}/>
+      </Suspense>
       {discoverOpen && (
-        <DiscoverOverlay onClose={() => setDiscoverOpen(false)}
-                         onOpenChat={(chat) => { setDiscoverOpen(false); setOpenChat(chat); }}
-                         onChanged={reloadChats} toast={toast}/>
+        <Suspense fallback={null}>
+          <DiscoverOverlay onClose={() => setDiscoverOpen(false)}
+                           onOpenChat={(chat) => { setDiscoverOpen(false); setOpenChat(chat); }}
+                           onChanged={reloadChats} toast={toast}/>
+        </Suspense>
       )}
       {blueTickNudge && (
         <BlueTickNudge progress={blueTickNudge} onClose={() => setBlueTickNudge(null)}
@@ -1346,7 +1360,7 @@ function DesktopShell({
   onAddParticipant: addParticipantToCall,
   discoverOpen, onDiscoverOpen, onDiscoverClose, plannerCount, missedCalls, onLogout, tabs,
   chatListMenuPos, onChatListMenuPos, newCallOpen, onNewCallOpen, onNewCallClose,
-  callsMenuPos, onCallsMenuPos,
+  callsMenuPos, onCallsMenuPos, onSettingsNavChange,
 }) {
   const resolvedOpenChat = openChat ? (chats.find((chat) => chat.id === openChat.id) || openChat) : null;
   const chatLocked = resolvedOpenChat?.is_locked && !unlockedChats.has(resolvedOpenChat.id);
@@ -1378,9 +1392,9 @@ function DesktopShell({
                            if (chat) { onSearchResultsChange(null); onOpenChat(chat); }
                          }}/>
         ) : (
-          <>
+          <Suspense fallback={<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center"}}><Spinner/></div>}>
             {tab === "chats" && (
-              <ChatList chats={chats} loading={loadingChats} typingBy={typingBy}
+              <ChatList chats={chats} loading={loadingChats} typingBy={typingBy} me={me}
                         onOpen={onOpenChat} onChanged={reloadChats} toast={toast}
                         onNewChat={onDiscoverOpen} onLogout={onLogout}
                         headerMenuPos={chatListMenuPos} onHeaderMenuClose={() => onChatListMenuPos(null)}
@@ -1413,10 +1427,10 @@ function DesktopShell({
                         accent={accent} onAccentChange={onAccentChange}
                         onOpenChat={onOpenChat}
                         onSignedOut={onSignedOut}
-                        onNavigationChange={(nav) => { setSettingsNavDepth(nav.depth); settingsGoBackRef.current = nav.goBack; }}/>
+                        onNavigationChange={onSettingsNavChange}/>
             )}
             {tab === "admin" && me.is_superadmin && <AdminPanel toast={toast}/>}
-          </>
+          </Suspense>
         )}
       </div>
 
@@ -1447,28 +1461,32 @@ function DesktopShell({
       </div>
 
       <Toast text={toastText}/>
-      <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
-                   onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
-                     onSwitchCamera={call.switchCamera} onEffect={call.setVideoEffect} onAddParticipant={addParticipantToCall}
-                   onShareScreen={call.shareScreen}/>
-      <GroupCallOverlay call={groupCall.call} myUserId={me?.id}
-                        onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
-                        onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
-                        onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
-                          onSwitchCamera={groupCall.switchCamera}
-                        onShareScreen={groupCall.shareScreen} onSetScreenOptimization={groupCall.setScreenOptimization} onForceMuteAll={groupCall.forceMuteAll}
-                        onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}
-                        onToggleWhiteboard={groupCall.toggleWhiteboard} events={events} send={realtime.send}
-                          onSendReaction={groupCall.sendReaction} onToggleRaiseHand={groupCall.toggleRaiseHand}
-                          onToggleCaptions={groupCall.toggleCaptions} onCaptionText={groupCall.sendCaption}
-                          onJoinBreakoutRoom={groupCall.joinBreakoutRoom} onReturnToMainCall={groupCall.returnToMainCall}
-                          onAdmitParticipant={groupCall.admitParticipant} onDenyParticipant={groupCall.denyParticipant}
-                          onSetPermission={groupCall.setPermission} onMuteParticipant={groupCall.muteParticipant}
-                          onSpotlight={groupCall.spotlight} onTransferHost={groupCall.transferHost}/>
+      <Suspense fallback={null}>
+        <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
+                     onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
+                       onSwitchCamera={call.switchCamera} onEffect={call.setVideoEffect} onAddParticipant={addParticipantToCall}
+                     onShareScreen={call.shareScreen} onToggleHold={call.toggleHold}/>
+        <GroupCallOverlay call={groupCall.call} myUserId={me?.id}
+                          onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
+                          onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
+                          onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
+                            onSwitchCamera={groupCall.switchCamera}
+                          onShareScreen={groupCall.shareScreen} onSetScreenOptimization={groupCall.setScreenOptimization} onForceMuteAll={groupCall.forceMuteAll}
+                          onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}
+                          onToggleWhiteboard={groupCall.toggleWhiteboard} events={events} send={realtime.send}
+                            onSendReaction={groupCall.sendReaction} onToggleRaiseHand={groupCall.toggleRaiseHand}
+                            onToggleCaptions={groupCall.toggleCaptions} onCaptionText={groupCall.sendCaption}
+                            onJoinBreakoutRoom={groupCall.joinBreakoutRoom} onReturnToMainCall={groupCall.returnToMainCall}
+                            onAdmitParticipant={groupCall.admitParticipant} onDenyParticipant={groupCall.denyParticipant}
+                            onSetPermission={groupCall.setPermission} onMuteParticipant={groupCall.muteParticipant}
+                            onSpotlight={groupCall.spotlight} onTransferHost={groupCall.transferHost}/>
+      </Suspense>
       {discoverOpen && (
-        <DiscoverOverlay onClose={onDiscoverClose}
-                         onOpenChat={(chat) => { onDiscoverClose(); onOpenChat(chat); }}
-                         onChanged={reloadChats} toast={toast}/>
+        <Suspense fallback={null}>
+          <DiscoverOverlay onClose={onDiscoverClose}
+                           onOpenChat={(chat) => { onDiscoverClose(); onOpenChat(chat); }}
+                           onChanged={reloadChats} toast={toast}/>
+        </Suspense>
       )}
     </div>
   );

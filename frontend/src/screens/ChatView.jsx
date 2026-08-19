@@ -10,21 +10,23 @@ import {
   Av, Button, ChatBackdrop, ContextMenu, CoverImage, EMOJIS, EMOJI_GROUPS, Field, G, I, SRow, SocialLinks,
   Spinner, Toggle,
   clockTime, countdown, durationLabel, lastSeenLabel, localInputToUnix, whenLabel, useEnterToSend,
-  useIsDesktop,
+  useIsDesktop, usePrompt,
 } from "../ui.jsx";
 import { useVoiceRecorder } from "../useVoiceRecorder.js";
 import { canvasesToPdfBlob } from "../imageToPdf.js";
-import { STICKERS, STICKERS_BY_ID } from "../stickers.jsx";
+import { STICKER_PACKS, STICKERS_BY_ID, getEnabledPacks, setEnabledPacks } from "../stickers.jsx";
+import { checkSpam, getSpamSettings, setSpamSettings } from "../spamFilter.js";
 import { shouldAutoDownload } from "../mediaPrefs.js";
+import { logAdminAction, getAdminLog, clearAdminLog } from "../adminLog.js";
 import CameraCapture from "../CameraCapture.jsx";
 import GifPicker from "../GifPicker.jsx";
 import { contactsAvailable, pickContacts } from "../nativeContacts.js";
 import { COUNTRY_CODES, flagFor, samplePlaceholder, splitPhone } from "../countryCodes.js";
-import LocationMap from "../LocationMap.jsx";
-import PhotoEditor from "../PhotoEditor.jsx";
-import VideoTrimmer from "../VideoTrimmer.jsx";
-import QrView from "../QrView.jsx";
-// pdf.js is heavy; load the viewer/editor only when a PDF is actually opened.
+
+const LocationMap = lazy(() => import("../LocationMap.jsx"));
+const PhotoEditor = lazy(() => import("../PhotoEditor.jsx"));
+const VideoTrimmer = lazy(() => import("../VideoTrimmer.jsx"));
+const QrView = lazy(() => import("../QrView.jsx"));
 const PdfDoc = lazy(() => import("../PdfDoc.jsx"));
 
 // Granular admin rights, matching chatstore.ADMIN_PERMISSIONS on the backend.
@@ -33,6 +35,45 @@ const PERMISSION_LABELS = {
   post: "Post messages", edit: "Edit others' messages", delete: "Delete messages",
   pin: "Pin messages", invite: "Add members",
 };
+
+const CHAT_ACCENT_KEY = "talkex_chat_accents";
+const CHAT_ACCENT_COLORS = [
+  { hex: null, label: "Default" },
+  { hex: "#0ea5e9", label: "Sky" },
+  { hex: "#7c3aed", label: "Violet" },
+  { hex: "#059669", label: "Emerald" },
+  { hex: "#e11d48", label: "Rose" },
+  { hex: "#d97706", label: "Amber" },
+  { hex: "#0d9488", label: "Teal" },
+  { hex: "#3b82f6", label: "Blue" },
+  { hex: "#db2777", label: "Pink" },
+  { hex: "#ef4444", label: "Red" },
+  { hex: "#8b5cf6", label: "Purple" },
+  { hex: "#f97316", label: "Orange" },
+];
+function getChatAccents() {
+  try { return JSON.parse(localStorage.getItem(CHAT_ACCENT_KEY) || "{}"); } catch { return {}; }
+}
+function setChatAccent(chatId, hex) {
+  const accents = getChatAccents();
+  if (hex) accents[chatId] = hex; else delete accents[chatId];
+  localStorage.setItem(CHAT_ACCENT_KEY, JSON.stringify(accents));
+  window.dispatchEvent(new CustomEvent("chat-accent-change"));
+}
+
+const REMINDERS_KEY = "talkex_reminders";
+function getReminders() {
+  try { return JSON.parse(localStorage.getItem(REMINDERS_KEY) || "[]"); } catch { return []; }
+}
+function addReminder(chatId, messageId, messageText, remindAt) {
+  const reminders = getReminders();
+  reminders.push({ chatId, messageId, text: (messageText || "").slice(0, 100), remindAt, createdAt: Date.now() });
+  localStorage.setItem(REMINDERS_KEY, JSON.stringify(reminders));
+}
+function removeReminder(messageId) {
+  const reminders = getReminders().filter((r) => r.messageId !== messageId);
+  localStorage.setItem(REMINDERS_KEY, JSON.stringify(reminders));
+}
 
 const SLOW_MODE_CHOICES = [
   { label: "Off", seconds: 0 },
@@ -62,6 +103,7 @@ const DISAPPEAR_CHOICES = [
  */
 export default function ChatView({ chat, me, events, typingBy, reconnectedAt, onBack, onChanged,
                                    onOpenChat, onChatLocked, onStartCall, onStartGroupCall, toast }) {
+  const [promptFn, promptModal] = usePrompt();
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(true);
   const [input, setInput] = useState(chat.draft || "");
@@ -70,12 +112,21 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   // goes out so it never silently stays on for the next message.
   const [viewOnceText, setViewOnceText] = useState(false);
   const [silentSend, setSilentSend] = useState(false);
+  const [chatAccent, setChatAccentState] = useState(() => getChatAccents()[chat.id] || null);
+  useEffect(() => {
+    setChatAccentState(getChatAccents()[chat.id] || null);
+    const handler = () => setChatAccentState(getChatAccents()[chat.id] || null);
+    window.addEventListener("storage", handler);
+    window.addEventListener("chat-accent-change", handler);
+    return () => { window.removeEventListener("storage", handler); window.removeEventListener("chat-accent-change", handler); };
+  }, [chat.id]);
   const [replyTo, setReplyTo] = useState(null);
   const [editing, setEditing] = useState(null);
   const [menuFor, setMenuFor] = useState(null);
   const [infoFor, setInfoFor] = useState(null); // message currently showing the "Message info" sheet
   const [bgMenu, setBgMenu] = useState(null); // { x, y } for right-click/long-press on empty chat background
   const [forwarding, setForwarding] = useState(null);
+  const [remindFor, setRemindFor] = useState(null);
   const [lightboxIndex, setLightboxIndex] = useState(null); // index into mediaMessages, or null
   const [selectMode, setSelectMode] = useState(false);
   const [selectedMsgIds, setSelectedMsgIds] = useState(new Set());
@@ -142,6 +193,8 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   const [reportSheetOpen, setReportSheetOpen] = useState(false);
   const inputRef = useRef(chat.draft || "");
   const bottom = useRef(null);
+  const scrollContainerRef = useRef(null);
+  const [showScrollDown, setShowScrollDown] = useState(false);
   const bgLongPressTimer = useRef(null);
   const bgLongPressFired = useRef(false);
   const bgPressStart = useRef({ x: 0, y: 0 });
@@ -219,6 +272,23 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
       .then((list) => setStarredIds(new Set(
         list.filter((m) => m.chat_id === chat.id).map((m) => m.id))))
       .catch(() => {});
+  }, [chat.id]);
+
+  useEffect(() => {
+    let active = true;
+    let timerId;
+    function checkReminders() {
+      if (!active) return;
+      const now = Date.now();
+      const due = getReminders().filter((r) => r.chatId === chat.id && r.remindAt <= now);
+      due.forEach((r) => {
+        toast(`Reminder: ${r.text || "message"}`);
+        removeReminder(r.messageId);
+      });
+      timerId = setTimeout(checkReminders, 30000);
+    }
+    timerId = setTimeout(checkReminders, 5000);
+    return () => { active = false; clearTimeout(timerId); };
   }, [chat.id]);
 
   // Read state: the lowest last_read_seq among everyone else determines what
@@ -593,8 +663,8 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   async function joinMeeting(meeting) {
     let password;
     if (meeting.has_password) {
-      password = window.prompt("This meeting has a password:");
-      if (password === null) return; // cancelled
+      password = await promptFn("Meeting password:");
+      if (password === null) return;
     }
     try {
       await Meetings.start(meeting.id);
@@ -1178,6 +1248,11 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
       <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
         <ChatBackdrop/>
         <div
+          ref={scrollContainerRef}
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            setShowScrollDown(el.scrollHeight - el.scrollTop - el.clientHeight > 200);
+          }}
           onContextMenu={(event) => {
             if (selectMode || event.target !== event.currentTarget) return;
             event.preventDefault();
@@ -1255,12 +1330,17 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
             )}
             <div style={{ flex: 1 }}>
               <Bubble message={message} me={me}
+                      chatAccent={chatAccent}
                       translatedText={translations[message.id]}
                       replyTarget={messagesById.get(message.reply_to_id)}
                       meetingUpdates={meetingUpdates}
                       isPinned={pinnedIds.has(message.id)}
                       isRead={readUpToSeq !== null && message.seq <= readUpToSeq}
                       isDelivered={deliveredUpToSeq !== null && message.seq <= deliveredUpToSeq}
+                      onDoubleTap={() => {
+                        if (message.pending || message.queued || message.deleted_at || message.expired) return;
+                        react(message, "❤️");
+                      }}
                       onLongPress={() => {
                         // Nothing sitting in the send queue has a real
                         // server id yet ("pending_..." is a local stand-in)
@@ -1297,6 +1377,23 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         ))}
         <div ref={bottom}/>
         </div>
+
+        {showScrollDown && (
+          <button
+            onClick={() => bottom.current?.scrollIntoView({ behavior: "smooth" })}
+            style={{
+              position: "absolute", bottom: 16, right: 16, zIndex: 5,
+              width: 40, height: 40, borderRadius: "50%",
+              background: G.bg, border: `1px solid ${G.border}`,
+              boxShadow: `0 2px 8px ${G.shadow || "rgba(0,0,0,.15)"}`,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              cursor: "pointer", color: G.text,
+            }}
+            aria-label="Scroll to bottom"
+          >
+            <I name="keyboard_arrow_down" sz={24}/>
+          </button>
+        )}
       </div>
 
       {viewOnceText && !editing && (
@@ -1325,7 +1422,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         toast={toast}
         viewOnce={viewOnceText}
         onToggleViewOnce={() => setViewOnceText((v) => !v)}
-        canSilent={["channel", "community", "broadcast"].includes(chat.type)}
+        canSilent
         silent={silentSend}
         onToggleSilent={() => setSilentSend((v) => !v)}
         onFile={sendFile}
@@ -1371,6 +1468,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
             setMenuFor(null);
           }}
           onDownload={() => downloadMessageFile(menuFor)}
+          onRemind={() => { setRemindFor(menuFor); setMenuFor(null); }}
           onInfo={() => { setInfoFor(menuFor); setMenuFor(null); }}/>
       )}
       {infoFor && (
@@ -1381,6 +1479,12 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
       {forwarding && (
         <ForwardSheet message={forwarding} onClose={() => setForwarding(null)}
                       onForward={(toChatIds) => forwardTo(forwarding, toChatIds)}/>
+      )}
+
+      {remindFor && (
+        <ReminderSheet message={remindFor} chatId={chat.id}
+                       onClose={() => setRemindFor(null)}
+                       onSet={(label) => { toast(`Reminder set: ${label}`); setRemindFor(null); }}/>
       )}
 
       {lightboxIndex != null && mediaMessages[lightboxIndex] && (
@@ -1468,6 +1572,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         <CommentsSheet post={commentsFor} chat={chat} me={me} events={events}
                        onClose={() => setCommentsFor(null)} toast={toast}/>
       )}
+      {promptModal}
     </div>
   );
 }
@@ -1601,6 +1706,9 @@ function Header({ chat, typing, onBack, onTimer, onMeeting, onInfo, onVoiceCall,
           schedule a meeting, disappearing messages, mute, lock, …) lives in
           the ⋮ menu. Keeps the header uncluttered on a phone. The pinned-
           messages shortcut only appears when there actually are pins. */}
+      <div onClick={onSearch} style={{ cursor: "pointer" }} title="Search in chat">
+        {I.search(G.sub, 18)}
+      </div>
       {pinCount > 0 && (
         <div onClick={onTogglePins} style={{ cursor: "pointer", position: "relative" }}
              title={`${pinCount} pinned`}>
@@ -1628,31 +1736,49 @@ function Header({ chat, typing, onBack, onTimer, onMeeting, onInfo, onVoiceCall,
   );
 }
 
+function getCustomEmoji() {
+  try { return JSON.parse(localStorage.getItem("talkex_custom_emoji") || "[]"); } catch { return []; }
+}
+function saveCustomEmoji(list) { localStorage.setItem("talkex_custom_emoji", JSON.stringify(list)); }
+
 function EmojiPicker({ onPick, onClose }) {
   const [tab, setTab] = useState(0);
   const [query, setQuery] = useState("");
+  const [customEmoji, setCustomEmoji] = useState(getCustomEmoji);
+  const customTab = EMOJI_GROUPS.length;
+  const fileRef = useRef(null);
 
   const filtered = query.trim()
     ? EMOJI_GROUPS.flatMap((g) => g.items).filter(([, name]) => name.includes(query.trim().toLowerCase()))
-    : EMOJI_GROUPS[tab].items;
+    : tab === customTab ? [] : EMOJI_GROUPS[tab].items;
+
+  function handleUpload(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 256 * 1024) { alert("Emoji must be under 256 KB"); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const name = file.name.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
+      const entry = { id: `custom_${Date.now()}`, name, dataUrl: reader.result };
+      const next = [...customEmoji, entry];
+      setCustomEmoji(next);
+      saveCustomEmoji(next);
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  }
+
+  function removeCustom(id) {
+    const next = customEmoji.filter((ce) => ce.id !== id);
+    setCustomEmoji(next);
+    saveCustomEmoji(next);
+  }
 
   return (
     <div onClick={(e) => e.stopPropagation()} style={{
-      // Edge-to-edge panel sitting flush above the input bar, like WhatsApp's
-      // emoji keyboard (and matching the app's other bottom sheets) rather
-      // than a narrow floating box inset from the sides. left/right:0 span the
-      // composer's full width; only the top corners are rounded since the
-      // bottom edge meets the input row.
       position: "absolute", bottom: "100%", left: 0, right: 0,
       background: G.surface, borderTop: `1px solid ${G.border}`,
       borderTopLeftRadius: 16, borderTopRightRadius: 16,
-      // Capped to the smaller of a fixed height or 50% of the viewport, not
-      // a flat height — on a phone with the on-screen keyboard still up
-      // (exactly when someone taps this, mid-message), a tall panel can push
-      // its own top off-screen, which is what "the picker doesn't work" looks
-      // like in practice even though the tap handlers themselves were fine.
-      // z-index makes sure nothing else in the composer row can ever paint
-      // over it, which position/DOM-order alone doesn't guarantee.
       boxShadow: `0 -4px 16px ${G.border}`, overflow: "hidden",
       height: "min(320px, 50vh)", display: "flex", flexDirection: "column", zIndex: 20,
     }}>
@@ -1677,46 +1803,99 @@ function EmojiPicker({ onPick, onClose }) {
               borderBottom: tab === i ? `2px solid ${G.accent}` : "2px solid transparent",
             }}>{g.icon}</button>
           ))}
+          <button type="button" onClick={() => setTab(customTab)} style={{
+            padding: "6px 10px", fontSize: 16, cursor: "pointer", flexShrink: 0,
+            background: tab === customTab ? G.accentSoft : "transparent", border: "none",
+            borderBottom: tab === customTab ? `2px solid ${G.accent}` : "2px solid transparent",
+          }}>⭐</button>
         </div>
       )}
 
-      {/* Real <button> tap targets, not <div onClick> — buttons get Android
-          WebView's native touch/active-state handling for free, where a
-          bare div can occasionally eat the tap if it lands a pixel outside
-          its hit box. The gap went from 2px (icons were nearly touching,
-          easy to fat-finger the wrong one) to 6px with real padding, so
-          each emoji has a properly sized, separated touch target. */}
       <div style={{
         flex: 1, overflowY: "auto", overscrollBehavior: "contain", padding: 8, display: "grid",
         gridTemplateColumns: "repeat(7, 1fr)", gap: 6,
       }}>
-        {filtered.map(([emoji, name]) => (
-          <button key={emoji} type="button" onClick={() => onPick(emoji)} title={name} style={{
-            fontSize: 22, textAlign: "center", padding: "6px 0", cursor: "pointer", borderRadius: 8,
-            background: "none", border: "none", lineHeight: 1.3,
-          }}>{emoji}</button>
-        ))}
-        {filtered.length === 0 && (
-          <div style={{ gridColumn: "1 / -1", fontSize: 12.5, color: G.muted, textAlign: "center", padding: 16 }}>
-            No emoji found
-          </div>
+        {tab === customTab && !query.trim() ? (
+          <>
+            <button type="button" onClick={() => fileRef.current?.click()} style={{
+              fontSize: 22, textAlign: "center", padding: "6px 0", cursor: "pointer", borderRadius: 8,
+              background: G.dim, border: `1px dashed ${G.border}`, lineHeight: 1.3, color: G.muted,
+            }} title="Upload custom emoji">+</button>
+            <input ref={fileRef} type="file" accept="image/*" onChange={handleUpload}
+                   style={{ display: "none" }}/>
+            {customEmoji.map((ce) => (
+              <button key={ce.id} type="button"
+                      onClick={() => onPick(`:${ce.name}:`)}
+                      onContextMenu={(e) => { e.preventDefault(); removeCustom(ce.id); }}
+                      title={`:${ce.name}: (right-click to remove)`} style={{
+                fontSize: 22, textAlign: "center", padding: "2px", cursor: "pointer", borderRadius: 8,
+                background: "none", border: "none", lineHeight: 1.3,
+              }}>
+                <img src={ce.dataUrl} alt={ce.name} style={{ width: 28, height: 28, objectFit: "contain" }}/>
+              </button>
+            ))}
+            {customEmoji.length === 0 && (
+              <div style={{ gridColumn: "1 / -1", fontSize: 12, color: G.muted, textAlign: "center", padding: 12 }}>
+                Tap + to upload custom emoji
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            {filtered.map(([emoji, name]) => (
+              <button key={emoji} type="button" onClick={() => onPick(emoji)} title={name} style={{
+                fontSize: 22, textAlign: "center", padding: "6px 0", cursor: "pointer", borderRadius: 8,
+                background: "none", border: "none", lineHeight: 1.3,
+              }}>{emoji}</button>
+            ))}
+            {filtered.length === 0 && (
+              <div style={{ gridColumn: "1 / -1", fontSize: 12.5, color: G.muted, textAlign: "center", padding: 16 }}>
+                No emoji found
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
   );
 }
 
+const SEARCH_FILTERS = [
+  { key: "all", label: "All" },
+  { key: "photo", label: "Photos" },
+  { key: "video", label: "Videos" },
+  { key: "document", label: "Files" },
+  { key: "links", label: "Links" },
+  { key: "voice", label: "Voice" },
+];
+
 function ChatSearchBar({ chatId, query, onChange, results, setResults, onClose, onJump }) {
   const timerRef = useRef(null);
+  const [filter, setFilter] = useState("all");
+  const [allResults, setAllResults] = useState([]);
 
   useEffect(() => {
     clearTimeout(timerRef.current);
-    if (!query || query.trim().length < 2) { setResults([]); return; }
+    if (!query || query.trim().length < 2) { setAllResults([]); setResults([]); return; }
     timerRef.current = setTimeout(() => {
-      Search.query(query, chatId).then(setResults).catch(() => setResults([]));
+      Search.query(query, chatId).then((res) => {
+        setAllResults(res);
+        setResults(res);
+      }).catch(() => { setAllResults([]); setResults([]); });
     }, 300);
     return () => clearTimeout(timerRef.current);
   }, [query, chatId]);
+
+  useEffect(() => {
+    if (filter === "all") { setResults(allResults); return; }
+    if (filter === "links") {
+      setResults(allResults.filter((r) => r.text && /https?:\/\/\S+/i.test(r.text)));
+    } else {
+      setResults(allResults.filter((r) => r.kind === filter));
+    }
+  }, [filter, allResults]);
+
+  const filtered = results;
 
   return (
     <div style={{ borderBottom: `1px solid ${G.border}`, background: G.card2 }}>
@@ -1728,23 +1907,35 @@ function ChatSearchBar({ chatId, query, onChange, results, setResults, onClose, 
                  flex: 1, border: "none", outline: "none", background: "transparent",
                  fontSize: 13.5, color: G.text,
                }}/>
-        {results.length > 0 && (
+        {filtered.length > 0 && (
           <span style={{ fontSize: 11, color: G.muted, whiteSpace: "nowrap" }}>
-            {results.length} found
+            {filtered.length} found
           </span>
         )}
         <div onClick={onClose} style={{ cursor: "pointer", fontSize: 18, color: G.muted }}>×</div>
       </div>
-      {results.length > 0 && (
+      <div style={{ display: "flex", gap: 4, padding: "4px 14px 6px", overflowX: "auto" }}>
+        {SEARCH_FILTERS.map((f) => (
+          <div key={f.key} onClick={() => setFilter(f.key)} style={{
+            padding: "3px 10px", borderRadius: 14, cursor: "pointer", fontSize: 11.5,
+            whiteSpace: "nowrap",
+            background: filter === f.key ? G.accent : G.dim,
+            color: filter === f.key ? "#fff" : G.sub,
+            border: `1px solid ${filter === f.key ? G.accent : G.border}`,
+          }}>{f.label}</div>
+        ))}
+      </div>
+      {filtered.length > 0 && (
         <div style={{ maxHeight: 180, overflowY: "auto" }}>
-          {results.map((r) => (
+          {filtered.map((r) => (
             <div key={r.id} onClick={() => onJump(r.id)} style={{
               padding: "6px 14px", fontSize: 12.5, color: G.text, cursor: "pointer",
               borderTop: `1px solid ${G.border}`, whiteSpace: "nowrap",
               overflow: "hidden", textOverflow: "ellipsis",
             }}>
               <span style={{ color: G.muted, marginRight: 6 }}>{whenLabel(r.created_at)}</span>
-              {r.text}
+              {r.sender_name && <span style={{ fontWeight: 600, marginRight: 4 }}>{r.sender_name}:</span>}
+              {r.text || `[${r.kind}]`}
             </div>
           ))}
         </div>
@@ -1851,13 +2042,23 @@ function renderMarkdown(text, mine, keyPrefix) {
 }
 
 function renderWithMentions(text, mine) {
-  const parts = text.split(/(@\w+)/g);
+  const parts = text.split(/(:[a-zA-Z0-9_]+:|@\w+)/g);
   if (parts.length === 1) return renderFormatting(text, mine, "f");
-  return parts.map((part, index) => (
-    part.startsWith("@")
-      ? <span key={index} style={{ fontWeight: 700, color: mine ? "#fff" : G.accentText }}>{part}</span>
-      : renderFormatting(part, mine, `f${index}`)
-  ));
+  const customs = getCustomEmoji();
+  return parts.map((part, index) => {
+    if (part.startsWith("@")) {
+      return <span key={index} style={{ fontWeight: 700, color: mine ? "#fff" : G.accentText }}>{part}</span>;
+    }
+    if (part.startsWith(":") && part.endsWith(":") && part.length > 2) {
+      const name = part.slice(1, -1);
+      const found = customs.find((ce) => ce.name === name);
+      if (found) {
+        return <img key={index} src={found.dataUrl} alt={part} title={part}
+                    style={{ width: 22, height: 22, verticalAlign: "middle", objectFit: "contain" }}/>;
+      }
+    }
+    return renderFormatting(part, mine, `f${index}`);
+  });
 }
 
 function firstUrl(text) {
@@ -1923,13 +2124,70 @@ function LinkPreview({ text, mine }) {
   );
 }
 
+function ComposerLinkPreview({ text }) {
+  const url = firstUrl(text);
+  const [data, setData] = useState(null);
+  const prevUrl = useRef(null);
+
+  useEffect(() => {
+    if (!url) { setData(null); prevUrl.current = null; return; }
+    if (url === prevUrl.current) return;
+    prevUrl.current = url;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      Chats.linkPreview(url)
+        .then((preview) => { if (!cancelled) setData(preview); })
+        .catch(() => { if (!cancelled) setData(null); });
+    }, 400);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [url]);
+
+  if (!url || !data || (!data.title && !data.description && !data.image)) return null;
+
+  return (
+    <div style={{
+      position: "absolute", bottom: "100%", left: 12, right: 12, marginBottom: 4,
+      background: G.surface, border: `1px solid ${G.border}`, borderRadius: 12,
+      boxShadow: `0 4px 16px ${G.border}`, overflow: "hidden",
+      display: "flex", alignItems: "center", gap: 10,
+    }}>
+      {data.image && (
+        <img src={data.image} alt="" loading="lazy"
+             style={{ width: 56, height: 56, objectFit: "cover", flexShrink: 0 }}/>
+      )}
+      <div style={{ padding: "8px 10px", minWidth: 0, flex: 1 }}>
+        {data.site_name && (
+          <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: 0.3, color: G.muted, marginBottom: 1 }}>
+            {data.site_name}
+          </div>
+        )}
+        {data.title && (
+          <div style={{
+            fontSize: 12.5, fontWeight: 600, color: G.text, lineHeight: 1.3,
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          }}>{data.title}</div>
+        )}
+        {data.description && (
+          <div style={{
+            fontSize: 11, color: G.sub, marginTop: 1, lineHeight: 1.3,
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          }}>{data.description}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 const SWIPE_REPLY_TRIGGER = 56;
 const SWIPE_REPLY_MAX = 74;
 
-function Bubble({ message, me, translatedText, replyTarget, meetingUpdates, isPinned, isRead, isDelivered, signature,
-                  commentsOn, onComments, onLongPress, onSwipeReply, onVote, onForward, onOpenMedia, onCallAgain, onJoinMeeting, toast }) {
+function Bubble({ message, me, chatAccent, translatedText, replyTarget, meetingUpdates, isPinned, isRead, isDelivered, signature,
+                  commentsOn, onComments, onDoubleTap, onLongPress, onSwipeReply, onVote, onForward, onOpenMedia, onCallAgain, onJoinMeeting, toast }) {
   const mine = message.sender_id === me.id;
   const gone = message.deleted_at || message.expired;
+  const spamSettings = getSpamSettings();
+  const spamResult = !mine && spamSettings.enabled && !gone ? checkSpam(message, message.sender_id) : null;
+  const [spamHidden, setSpamHidden] = useState(!!spamResult);
   // A photo/video shows nearly edge-to-edge like WhatsApp — the bubble shrinks
   // to a hairline frame instead of the usual roomy text padding. Only when
   // there are no header decorations (reply/forward/signature/broadcast), which
@@ -1945,6 +2203,7 @@ function Bubble({ message, me, translatedText, replyTarget, meetingUpdates, isPi
   const longPressTimer = useRef(null);
   const longPressFired = useRef(false);
   const pressStart = useRef({ x: 0, y: 0 });
+  const lastTapTime = useRef(0);
   // Swipe-to-reply (WhatsApp-style): dragging a bubble rightward with a
   // touch pointer reveals a reply arrow and, past SWIPE_REPLY_TRIGGER,
   // releasing sets this message as the reply target directly — no menu.
@@ -1990,12 +2249,17 @@ function Bubble({ message, me, translatedText, replyTarget, meetingUpdates, isPi
   }
   function handlePointerUp(event) {
     clearPressTimer();
-    // The long-press timer above already fired onLongPress for touch; this
-    // is only for the mouse, which has no separate long-press path. A click
-    // that lands on interactive media (a photo/video opening full-screen, a
-    // Download/Forward button) must NOT also pop the message menu — that's
-    // the [data-media] guard. Long-press on touch still reaches the menu via
-    // the timer, unaffected by this mouse-only branch.
+    if (event.pointerType === "touch" && !longPressFired.current && !gone) {
+      const now = Date.now();
+      if (now - lastTapTime.current < 300) {
+        lastTapTime.current = 0;
+        onDoubleTap?.();
+        swipeAxis.current = null;
+        setDragX(0);
+        return;
+      }
+      lastTapTime.current = now;
+    }
     if (event.pointerType !== "touch" && !longPressFired.current
         && !event.target.closest?.("[data-media]")) {
       onLongPress();
@@ -2014,6 +2278,7 @@ function Bubble({ message, me, translatedText, replyTarget, meetingUpdates, isPi
     onPointerDown: handlePointerDown, onPointerMove: handlePointerMove,
     onPointerUp: handlePointerUp, onPointerCancel: handlePointerCancel,
     onContextMenu: (event) => { event.preventDefault(); onLongPress(); },
+    onDoubleClick: (event) => { if (!gone && !event.target.closest?.("[data-media]")) onDoubleTap?.(); },
   };
   const swipeStyle = dragX ? {
     transform: `translateX(${dragX}px)`,
@@ -2071,13 +2336,33 @@ function Bubble({ message, me, translatedText, replyTarget, meetingUpdates, isPi
           padding: mediaFlush ? 3 : "9px 13px", borderRadius: 16,
           borderBottomRightRadius: mine ? 4 : 16,
           borderBottomLeftRadius: mine ? 16 : 4,
-          background: mine ? G.accent : G.card,
+          background: mine ? (chatAccent || G.accent) : G.card,
           border: mine ? "none" : `1px solid ${G.border}`,
           cursor: "pointer",
           touchAction: "pan-y",
           ...swipeStyle,
         }}>
         {swipeReplyIcon}
+
+        {spamResult && spamHidden && (
+          <div onClick={(e) => { e.stopPropagation(); setSpamHidden(false); }} style={{
+            display: "flex", alignItems: "center", gap: 6, padding: "6px 10px",
+            marginBottom: 4, borderRadius: 8, cursor: "pointer",
+            background: "#f59e0b22", border: "1px solid #f59e0b55",
+            fontSize: 12, color: "#f59e0b",
+          }}>
+            ⚠ {spamResult.label} — tap to show
+          </div>
+        )}
+        {spamResult && !spamHidden && (
+          <div style={{
+            display: "flex", alignItems: "center", gap: 6, padding: "4px 10px",
+            marginBottom: 4, borderRadius: 8,
+            background: "#f59e0b15", fontSize: 11, color: "#f59e0b",
+          }}>
+            ⚠ Flagged: {spamResult.label}
+          </div>
+        )}
 
         <div ref={chevronRef} onClick={(event) => { event.stopPropagation(); onLongPress(); }} style={{
           position: "absolute", top: 2, right: mine ? 2 : "auto", left: mine ? "auto" : 2,
@@ -2194,12 +2479,19 @@ function Bubble({ message, me, translatedText, replyTarget, meetingUpdates, isPi
           </span>
           {mine && (
             message.pending || message.queued
-              ? I.clock("#ffffff99", 11)                    // still going out (clock)
-              : isRead
-                ? I.checkDouble("#38bdf8", 13)                // seen — blue double tick
-                : isDelivered
-                  ? I.checkDouble("#ffffffaa", 13)            // delivered — grey double tick
-                  : I.check("#ffffffaa", 13)                  // sent, not yet delivered — single tick
+              ? I.clock("#ffffff99", 11)
+              : <span style={{
+                  display: "inline-flex", transition: "transform 0.3s ease",
+                  transform: isRead ? "scale(1.15)" : "scale(1)",
+                }}
+                onTransitionEnd={(e) => { e.currentTarget.style.transform = "scale(1)"; }}
+                >
+                  {isRead
+                    ? I.checkDouble("#38bdf8", 13)
+                    : isDelivered
+                      ? I.checkDouble("#ffffffaa", 13)
+                      : I.check("#ffffffaa", 13)}
+                </span>
           )}
         </div>
 
@@ -2338,7 +2630,9 @@ function LocationMessage({ message, mine, toast }) {
           draggable/clickable itself — only the surrounding <a> is, opening
           the full OpenStreetMap page for anything more than a glance. */}
       <div style={{ pointerEvents: "none" }}>
-        <LocationMap lat={lat} lng={lng} height={120}/>
+        <Suspense fallback={<div style={{height:120,background:G.card,borderRadius:12}}/>}>
+          <LocationMap lat={lat} lng={lng} height={120}/>
+        </Suspense>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
         <div style={{
@@ -2771,7 +3065,9 @@ function Attachment({ message, mine, onForward, onOpenMedia, toast }) {
                            onClose={() => setFullscreen(false)}/>
         )}
         {editingPhoto && editFile && (
-          <PhotoEditor file={editFile} onCancel={() => setEditingPhoto(false)} onDone={saveEditedPhoto}/>
+          <Suspense fallback={null}>
+            <PhotoEditor file={editFile} onCancel={() => setEditingPhoto(false)} onDone={saveEditedPhoto}/>
+          </Suspense>
         )}
       </>
     );
@@ -3250,6 +3546,8 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
         </div>
       )}
 
+      <ComposerLinkPreview text={value}/>
+
       {emojiOpen && (
         <EmojiPicker onPick={(emoji) => onChange(value + emoji)} onClose={() => setEmojiOpen(false)}/>
       )}
@@ -3467,7 +3765,7 @@ function MenuRow({ icon, label, danger, onClick }) {
  */
 function MessageMenu({ message, me, isModerator, reactionsEnabled = true, isPinned, isStarred, onClose, onReact, onReply,
                       onEdit, onUnsend, onDeleteForEveryone, onHide, onPin, onStar, onForward, onShare,
-                      onCopy, onSelect, onDownload, onInfo, onTranslate }) {
+                      onCopy, onSelect, onDownload, onInfo, onTranslate, onRemind }) {
   const mine = message.sender_id === me.id;
   const hasAttachment = Boolean(message.payload?.attachment_id);
   const canShare = typeof navigator !== "undefined" && navigator.share && !message.deleted_at;
@@ -3495,6 +3793,7 @@ function MessageMenu({ message, me, isModerator, reactionsEnabled = true, isPinn
     canShare && onShare && { key: "share", label: "Share", icon: I.share, onClick: onShare },
     !message.deleted_at && { key: "pin", label: isPinned ? "Unpin" : "Pin", icon: I.pin, onClick: onPin },
     !message.deleted_at && { key: "star", label: isStarred ? "Unstar" : "Star", icon: isStarred ? I.starFill : I.star, onClick: onStar },
+    !message.deleted_at && { key: "remind", label: "Remind me", icon: I.timer || I.clock, onClick: onRemind },
     { key: "select", label: "Select", icon: I.select, onClick: onSelect },
     mine && !message.deleted_at && { key: "edit", label: "Edit", icon: I.edit, onClick: onEdit },
   ].filter(Boolean);
@@ -3887,7 +4186,7 @@ function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker
 
   function tooBig(file) {
     if (file.size > MAX_ATTACHMENT_BYTES) {
-      alert(`Files must be under ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MB`);
+      toast(`Files must be under ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MB`);
       return true;
     }
     return false;
@@ -4034,15 +4333,19 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
 
   if (editing) {
     return (
-      <PhotoEditor file={firstFile} onCancel={() => setEditing(false)}
-                   onDone={(edited) => { setWorkingFiles([edited]); setEditing(false); }}/>
+      <Suspense fallback={null}>
+        <PhotoEditor file={firstFile} onCancel={() => setEditing(false)}
+                     onDone={(edited) => { setWorkingFiles([edited]); setEditing(false); }}/>
+      </Suspense>
     );
   }
 
   if (trimming) {
     return (
-      <VideoTrimmer file={firstFile} onCancel={() => setTrimming(false)}
-                    onDone={(trimmed) => { setWorkingFiles([trimmed]); setTrimming(false); }}/>
+      <Suspense fallback={null}>
+        <VideoTrimmer file={firstFile} onCancel={() => setTrimming(false)}
+                      onDone={(trimmed) => { setWorkingFiles([trimmed]); setTrimming(false); }}/>
+      </Suspense>
     );
   }
 
@@ -4492,17 +4795,72 @@ function ContactSheet({ onClose, onSave, toast }) {
 }
 
 function StickerPickerSheet({ onClose, onPick }) {
+  const [enabledIds, setEnabledIds] = useState(getEnabledPacks);
+  const [activePack, setActivePack] = useState(STICKER_PACKS[0].id);
+  const [managing, setManaging] = useState(false);
+  const visiblePacks = STICKER_PACKS.filter((p) => enabledIds.includes(p.id));
+  const pack = STICKER_PACKS.find((p) => p.id === activePack) || visiblePacks[0];
+
+  function togglePack(id) {
+    setEnabledIds((cur) => {
+      const next = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id];
+      setEnabledPacks(next);
+      return next;
+    });
+  }
+
   return (
     <Sheet title="Stickers" onClose={onClose}>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, padding: "4px 2px 8px" }}>
-        {STICKERS.map((sticker) => (
-          <div key={sticker.id} onClick={() => onPick(sticker.id)}
-               title={sticker.label}
-               style={{ display: "flex", justifyContent: "center", cursor: "pointer" }}>
-            {sticker.render()}
-          </div>
-        ))}
+      <div style={{ display: "flex", alignItems: "center", gap: 0, borderBottom: `1px solid ${G.border}`, marginBottom: 8 }}>
+        <div style={{ display: "flex", flex: 1, gap: 0, overflowX: "auto" }}>
+          {visiblePacks.map((p) => (
+            <div key={p.id} onClick={() => { setActivePack(p.id); setManaging(false); }}
+                 style={{
+                   padding: "8px 12px", cursor: "pointer", fontSize: 16, whiteSpace: "nowrap",
+                   borderBottom: activePack === p.id && !managing ? "2px solid #2563eb" : "2px solid transparent",
+                   opacity: activePack === p.id && !managing ? 1 : 0.5,
+                 }}
+                 title={p.name}>
+              {p.icon}
+            </div>
+          ))}
+        </div>
+        <div onClick={() => setManaging(!managing)}
+             style={{ padding: "8px 10px", cursor: "pointer", fontSize: 14, opacity: managing ? 1 : 0.5 }}
+             title="Manage packs">
+          {I.settings(managing ? G.accentText : G.sub, 16)}
+        </div>
       </div>
+
+      {managing ? (
+        <div style={{ padding: "4px 0 8px" }}>
+          <div style={{ fontSize: 12, color: G.muted, marginBottom: 8 }}>Enable or disable sticker packs</div>
+          {STICKER_PACKS.map((p) => (
+            <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 4px", borderBottom: `1px solid ${G.border}` }}>
+              <span style={{ fontSize: 20 }}>{p.icon}</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13 }}>{p.name}</div>
+                <div style={{ fontSize: 11, color: G.muted }}>{p.stickers.length} stickers</div>
+              </div>
+              <Toggle value={enabledIds.includes(p.id)} onToggle={() => togglePack(p.id)}/>
+            </div>
+          ))}
+        </div>
+      ) : pack ? (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, padding: "4px 2px 8px" }}>
+          {pack.stickers.map((sticker) => (
+            <div key={sticker.id} onClick={() => onPick(sticker.id)}
+                 title={sticker.label}
+                 style={{ display: "flex", justifyContent: "center", cursor: "pointer" }}>
+              {sticker.render()}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div style={{ padding: 20, textAlign: "center", fontSize: 13, color: G.muted }}>
+          No packs enabled. Tap the gear icon to add packs.
+        </div>
+      )}
     </Sheet>
   );
 }
@@ -4577,8 +4935,10 @@ function LiveLocationSheet({ onClose, onSend }) {
       )}
       {position && (
         <>
-          <LocationMap lat={position.lat} lng={position.lng} height={220} interactive
-                       onPick={(lat, lng) => setPosition({ lat, lng })}/>
+          <Suspense fallback={<div style={{height:220,background:G.card,borderRadius:12}}/>}>
+            <LocationMap lat={position.lat} lng={position.lng} height={220} interactive
+                         onPick={(lat, lng) => setPosition({ lat, lng })}/>
+          </Suspense>
           <div style={{ fontSize: 12, color: G.muted, margin: "10px 0 14px" }}>
             Drag the pin or tap the map to adjust · {position.lat.toFixed(5)}, {position.lng.toFixed(5)}
           </div>
@@ -4587,6 +4947,49 @@ function LiveLocationSheet({ onClose, onSend }) {
           </Button>
         </>
       )}
+    </Sheet>
+  );
+}
+
+const REMIND_CHOICES = [
+  { label: "In 30 minutes", ms: 30 * 60 * 1000 },
+  { label: "In 1 hour", ms: 60 * 60 * 1000 },
+  { label: "In 3 hours", ms: 3 * 60 * 60 * 1000 },
+  { label: "In 8 hours", ms: 8 * 60 * 60 * 1000 },
+  { label: "Tomorrow morning", ms: null },
+  { label: "In 1 week", ms: 7 * 24 * 60 * 60 * 1000 },
+];
+
+function ReminderSheet({ message, chatId, onClose, onSet }) {
+  function pick(choice) {
+    let remindAt;
+    if (choice.ms) {
+      remindAt = Date.now() + choice.ms;
+    } else {
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      tomorrow.setHours(9, 0, 0, 0);
+      remindAt = tomorrow.getTime();
+    }
+    addReminder(chatId, message.id, message.text, remindAt);
+    onSet(choice.label);
+  }
+
+  return (
+    <Sheet title="Remind me" onClose={onClose}>
+      <div style={{ fontSize: 13, color: G.sub, marginBottom: 10 }}>
+        {(message.text || "").slice(0, 80) || "This message"}
+      </div>
+      {REMIND_CHOICES.map((choice) => (
+        <div key={choice.label} onClick={() => pick(choice)} style={{
+          padding: "12px 6px", cursor: "pointer", fontSize: 14,
+          borderBottom: `1px solid ${G.border}`,
+          display: "flex", alignItems: "center", gap: 10,
+        }}>
+          {(I.timer || I.clock)(G.accent, 16)}
+          {choice.label}
+        </div>
+      ))}
     </Sheet>
   );
 }
@@ -4835,7 +5238,28 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
   const [pendingReqs, setPendingReqs] = useState([]);
   const [permEditFor, setPermEditFor] = useState(null);   // member id whose granular admin rights are being edited
   const [permDraft, setPermDraft] = useState([]);          // the rights selected in that editor
+  const [showPermMatrix, setShowPermMatrix] = useState(false);
+  const [channelStats, setChannelStats] = useState(null);
   const lastMemberEvent = useRef(0);
+
+  useEffect(() => {
+    if (chat.type !== "channel") return;
+    Messages.list(chat.id, 100).then((msgs) => {
+      const now = Date.now();
+      const day = 86400000;
+      const week = 7 * day;
+      const total = msgs.length;
+      const withMedia = msgs.filter((m) => ["photo", "video", "voice", "document"].includes(m.kind)).length;
+      const withReactions = msgs.filter((m) => m.reactions?.length > 0).length;
+      const totalReactions = msgs.reduce((sum, m) => sum + (m.reactions?.length || 0), 0);
+      const last24h = msgs.filter((m) => now - new Date(m.created_at).getTime() < day).length;
+      const lastWeek = msgs.filter((m) => now - new Date(m.created_at).getTime() < week).length;
+      const topPosters = {};
+      msgs.forEach((m) => { topPosters[m.sender_name || m.sender_id] = (topPosters[m.sender_name || m.sender_id] || 0) + 1; });
+      const sorted = Object.entries(topPosters).sort((a, b) => b[1] - a[1]).slice(0, 3);
+      setChannelStats({ total, withMedia, withReactions, totalReactions, last24h, lastWeek, topPosters: sorted });
+    }).catch(() => {});
+  }, [chat.id, chat.type]);
 
   // DM-only: the other person's profile plus whether they're already a
   // saved contact — folded into this same sheet rather than a separate one,
@@ -5008,6 +5432,8 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
   async function removeMember(userId) {
     try {
       await Chats.removeMember(chat.id, userId);
+      const target = full?.members?.find((m) => m.id === userId);
+      logAdminAction(chat.id, me.name, "remove_member", target?.name || userId);
       reloadFull();
     } catch (problem) {
       toast(problem.message || "Could not remove member");
@@ -5017,6 +5443,8 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
   async function setRole(userId, role, permissions) {
     try {
       await Chats.setMemberRole(chat.id, userId, role, permissions);
+      const target = full?.members?.find((m) => m.id === userId);
+      logAdminAction(chat.id, me.name, role === "admin" ? "promote_admin" : "demote_admin", target?.name || userId);
       setPermEditFor(null);
       reloadFull();
     } catch (problem) {
@@ -5028,6 +5456,7 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
     if (!confirm(`Make ${member.name} the group owner? You will become an admin.`)) return;
     try {
       await Chats.makeOwner(chat.id, member.id);
+      logAdminAction(chat.id, me.name, "transfer_ownership", member.name);
       reloadFull();
       onChanged();
       toast(`${member.name} is now the owner`);
@@ -5407,6 +5836,27 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
         </div>
       </div>
 
+      <div style={{ padding: "12px 4px" }}>
+        <div style={{ fontSize: 12, color: G.sub, marginBottom: 8 }}>Chat accent color</div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {CHAT_ACCENT_COLORS.map((c) => (
+            <div key={c.hex || "default"} onClick={() => {
+              setChatAccent(chat.id, c.hex);
+              toast(c.hex ? `Accent: ${c.label}` : "Reset to default");
+              onChanged?.();
+            }} title={c.label} style={{
+              width: 28, height: 28, borderRadius: "50%", cursor: "pointer",
+              background: c.hex || G.accent,
+              border: (getChatAccents()[chat.id] || null) === c.hex
+                ? `3px solid ${G.text}` : `2px solid ${G.border}`,
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+              {!c.hex && <span style={{ fontSize: 10, color: "#fff", fontWeight: 700 }}>A</span>}
+            </div>
+          ))}
+        </div>
+      </div>
+
       {chat.type === "community" && (
         <div style={{ padding: "12px 4px" }}>
           <div style={{
@@ -5444,6 +5894,7 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
                 try {
                   await Chats.setSlowMode(chat.id, choice.seconds);
                   setSlowModeSecs(choice.seconds);
+                  logAdminAction(chat.id, me.name, "set_slow_mode", choice.label);
                   toast(choice.seconds ? `Slow mode: ${choice.label}` : "Slow mode off");
                 } catch (problem) {
                   toast(problem.message || "Could not set slow mode");
@@ -5474,6 +5925,7 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
             setReactionsOn(value);
             try {
               await Chats.setReactionsPolicy(chat.id, value);
+              logAdminAction(chat.id, me.name, "toggle_reactions", value ? "enabled" : "disabled");
               onChanged?.();
             } catch (problem) {
               setReactionsOn(!value);
@@ -5498,6 +5950,7 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
             setAdminsOnlySend(value);
             try {
               await Chats.setSendPolicy(chat.id, value);
+              logAdminAction(chat.id, me.name, "toggle_admins_only_send", value ? "enabled" : "disabled");
               onChanged?.();
             } catch (problem) {
               setAdminsOnlySend(!value);
@@ -5522,11 +5975,31 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
             setTopicsOn(value);
             try {
               await Chats.setTopicsPolicy(chat.id, value);
+              logAdminAction(chat.id, me.name, "toggle_topics", value ? "enabled" : "disabled");
               onChanged?.();
             } catch (problem) {
               setTopicsOn(!value);
               toast(problem.message || "Could not update Topics");
             }
+          }}/>
+        </div>
+      )}
+
+      {["group", "channel", "community"].includes(chat.type) && canManage && (
+        <div style={{
+          padding: "14px 4px", borderTop: `1px solid ${G.border}`,
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+        }}>
+          <div>
+            <div style={{ fontSize: 13.5 }}>Anti-spam filter</div>
+            <div style={{ fontSize: 11.5, color: G.muted }}>
+              Flag floods, repeated messages, and link spam
+            </div>
+          </div>
+          <Toggle on={getSpamSettings().enabled} onChange={(value) => {
+            setSpamSettings({ ...getSpamSettings(), enabled: value });
+            logAdminAction(chat.id, me.name, "toggle_spam_filter", value ? "enabled" : "disabled");
+            toast(value ? "Spam filter enabled" : "Spam filter disabled");
           }}/>
         </div>
       )}
@@ -5546,6 +6019,7 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
             setCommentsOn(value);
             try {
               await Chats.setCommentsPolicy(chat.id, value);
+              logAdminAction(chat.id, me.name, "toggle_comments", value ? "enabled" : "disabled");
               onChanged?.();
             } catch (problem) {
               setCommentsOn(!value);
@@ -5599,7 +6073,7 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
             </div>
             <Toggle on={signatureOn} onChange={async (value) => {
               setSignatureOn(value);
-              try { await Chats.setChannelSignature(chat.id, value); onChanged?.(); }
+              try { await Chats.setChannelSignature(chat.id, value); logAdminAction(chat.id, me.name, "toggle_signature", value ? "enabled" : "disabled"); onChanged?.(); }
               catch (problem) { setSignatureOn(!value); toast(problem.message || "Could not update"); }
             }}/>
           </div>
@@ -5617,7 +6091,7 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
             </div>
             <Toggle on={approvalOn} onChange={async (value) => {
               setApprovalOn(value);
-              try { await Chats.setJoinApproval(chat.id, value); onChanged?.(); }
+              try { await Chats.setJoinApproval(chat.id, value); logAdminAction(chat.id, me.name, "toggle_approval", value ? "enabled" : "disabled"); onChanged?.(); }
               catch (problem) { setApprovalOn(!value); toast(problem.message || "Could not update"); }
             }}/>
           </div>
@@ -5658,6 +6132,44 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
         </div>
       )}
 
+      {chat.type === "channel" && canManage && channelStats && (
+          <div style={{ padding: "14px 4px", borderTop: `1px solid ${G.border}` }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 10 }}>Channel analytics</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+              {[
+                { label: "Posts (loaded)", value: channelStats.total },
+                { label: "Last 24h", value: channelStats.last24h },
+                { label: "Last 7 days", value: channelStats.lastWeek },
+                { label: "With media", value: channelStats.withMedia },
+                { label: "With reactions", value: channelStats.withReactions },
+                { label: "Total reactions", value: channelStats.totalReactions },
+              ].map((s, i) => (
+                <div key={i} style={{
+                  padding: "8px 10px", borderRadius: 10, background: G.dim,
+                  border: `1px solid ${G.border}`,
+                }}>
+                  <div style={{ fontSize: 18, fontWeight: 700, color: G.accentText }}>{s.value}</div>
+                  <div style={{ fontSize: 11, color: G.muted }}>{s.label}</div>
+                </div>
+              ))}
+            </div>
+            {channelStats.topPosters.length > 0 && (
+              <div>
+                <div style={{ fontSize: 12, color: G.sub, marginBottom: 4 }}>Top contributors</div>
+                {channelStats.topPosters.map(([name, count], i) => (
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "3px 0" }}>
+                    <span>{name}</span>
+                    <span style={{ color: G.muted }}>{count} posts</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ fontSize: 10.5, color: G.muted, marginTop: 6 }}>
+              Based on the last {channelStats.total} loaded messages
+            </div>
+          </div>
+      )}
+
       {managed && (
         <div style={{ padding: "12px 4px" }}>
           <div style={{
@@ -5667,11 +6179,18 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
             <div style={{ fontSize: 12, color: G.sub }}>
               {chat.type === "channel" ? "Subscribers" : "Members"} {full ? `(${full.members.length})` : ""}
             </div>
-            {canManage && (
-              <div onClick={() => setShowAddMembers(true)} style={{ cursor: "pointer" }} title="Add members">
-                {I.plus(G.accentText, 16)}
-              </div>
-            )}
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              {myRole === "owner" && full && full.members.some((m) => m.role === "admin") && (
+                <div onClick={() => setShowPermMatrix(true)} style={{ cursor: "pointer", fontSize: 11, fontWeight: 600, color: G.accentText }}>
+                  Permissions
+                </div>
+              )}
+              {canManage && (
+                <div onClick={() => setShowAddMembers(true)} style={{ cursor: "pointer" }} title="Add members">
+                  {I.plus(G.accentText, 16)}
+                </div>
+              )}
+            </div>
           </div>
 
           {full && full.members.length > 6 && (
@@ -5767,6 +6286,50 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
         </div>
       )}
 
+      {["group", "channel", "community"].includes(chat.type) && canManage && (() => {
+        const log = getAdminLog(chat.id);
+        if (log.length === 0) return null;
+        const ACTION_LABELS = {
+          remove_member: "Removed member",
+          promote_admin: "Promoted to admin",
+          demote_admin: "Removed admin",
+          transfer_ownership: "Transferred ownership to",
+          toggle_reactions: "Reactions",
+          toggle_admins_only_send: "Admin-only send",
+          toggle_topics: "Topics",
+          toggle_comments: "Comments",
+          toggle_signature: "Sign posts",
+          toggle_approval: "Join approval",
+          toggle_spam_filter: "Spam filter",
+          set_slow_mode: "Slow mode set to",
+        };
+        return (
+          <div style={{ padding: "14px 4px", borderTop: `1px solid ${G.border}` }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 600 }}>Admin activity log</div>
+              <span onClick={() => { clearAdminLog(chat.id); toast("Log cleared"); }}
+                    style={{ fontSize: 11, color: G.muted, cursor: "pointer" }}>Clear</span>
+            </div>
+            <div style={{ maxHeight: 220, overflowY: "auto" }}>
+              {log.slice(0, 50).map((entry, i) => (
+                <div key={i} style={{ display: "flex", gap: 8, padding: "5px 0", borderBottom: `1px solid ${G.dim}` }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12.5 }}>
+                      <span style={{ fontWeight: 600 }}>{entry.actor}</span>{" "}
+                      {ACTION_LABELS[entry.action] || entry.action}
+                      {entry.detail ? ` ${entry.detail}` : ""}
+                    </div>
+                    <div style={{ fontSize: 10.5, color: G.muted }}>
+                      {new Date(entry.ts).toLocaleString()}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
+
       {chat.type !== "saved" && chat.type !== "dm" && (
         <Button variant="danger" onClick={leave} disabled={busy}
                 style={{ width: "100%", marginTop: 18 }}>
@@ -5830,6 +6393,82 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
       {inviteSheet && (
         <InviteLinkSheet chat={chat} toast={toast} onClose={() => setInviteSheet(false)}/>
       )}
+
+      {showPermMatrix && full && (
+        <PermissionMatrixSheet
+          members={full.members.filter((m) => m.role === "admin" || m.role === "owner")}
+          onClose={() => setShowPermMatrix(false)}
+          onToggle={async (memberId, perm, currentPerms) => {
+            const next = currentPerms.includes(perm) ? currentPerms.filter((p) => p !== perm) : [...currentPerms, perm];
+            try {
+              await Chats.setMemberRole(chat.id, memberId, "admin", next);
+              reloadFull();
+            } catch (problem) { toast(problem.message || "Could not update permission"); }
+          }}
+        />
+      )}
+    </Sheet>
+  );
+}
+
+function PermissionMatrixSheet({ members, onClose, onToggle }) {
+  return (
+    <Sheet title="Permission Matrix" onClose={onClose}>
+      <div style={{ overflowX: "auto", paddingBottom: 8 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: "left", padding: "6px 8px", borderBottom: `1px solid ${G.border}`, position: "sticky", left: 0, background: G.bg, zIndex: 1, minWidth: 100 }}>
+                Member
+              </th>
+              {ADMIN_PERMISSIONS.map((perm) => (
+                <th key={perm} style={{ textAlign: "center", padding: "6px 4px", borderBottom: `1px solid ${G.border}`, fontSize: 11, whiteSpace: "nowrap" }}>
+                  {PERMISSION_LABELS[perm]}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {members.map((member) => {
+              const perms = member.role === "owner" ? ADMIN_PERMISSIONS : (member.permissions || ADMIN_PERMISSIONS);
+              return (
+                <tr key={member.id}>
+                  <td style={{ padding: "7px 8px", borderBottom: `1px solid ${G.border}`, position: "sticky", left: 0, background: G.bg, zIndex: 1 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <Av av={member.avatar_letter} color={member.color} size={22} photoId={member.avatar_attachment_id}/>
+                      <div>
+                        <div style={{ fontSize: 12.5, lineHeight: 1.2 }}>{member.name}</div>
+                        <div style={{ fontSize: 10, color: G.muted, textTransform: "capitalize" }}>{member.role}</div>
+                      </div>
+                    </div>
+                  </td>
+                  {ADMIN_PERMISSIONS.map((perm) => {
+                    const has = perms.includes(perm);
+                    const isOwner = member.role === "owner";
+                    return (
+                      <td key={perm} style={{ textAlign: "center", padding: "7px 4px", borderBottom: `1px solid ${G.border}` }}>
+                        <div
+                          onClick={isOwner ? undefined : () => onToggle(member.id, perm, perms)}
+                          style={{
+                            display: "inline-flex", alignItems: "center", justifyContent: "center",
+                            width: 24, height: 24, borderRadius: 6,
+                            background: has ? "#22c55e22" : "#ef444422",
+                            cursor: isOwner ? "default" : "pointer",
+                            opacity: isOwner ? 0.6 : 1,
+                          }}
+                          title={isOwner ? "Owner has all permissions" : `Toggle ${PERMISSION_LABELS[perm]}`}
+                        >
+                          {has ? I.check("#22c55e", 14) : I.close("#ef4444", 14)}
+                        </div>
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </Sheet>
   );
 }
@@ -5871,9 +6510,10 @@ function ToneSheet({ current, onClose, onPicked }) {
 
 /** Telegram-style Topics chip strip: "All", "General", then each open topic. */
 function TopicStrip({ topics, activeTopicId, onSelect, onCreated, chatId, toast }) {
+  const [topicPrompt, topicModal] = usePrompt();
   const open = topics.filter((t) => !t.closed_at);
   async function newTopic() {
-    const name = (window.prompt("New topic name") || "").trim();
+    const name = ((await topicPrompt("New topic name")) || "").trim();
     if (!name) return;
     try {
       const topic = await Chats.createTopic(chatId, name);
@@ -5907,6 +6547,7 @@ function TopicStrip({ topics, activeTopicId, onSelect, onCreated, chatId, toast 
         whiteSpace: "nowrap", cursor: "pointer", flexShrink: 0,
         border: `1px dashed ${G.border}`, color: G.muted,
       }}>+ Topic</div>
+      {topicModal}
     </div>
   );
 }
@@ -6378,7 +7019,7 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
   }
 
   if (editing && editFile) {
-    return <PhotoEditor file={editFile} onCancel={() => setEditing(false)} onDone={saveEdited}/>;
+    return <Suspense fallback={null}><PhotoEditor file={editFile} onCancel={() => setEditing(false)} onDone={saveEdited}/></Suspense>;
   }
 
   return (
@@ -6505,7 +7146,7 @@ function InviteLinkSheet({ chat, onClose, toast }) {
       {code ? (
         <>
           <div style={{ display: "flex", justifyContent: "center", marginBottom: 14 }}>
-            <QrView value={link} size={190}/>
+            <Suspense fallback={null}><QrView value={link} size={190}/></Suspense>
           </div>
           <div style={{
             padding: "12px 14px", borderRadius: 12, background: G.dim,

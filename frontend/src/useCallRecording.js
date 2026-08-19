@@ -17,6 +17,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 export function useCallRecording(call) {
   const [recording, setRecording] = useState(false);
   const [elapsed, setElapsed] = useState(0);
+  const [lastBlob, setLastBlob] = useState(null);
+  const [uploading, setUploading] = useState(false);
 
   const canvasRef = useRef(null);
   const recorderRef = useRef(null);
@@ -115,6 +117,7 @@ export function useCallRecording(call) {
     };
     recorder.onstop = () => {
       const blob = new Blob(chunksRef.current, { type: "video/webm" });
+      setLastBlob(blob);
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
@@ -155,5 +158,21 @@ export function useCallRecording(call) {
 
   useEffect(() => stop, [stop]);
 
-  return { recording, elapsed, start, stop };
+  const uploadToCloud = useCallback(async (chatId, sendFileFn) => {
+    if (!lastBlob || uploading) return;
+    setUploading(true);
+    try {
+      const file = new File(
+        [lastBlob],
+        `meeting-recording-${new Date().toISOString().replace(/[:.]/g, "-")}.webm`,
+        { type: "video/webm" },
+      );
+      await sendFileFn({ chatId, file, kind: "video", text: "Meeting recording" });
+      setLastBlob(null);
+    } finally {
+      setUploading(false);
+    }
+  }, [lastBlob, uploading]);
+
+  return { recording, elapsed, start, stop, lastBlob, uploading, uploadToCloud };
 }

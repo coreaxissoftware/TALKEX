@@ -786,6 +786,7 @@ export const I = {
   fwd: (c = G.sub, s = 16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round"><polyline points="15 10 20 15 15 20"/><path d="M4 4v7a4 4 0 0 0 4 4h12"/></svg>,
   reply: (c = G.sub, s = 16) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round"><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg>,
   info: (c = G.sub, s = 18) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>,
+  bookmark: (c = G.sub, s = 18) => <svg width={s} height={s} viewBox="0 0 24 24" fill={c} stroke="none"><path d="M5 2h14a1 1 0 0 1 1 1v19.143a.5.5 0 0 1-.766.424L12 18.03l-7.234 4.537A.5.5 0 0 1 4 22.143V3a1 1 0 0 1 1-1z"/></svg>,
   star: (c = G.sub, s = 18) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>,
   starFill: (c = G.sub, s = 18) => <svg width={s} height={s} viewBox="0 0 24 24" fill={c} stroke="none"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>,
   download: (c = G.sub, s = 18) => <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>,
@@ -1408,4 +1409,65 @@ export function unixToLocalInput(seconds) {
   const date = toDate(seconds);
   const offset = date.getTimezoneOffset() * 60000;
   return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
+
+export function usePrompt() {
+  const [state, setState] = useState(null);
+  const inputRef = useRef(null);
+
+  const prompt = useCallback((title, defaultValue) => {
+    return new Promise((resolve) => {
+      setState({ title, defaultValue: defaultValue || "", resolve });
+    });
+  }, []);
+
+  const modal = state ? (
+    <PromptOverlay title={state.title} defaultValue={state.defaultValue}
+      inputRef={inputRef}
+      onSubmit={(val) => { state.resolve(val); setState(null); }}
+      onCancel={() => { state.resolve(null); setState(null); }}/>
+  ) : null;
+
+  return [prompt, modal];
+}
+
+function PromptOverlay({ title, defaultValue, inputRef, onSubmit, onCancel }) {
+  const [value, setValue] = useState(defaultValue);
+  useEffect(() => { setTimeout(() => inputRef.current?.focus(), 50); }, [inputRef]);
+  function handleKey(e) {
+    if (e.key === "Enter") onSubmit(value);
+    else if (e.key === "Escape") onCancel();
+  }
+  return (
+    <div onClick={onCancel} style={{
+      position: "fixed", inset: 0, zIndex: 9999,
+      background: "rgba(0,0,0,0.55)", backdropFilter: "blur(4px)",
+      display: "flex", alignItems: "center", justifyContent: "center",
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        background: G.card, borderRadius: 16, padding: 20, width: "min(320px, 90vw)",
+        boxShadow: "0 8px 32px rgba(0,0,0,0.4)", border: `1px solid ${G.border}`,
+      }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: G.text, marginBottom: 12 }}>{title}</div>
+        <input ref={inputRef} value={value} onChange={(e) => setValue(e.target.value)}
+               onKeyDown={handleKey}
+               style={{
+                 width: "100%", padding: "10px 14px", borderRadius: 10,
+                 border: `1px solid ${G.border}`, background: G.bg,
+                 color: G.text, fontSize: 14, outline: "none",
+                 boxSizing: "border-box",
+               }}/>
+        <div style={{ display: "flex", gap: 8, marginTop: 14, justifyContent: "flex-end" }}>
+          <button onClick={onCancel} style={{
+            padding: "8px 18px", borderRadius: 10, border: `1px solid ${G.border}`,
+            background: "transparent", color: G.sub, fontSize: 13, fontWeight: 600, cursor: "pointer",
+          }}>Cancel</button>
+          <button onClick={() => onSubmit(value)} style={{
+            padding: "8px 18px", borderRadius: 10, border: "none",
+            background: G.accent, color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer",
+          }}>OK</button>
+        </div>
+      </div>
+    </div>
+  );
 }

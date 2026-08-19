@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Actions, Chats, Contacts, Me, Users } from "../api.js";
 import { Av, Button, ContextMenu, G, I, SRow, Spinner, whenLabel } from "../ui.jsx";
 import { MuteSheet, LockSheet, FolderSheet, muteLabel } from "./ChatView.jsx";
-import { AppLockSetupSheet } from "./Settings.jsx";
+const AppLockSetupSheetLazy = lazy(() => import("./Settings.jsx").then(m => ({ default: m.AppLockSetupSheet })));
 import { COUNTRY_CODES, flagFor, samplePlaceholder, splitPhone } from "../countryCodes.js";
 import { disableAppLock, isAppLockEnabled } from "../appLock.js";
 
@@ -47,7 +47,7 @@ const CATEGORIES = [
  * not change what anyone else sees.
  */
 export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, onChanged, toast,
-                                    onNewChat, onLogout, headerMenuPos, onHeaderMenuClose }) {
+                                    onNewChat, onLogout, headerMenuPos, onHeaderMenuClose, me }) {
   const [category, setCategory] = useState("all");
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
@@ -62,6 +62,9 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
   const [showStarred, setShowStarred] = useState(false);
   const [appLockOn, setAppLockOn] = useState(isAppLockEnabled);
   const [appLockSetupOpen, setAppLockSetupOpen] = useState(false);
+  const [pullY, setPullY] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const pullStart = useRef(null);
 
   // Only needed for the "Non-Contact" filter — a DM counts as a contact once
   // its peer's phone number matches something in your saved address book.
@@ -78,6 +81,11 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
   // always shows how many are waiting there regardless.
   const activeChats = useMemo(() => chats.filter((chat) => !chat.archived), [chats]);
   const archivedChats = useMemo(() => chats.filter((chat) => chat.archived), [chats]);
+  const customFolders = useMemo(() => {
+    const set = new Set();
+    activeChats.forEach((chat) => { if (chat.folder) set.add(chat.folder); });
+    return [...set].sort();
+  }, [activeChats]);
 
   const visible = useMemo(() => {
     let list = category === "archive" ? archivedChats : activeChats;
@@ -89,6 +97,10 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
     } else if (category === "group") list = list.filter((chat) => chat.type === "group");
     else if (category === "channel") list = list.filter((chat) => chat.type === "channel");
     else if (category === "community") list = list.filter((chat) => chat.type === "community");
+    else if (category.startsWith("folder:")) {
+      const folderName = category.slice(7);
+      list = list.filter((chat) => chat.folder === folderName);
+    }
 
     if (query.trim()) {
       const needle = query.trim().toLowerCase();
@@ -194,6 +206,16 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
     onChanged();
   }
 
+  async function openSavedMessages() {
+    if (!me) return;
+    try {
+      const chat = await Chats.dm(me.id);
+      onOpen({ ...chat, name: "Saved Messages" });
+    } catch (err) {
+      toast(err.message || "Could not open Saved Messages");
+    }
+  }
+
   function headerMenuItems() {
     return [
       { label: "New group", icon: I.user(G.sub, 16), onClick: onNewChat },
@@ -202,6 +224,7 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
         icon: <span style={{ fontSize: 15, color: G.sub, width: 16, textAlign: "center", lineHeight: 1 }}>★</span>,
         onClick: () => setShowStarred(true),
       },
+      { label: "Saved messages", icon: I.bookmark(G.sub, 16), onClick: openSavedMessages },
       { label: "Select chats", icon: I.check(G.sub, 16), onClick: () => setSelectMode(true) },
       { label: "Mark all as read", icon: I.check(G.sub, 16), onClick: markAllRead },
       { divider: true },
@@ -259,7 +282,33 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
   if (loading) return <Spinner/>;
 
   return (
-    <div style={{ flex: 1, overflowY: "auto" }}>
+    <div
+      onTouchStart={(e) => {
+        if (e.currentTarget.scrollTop === 0) pullStart.current = e.touches[0].clientY;
+      }}
+      onTouchMove={(e) => {
+        if (pullStart.current == null) return;
+        const dy = e.touches[0].clientY - pullStart.current;
+        if (dy > 0 && e.currentTarget.scrollTop === 0) setPullY(Math.min(dy * 0.4, 80));
+        else { pullStart.current = null; setPullY(0); }
+      }}
+      onTouchEnd={() => {
+        if (pullY > 50 && !refreshing) {
+          setRefreshing(true);
+          onChanged();
+          setTimeout(() => { setRefreshing(false); setPullY(0); }, 800);
+        } else setPullY(0);
+        pullStart.current = null;
+      }}
+      style={{ flex: 1, overflowY: "auto" }}>
+      {(pullY > 0 || refreshing) && (
+        <div style={{
+          display: "flex", justifyContent: "center", padding: `${refreshing ? 16 : pullY * 0.2}px 0`,
+          color: G.sub, fontSize: 12, transition: refreshing ? "padding 0.2s" : "none",
+        }}>
+          {refreshing ? <Spinner/> : pullY > 50 ? "Release to refresh" : "Pull to refresh"}
+        </div>
+      )}
       {selectMode ? (
         <div style={{
           display: "flex", alignItems: "center", gap: 12, padding: "10px 16px",
@@ -320,6 +369,19 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
               fontSize: 13, cursor: "pointer",
             }}>{label}</button>
         ))}
+        {customFolders.map((name) => {
+          const key = `folder:${name}`;
+          return (
+            <button key={key} onClick={() => setCategory(key)}
+              style={{
+                padding: "6px 14px", borderRadius: 20, whiteSpace: "nowrap",
+                border: `1px solid ${category === key ? G.accent : G.border}`,
+                background: category === key ? G.accentSoft : "transparent",
+                color: category === key ? G.accentText : G.sub,
+                fontSize: 13, cursor: "pointer",
+              }}>{name}</button>
+          );
+        })}
       </div>
 
       {category !== "archive" && archivedChats.length > 0 && (
@@ -344,11 +406,36 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
       ))}
 
       {visible.length === 0 && (
-        <div style={{ padding: 40, textAlign: "center", color: G.muted, fontSize: 14 }}>
-          {category === "archive" ? "No archived chats."
-            : category === "all" ? "No conversations yet. Tap + to find someone or start a chat."
-            : "Nothing here yet."}
-        </div>
+        category !== "all" ? (
+          <div style={{ padding: 40, textAlign: "center", color: G.muted, fontSize: 14 }}>
+            {category === "archive" ? "No archived chats." : "Nothing here yet."}
+          </div>
+        ) : (
+          <div style={{
+            padding: "48px 24px", display: "flex", flexDirection: "column",
+            alignItems: "center", gap: 16, textAlign: "center",
+          }}>
+            <div style={{
+              width: 72, height: 72, borderRadius: "50%",
+              background: `${G.accent}18`,
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>{I.chat(G.accent, 32)}</div>
+            <div>
+              <div style={{ fontSize: 17, fontWeight: 700, color: G.text, marginBottom: 4 }}>
+                Start a conversation
+              </div>
+              <div style={{ fontSize: 13, color: G.muted, lineHeight: 1.5 }}>
+                Message friends, create groups, or invite someone to join TalkEx
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+              <button onClick={onNewChat} style={{
+                padding: "10px 20px", borderRadius: 24, border: "none", cursor: "pointer",
+                background: G.accent, color: "#fff", fontSize: 13, fontWeight: 600,
+              }}>New chat</button>
+            </div>
+          </div>
+        )
       )}
 
       {visible.map((chat) => (
@@ -397,8 +484,10 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
                                onOpenChat={(chatToOpen) => { onOpen(chatToOpen); setShowStarred(false); }}/>
       )}
       {appLockSetupOpen && (
-        <AppLockSetupSheet onClose={() => setAppLockSetupOpen(false)}
-                            onSet={() => { setAppLockOn(true); setAppLockSetupOpen(false); toast("App lock turned on"); }}/>
+        <Suspense fallback={null}>
+          <AppLockSetupSheetLazy onClose={() => setAppLockSetupOpen(false)}
+                                onSet={() => { setAppLockOn(true); setAppLockSetupOpen(false); toast("App lock turned on"); }}/>
+        </Suspense>
       )}
     </div>
   );
@@ -581,9 +670,6 @@ function ContactQuickSheet({ chat, onClose, toast, onChanged }) {
 
 function displayName(chat) {
   if (chat.name) return chat.name;
-  // A DM has no stored name — it is whoever the other member is. The server
-  // sends the member list on /chats/{id}, but the list endpoint stays light, so
-  // fall back to something readable rather than fetching per row.
   return chat.type === "dm" ? "Direct message" : "Chat";
 }
 

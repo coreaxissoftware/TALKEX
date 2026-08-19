@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Chats, Contacts, Me, Stories, Uploads } from "../api.js";
 import {
-  Av, Button, Field, G, I, Spinner, countdown, localInputToUnix, whenLabel,
+  Av, Button, Field, G, I, Spinner, countdown, localInputToUnix, usePrompt, whenLabel,
 } from "../ui.jsx";
 import { MoreMenu } from "./CallOverlay.jsx";
-import PhotoEditor from "../PhotoEditor.jsx";
+const PhotoEditor = lazy(() => import("../PhotoEditor.jsx"));
 import MusicPicker from "../MusicPicker.jsx";
 
 const BACKGROUNDS = [
@@ -643,27 +643,28 @@ function Compose({ initialKind, onClose, onDone, toast }) {
   }
 
   async function uploadFile(file, previewUrl) {
+    setUpload((current) => {
+      if (current?.previewUrl && current.previewUrl !== previewUrl) URL.revokeObjectURL(current.previewUrl);
+      return { attachmentId: null, previewUrl, fileName: file.name };
+    });
     setUploading(true);
     try {
       const attachment = await Uploads.create(file);
-      setUpload((current) => {
-        if (current?.previewUrl && current.previewUrl !== previewUrl) URL.revokeObjectURL(current.previewUrl);
-        return { attachmentId: attachment.attachment_id, previewUrl, fileName: file.name };
-      });
+      setUpload((current) => current ? { ...current, attachmentId: attachment.attachment_id } : current);
     } catch (problem) {
       toast(problem.message || "Could not upload file");
+      setUpload(null);
       if (previewUrl) URL.revokeObjectURL(previewUrl);
     } finally {
       setUploading(false);
     }
   }
 
-  async function onFilePicked(event) {
+  function onFilePicked(event) {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
 
-    // Auto-detect kind from file type
     if (file.type.startsWith("image/")) setKind("photo");
     else if (file.type.startsWith("video/")) setKind("video");
     else if (file.type.startsWith("audio/")) setKind("audio");
@@ -671,7 +672,7 @@ function Compose({ initialKind, onClose, onDone, toast }) {
     if (file.type.startsWith("image/")) setRawPhotoFile(file);
     const previewUrl = file.type.startsWith("image/") || file.type.startsWith("video/")
       ? URL.createObjectURL(file) : null;
-    await uploadFile(file, previewUrl);
+    uploadFile(file, previewUrl);
   }
 
   function onPhotoEdited(editedFile) {
@@ -696,14 +697,16 @@ function Compose({ initialKind, onClose, onDone, toast }) {
 
   if (editingPhoto) {
     return (
-      <PhotoEditor file={rawPhotoFile} onCancel={() => setEditingPhoto(false)} onDone={onPhotoEdited}/>
+      <Suspense fallback={null}>
+        <PhotoEditor file={rawPhotoFile} onCancel={() => setEditingPhoto(false)} onDone={onPhotoEdited}/>
+      </Suspense>
     );
   }
 
   async function save() {
     if (kind === "text" && !text.trim()) return;
-    if ((kind === "photo" || kind === "video" || kind === "audio") && !upload) {
-      toast(`Pick a${kind === "audio" ? "n" : ""} ${kind} first`);
+    if ((kind === "photo" || kind === "video" || kind === "audio") && (!upload || !upload.attachmentId)) {
+      toast(!upload ? `Pick a${kind === "audio" ? "n" : ""} ${kind} first` : "Still uploading, please wait…");
       return;
     }
     let trimmedLink = "";
@@ -934,6 +937,17 @@ function Compose({ initialKind, onClose, onDone, toast }) {
                          style={{ fontSize: 14, color: "#ffffff88", cursor: "pointer", flexShrink: 0, lineHeight: 1 }}>✕</div>
                   </div>
                 )}
+                {uploading && (
+                  <div style={{
+                    position: "absolute", top: 10, left: 10,
+                    padding: "4px 12px", borderRadius: 12,
+                    background: "#000000bb", backdropFilter: "blur(8px)",
+                    display: "flex", alignItems: "center", gap: 6,
+                  }}>
+                    <Spinner small/>
+                    <span style={{ fontSize: 11, color: "#ffffffcc" }}>Uploading…</span>
+                  </div>
+                )}
                 {kind === "photo" && (
                   <div style={{
                     position: "absolute", bottom: 12, right: 12,
@@ -1151,6 +1165,7 @@ const QUICK_REACTIONS = ["❤️", "😂", "😮", "😢", "👏", "🔥"];
  * - Author info header
  */
 function StoryViewer({ story, author, me, toast, allAuthors, onClose, onStoryChange }) {
+  const [hlPrompt, hlModal] = usePrompt();
   const isMedia = story.kind === "photo" || story.kind === "video" || story.kind === "audio";
   const isAuthor = story.user_id === me.id;
   const [myReaction, setMyReaction] = useState(null);
@@ -1298,7 +1313,7 @@ function StoryViewer({ story, author, me, toast, allAuthors, onClose, onStoryCha
         setHighlighted(false);
         toast?.("Removed from Highlights");
       } else {
-        const label = (window.prompt("Name this highlight (optional)", "") || "").slice(0, 40);
+        const label = ((await hlPrompt("Name this highlight (optional)")) || "").slice(0, 40);
         await Stories.highlight(story.id, label);
         setHighlighted(true);
         toast?.("Added to Highlights");
@@ -1565,6 +1580,7 @@ function StoryViewer({ story, author, me, toast, allAuthors, onClose, onStoryCha
         <StoryForwardSheet story={story} onClose={() => setForwarding(false)}
                            onDone={() => { setForwarding(false); toast?.("Sent"); }} toast={toast}/>
       )}
+      {hlModal}
     </div>
   );
 }

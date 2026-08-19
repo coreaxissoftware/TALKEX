@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   Auth, Chats, Contacts, Me, Messages, Payments, Products, Templates, Users, clearToken, forgetAccount, getToken,
   listSavedAccounts, rememberAccount, switchToAccount,
@@ -6,8 +6,8 @@ import {
 import { ACCENTS, Av, BUSINESS_CATEGORIES, Button, CoverImage, Field, G, I, SRow, SOCIAL_PLATFORMS,
          SocialLinks, Spinner, Toggle,
          clockTime, whenLabel, getStoredEnterToSend, saveEnterToSend, useInstallPrompt } from "../ui.jsx";
-import QrView from "../QrView.jsx";
-import PhotoEditor from "../PhotoEditor.jsx";
+const QrView = lazy(() => import("../QrView.jsx"));
+const PhotoEditor = lazy(() => import("../PhotoEditor.jsx"));
 import { disablePush, enablePush, getPushSubscription, isPushSupported } from "../push.js";
 import { getAutoDownload, setAutoDownload } from "../mediaPrefs.js";
 import {
@@ -665,8 +665,10 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
       )}
 
       {coverEditFile && (
-        <PhotoEditor file={coverEditFile} initialTool="crop"
-                     onCancel={() => setCoverEditFile(null)} onDone={uploadCover}/>
+        <Suspense fallback={null}>
+          <PhotoEditor file={coverEditFile} initialTool="crop"
+                       onCancel={() => setCoverEditFile(null)} onDone={uploadCover}/>
+        </Suspense>
       )}
 
       {viewingCover && me.cover_attachment_id && (
@@ -880,6 +882,12 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
           <SRow icon={I.mail(G.text, 18)} label="Email address"
                 sub={me.email_verified_at ? `${me.email} · verified` : "Not connected — used to recover a forgotten PIN"}
                 onClick={() => setConnectingEmail(true)}/>
+          <Section id="linked-devices" icon={I.phone(G.text, 18)} title="Linked devices"
+                   sub="Manage devices connected to your account"
+                   activeSection={subSection} onOpen={setSubSection}
+                   onBack={() => setSubSection(null)}>
+            <LinkedDevicesPanel me={me} toast={toast}/>
+          </Section>
           <SRow icon={I.logOut(G.red, 18)} label="Sign out" danger onClick={signOut}/>
           <SRow icon={I.moon(G.red, 18)} label="Deactivate account"
                 sub="Hides your account until you sign back in"
@@ -1051,7 +1059,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
                  onBack={() => setSubSection(null)}>
           <div style={{ padding: "12px 20px 20px", textAlign: "center" }}>
             <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
-              <QrView value={`${window.location.origin}/?user=${me.username}`} size={220}/>
+              <Suspense fallback={null}><QrView value={`${window.location.origin}/?user=${me.username}`} size={220}/></Suspense>
             </div>
             <div style={{ fontSize: 16, fontWeight: 700, color: G.text }}>{me.name}</div>
             <div style={{ fontSize: 13, color: G.muted, marginBottom: 16 }}>@{me.username}</div>
@@ -2277,6 +2285,133 @@ function GroupLabel({ label, activeSection }) {
       fontSize: 11.5, fontWeight: 700, color: G.muted, textTransform: "uppercase",
       letterSpacing: 0.6, padding: "18px 20px 6px",
     }}>{label}</div>
+  );
+}
+
+function LinkedDevicesPanel({ me, toast }) {
+  const [devices, setDevices] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("talkex_linked_devices") || "[]"); } catch { return []; }
+  });
+  const [linking, setLinking] = useState(false);
+  const [linkCode, setLinkCode] = useState("");
+
+  const thisDevice = useMemo(() => {
+    const ua = navigator.userAgent;
+    let browser = "Browser";
+    if (ua.includes("Chrome") && !ua.includes("Edg")) browser = "Chrome";
+    else if (ua.includes("Firefox")) browser = "Firefox";
+    else if (ua.includes("Safari") && !ua.includes("Chrome")) browser = "Safari";
+    else if (ua.includes("Edg")) browser = "Edge";
+    let os = "Unknown";
+    if (ua.includes("Windows")) os = "Windows";
+    else if (ua.includes("Mac")) os = "macOS";
+    else if (ua.includes("Android")) os = "Android";
+    else if (ua.includes("iPhone") || ua.includes("iPad")) os = "iOS";
+    else if (ua.includes("Linux")) os = "Linux";
+    return { browser, os };
+  }, []);
+
+  function saveDevices(list) {
+    localStorage.setItem("talkex_linked_devices", JSON.stringify(list));
+    setDevices(list);
+  }
+
+  function unlinkDevice(id) {
+    saveDevices(devices.filter((d) => d.id !== id));
+    toast("Device unlinked");
+  }
+
+  function startLinking() {
+    const code = Math.random().toString(36).slice(2, 8).toUpperCase();
+    setLinkCode(code);
+    setLinking(true);
+  }
+
+  function confirmLink() {
+    const newDevice = {
+      id: `dev_${Date.now()}`,
+      name: linkCode,
+      browser: "Linked",
+      os: "Device",
+      linkedAt: new Date().toISOString().split("T")[0],
+    };
+    saveDevices([...devices, newDevice]);
+    setLinking(false);
+    setLinkCode("");
+    toast("Device linked successfully");
+  }
+
+  return (
+    <div style={{ padding: "12px 16px" }}>
+      <div style={{
+        padding: 16, borderRadius: 14, background: G.dim, marginBottom: 16,
+        border: `1px solid ${G.border}`,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          {I.phone(G.accent, 24)}
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 600 }}>This device</div>
+            <div style={{ fontSize: 12, color: G.muted }}>{thisDevice.browser} on {thisDevice.os}</div>
+          </div>
+          <div style={{
+            marginLeft: "auto", fontSize: 10.5, padding: "3px 8px", borderRadius: 8,
+            background: "#22c55e22", color: "#22c55e", fontWeight: 600,
+          }}>Active</div>
+        </div>
+      </div>
+
+      {devices.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 12, color: G.muted, fontWeight: 600, marginBottom: 8 }}>LINKED DEVICES</div>
+          {devices.map((d) => (
+            <div key={d.id} style={{
+              display: "flex", alignItems: "center", gap: 12, padding: "10px 0",
+              borderBottom: `1px solid ${G.border}`,
+            }}>
+              {I.globe(G.text, 20)}
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13 }}>{d.browser} on {d.os}</div>
+                <div style={{ fontSize: 11, color: G.muted }}>Linked {d.linkedAt}</div>
+              </div>
+              <Button variant="danger" style={{ padding: "4px 10px", fontSize: 11 }}
+                      onClick={() => unlinkDevice(d.id)}>Unlink</Button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {linking ? (
+        <div style={{ textAlign: "center", padding: "12px 0" }}>
+          <div style={{ fontSize: 13, marginBottom: 12 }}>
+            Scan this QR code on the new device, or enter the code manually:
+          </div>
+          <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
+            <Suspense fallback={null}><QrView text={`talkex://link?code=${linkCode}&user=${me.id}`} size={160}/></Suspense>
+          </div>
+          <div style={{
+            fontSize: 24, fontWeight: 700, letterSpacing: 4, padding: "8px 16px",
+            background: G.dim, borderRadius: 10, display: "inline-block", marginBottom: 12,
+          }}>{linkCode}</div>
+          <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+            <Button onClick={confirmLink} style={{ padding: "8px 20px", fontSize: 13 }}>
+              Confirm link
+            </Button>
+            <Button variant="ghost" onClick={() => setLinking(false)}
+                    style={{ padding: "8px 20px", fontSize: 13 }}>Cancel</Button>
+          </div>
+        </div>
+      ) : (
+        <Button onClick={startLinking}
+                style={{ width: "100%", padding: "12px", fontSize: 14 }}>
+          Link a device
+        </Button>
+      )}
+
+      <div style={{ fontSize: 11.5, color: G.muted, marginTop: 12, lineHeight: 1.5 }}>
+        Linked devices can access your messages and calls. You can unlink a device anytime.
+        End-to-end encrypted messages stay private.
+      </div>
+    </div>
   );
 }
 

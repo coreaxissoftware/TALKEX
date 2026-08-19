@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Chats, Messages, newClientMessageId } from "../api.js";
-import { Av, Button, G, I, useCallLayout } from "../ui.jsx";
+import { Chats, Messages, newClientMessageId, sendFileReliably } from "../api.js";
+import { Av, Button, G, I, useCallLayout, usePrompt } from "../ui.jsx";
 import { AudioOutputPicker, CallButton, MoreMenu, VideoTag, canPickAudioOutput, mmss } from "./CallOverlay.jsx";
 import { useCallRecording } from "../useCallRecording.js";
 
@@ -585,6 +585,221 @@ function LiveCaptions({ enabled, onText }) {
   return null;
 }
 
+function PollCreateSheet({ onClose, onCreate }) {
+  const [question, setQuestion] = useState("");
+  const [options, setOptions] = useState(["", ""]);
+
+  function addOption() {
+    if (options.length < 6) setOptions([...options, ""]);
+  }
+
+  function submit() {
+    const q = question.trim();
+    const opts = options.map((o) => o.trim()).filter(Boolean);
+    if (!q || opts.length < 2) return;
+    onCreate({ question: q, options: opts.map((text) => ({ text, votes: 0 })), myVote: null, totalVotes: 0 });
+    onClose();
+  }
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, zIndex: 1100, background: "#000000aa",
+      display: "flex", alignItems: "flex-end", justifyContent: "center",
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: "100%", maxWidth: 430, background: "#182234", borderTopLeftRadius: 20,
+        borderTopRightRadius: 20, padding: "18px 14px 24px", color: "#fff",
+      }}>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Create a poll</div>
+        <input value={question} onChange={(e) => setQuestion(e.target.value)}
+               placeholder="Ask a question…"
+               style={{
+                 width: "100%", padding: "10px 12px", borderRadius: 10, border: "1px solid #ffffff22",
+                 background: "#ffffff0d", color: "#fff", fontSize: 13.5, marginBottom: 10,
+                 boxSizing: "border-box", outline: "none",
+               }}/>
+        {options.map((opt, i) => (
+          <input key={i} value={opt}
+                 onChange={(e) => { const next = [...options]; next[i] = e.target.value; setOptions(next); }}
+                 placeholder={`Option ${i + 1}`}
+                 style={{
+                   width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #ffffff15",
+                   background: "#ffffff0d", color: "#fff", fontSize: 13, marginBottom: 6,
+                   boxSizing: "border-box", outline: "none",
+                 }}/>
+        ))}
+        {options.length < 6 && (
+          <button onClick={addOption} style={{
+            background: "none", border: "none", color: "#38bdf8", fontSize: 13,
+            cursor: "pointer", padding: "6px 0", marginBottom: 10,
+          }}>+ Add option</button>
+        )}
+        <button onClick={submit}
+                disabled={!question.trim() || options.filter((o) => o.trim()).length < 2}
+                style={{
+                  width: "100%", padding: 12, borderRadius: 10, border: "none", cursor: "pointer",
+                  background: question.trim() && options.filter((o) => o.trim()).length >= 2 ? G.accent : "#ffffff26",
+                  color: "#fff", fontWeight: 600, opacity: question.trim() && options.filter((o) => o.trim()).length >= 2 ? 1 : 0.6,
+                }}>
+          Launch poll
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ActivePollOverlay({ poll, onVote, onClose }) {
+  if (!poll) return null;
+  const maxVotes = Math.max(1, ...poll.options.map((o) => o.votes));
+  return (
+    <div style={{
+      position: "absolute", top: 10, left: "50%", transform: "translateX(-50%)",
+      background: "#182234ee", borderRadius: 14, padding: "12px 16px", minWidth: 220, maxWidth: 320,
+      zIndex: 20, border: "1px solid #ffffff22", color: "#fff",
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <span style={{ fontSize: 11, color: "#38bdf8", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.5 }}>📊 Poll</span>
+        <button onClick={onClose} style={{ background: "none", border: "none", color: "#ffffff88", cursor: "pointer", fontSize: 16 }}>✕</button>
+      </div>
+      <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 10 }}>{poll.question}</div>
+      {poll.options.map((opt, i) => {
+        const pct = poll.totalVotes > 0 ? Math.round((opt.votes / poll.totalVotes) * 100) : 0;
+        const voted = poll.myVote === i;
+        return (
+          <button key={i} onClick={() => onVote(i)}
+                  disabled={poll.myVote != null}
+                  style={{
+                    display: "block", width: "100%", textAlign: "left", padding: "8px 10px",
+                    borderRadius: 8, border: voted ? "1px solid #38bdf8" : "1px solid #ffffff15",
+                    background: "transparent", color: "#fff", fontSize: 13, cursor: poll.myVote != null ? "default" : "pointer",
+                    marginBottom: 4, position: "relative", overflow: "hidden",
+                  }}>
+            <div style={{
+              position: "absolute", top: 0, left: 0, bottom: 0,
+              width: `${pct}%`, background: voted ? "#38bdf822" : "#ffffff0a",
+              borderRadius: 8, transition: "width 0.3s ease",
+            }}/>
+            <div style={{ position: "relative", display: "flex", justifyContent: "space-between" }}>
+              <span>{opt.text}</span>
+              {poll.myVote != null && <span style={{ color: "#ffffff88", fontSize: 12 }}>{pct}%</span>}
+            </div>
+          </button>
+        );
+      })}
+      <div style={{ fontSize: 11, color: "#ffffff66", marginTop: 6 }}>{poll.totalVotes} vote{poll.totalVotes !== 1 ? "s" : ""}</div>
+    </div>
+  );
+}
+
+let qaKeyCounter = 0;
+
+function QaPanel({ questions, onSubmit, onHighlight, onDismiss, isHost, onClose }) {
+  const [text, setText] = useState("");
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, zIndex: 1100, background: "#000000aa",
+      display: "flex", alignItems: "flex-end", justifyContent: "center",
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: "100%", maxWidth: 430, maxHeight: "60vh", background: "#182234",
+        borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "18px 14px 24px",
+        color: "#fff", display: "flex", flexDirection: "column",
+      }}>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>Q&A ({questions.length})</span>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#ffffff88", cursor: "pointer", fontSize: 16 }}>✕</button>
+        </div>
+        <div style={{ flex: 1, overflowY: "auto", marginBottom: 12, minHeight: 60 }}>
+          {questions.length === 0 && (
+            <div style={{ fontSize: 13, color: "#ffffff55", textAlign: "center", padding: 20 }}>No questions yet</div>
+          )}
+          {questions.map((q) => (
+            <div key={q.key} style={{
+              padding: "10px 12px", borderRadius: 10, marginBottom: 6,
+              background: q.highlighted ? "#38bdf822" : "#ffffff0a",
+              border: q.highlighted ? "1px solid #38bdf844" : "1px solid transparent",
+            }}>
+              <div style={{ fontSize: 13 }}>{q.text}</div>
+              <div style={{ fontSize: 11, color: "#ffffff55", marginTop: 4, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span>{q.from || "Anonymous"}</span>
+                {isHost && (
+                  <span style={{ display: "flex", gap: 8 }}>
+                    <button onClick={() => onHighlight(q.key)} style={{ background: "none", border: "none", color: q.highlighted ? "#38bdf8" : "#ffffff55", cursor: "pointer", fontSize: 12 }}>
+                      {q.highlighted ? "★" : "☆"}
+                    </button>
+                    <button onClick={() => onDismiss(q.key)} style={{ background: "none", border: "none", color: "#ef4444", cursor: "pointer", fontSize: 12 }}>✕</button>
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input value={text} onChange={(e) => setText(e.target.value)}
+                 placeholder="Ask a question…"
+                 onKeyDown={(e) => { if (e.key === "Enter" && text.trim()) { onSubmit(text.trim()); setText(""); } }}
+                 style={{
+                   flex: 1, padding: "10px 12px", borderRadius: 10, border: "1px solid #ffffff22",
+                   background: "#ffffff0d", color: "#fff", fontSize: 13, outline: "none",
+                 }}/>
+          <button onClick={() => { if (text.trim()) { onSubmit(text.trim()); setText(""); } }}
+                  style={{
+                    padding: "10px 16px", borderRadius: 10, border: "none", cursor: "pointer",
+                    background: text.trim() ? G.accent : "#ffffff26", color: "#fff", fontWeight: 600, fontSize: 13,
+                  }}>Send</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MeetingNotesSheet({ notes, onChange, onClose }) {
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, zIndex: 1100, background: "#000000aa",
+      display: "flex", alignItems: "flex-end", justifyContent: "center",
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: "100%", maxWidth: 430, background: "#182234", borderTopLeftRadius: 20,
+        borderTopRightRadius: 20, padding: "18px 14px 24px", color: "#fff",
+      }}>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>Meeting Notes</span>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#ffffff88", cursor: "pointer", fontSize: 16 }}>✕</button>
+        </div>
+        <textarea value={notes} onChange={(e) => onChange(e.target.value)}
+                  placeholder="Type your notes here…"
+                  style={{
+                    width: "100%", minHeight: 200, padding: "12px", borderRadius: 10,
+                    border: "1px solid #ffffff22", background: "#ffffff0d", color: "#fff",
+                    fontSize: 13.5, lineHeight: 1.6, resize: "vertical", outline: "none",
+                    boxSizing: "border-box", fontFamily: "inherit",
+                  }}/>
+        <div style={{ fontSize: 11, color: "#ffffff44", marginTop: 8 }}>Notes are saved locally on your device</div>
+      </div>
+    </div>
+  );
+}
+
+function ConnectionQuality({ quality }) {
+  if (quality == null) return null;
+  const bars = quality >= 3 ? 3 : quality >= 2 ? 2 : quality >= 1 ? 1 : 0;
+  const color = bars >= 3 ? "#22c55e" : bars === 2 ? "#eab308" : "#ef4444";
+  return (
+    <div style={{
+      position: "absolute", top: 10, right: 10, display: "flex", alignItems: "flex-end",
+      gap: 1.5, background: "#00000088", padding: "5px 8px", borderRadius: 10,
+    }} title={bars >= 3 ? "Excellent" : bars === 2 ? "Good" : bars === 1 ? "Poor" : "Lost"}>
+      {[0, 1, 2].map((i) => (
+        <div key={i} style={{
+          width: 4, height: 6 + i * 4, borderRadius: 1,
+          background: i < bars ? color : "#ffffff33",
+        }}/>
+      ))}
+    </div>
+  );
+}
+
 function ActiveGroupCall({
   call, myUserId, onLeave, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen,
   onSetScreenOptimization,
@@ -604,20 +819,26 @@ function ActiveGroupCall({
   const [closingBreakout, setClosingBreakout] = useState(false);
   const [showAddPeople, setShowAddPeople] = useState(false);
   const [showReactions, setShowReactions] = useState(false);
+  const [viewMode, setViewMode] = useState("auto"); // "auto" | "grid" | "speaker"
+  const [pinnedUserId, setPinnedUserId] = useState(null);
+  const [showPollCreate, setShowPollCreate] = useState(false);
+  const [activePoll, setActivePoll] = useState(null);
+  const [qaMode, setQaMode] = useState(false);
+  const [qaQuestions, setQaQuestions] = useState([]);
+  const [meetingNotes, setMeetingNotes] = useState("");
+  const [showNotes, setShowNotes] = useState(false);
+
   const recorder = useCallRecording(call);
   const others = Object.entries(call.participants);
   const tileCount = others.length + 1; // + yourself
-  // Landscape gives more horizontal room — use more columns so tiles are
-  // wider than tall (matching the screen's own aspect) instead of stacking
-  // vertically and wasting the sides. Portrait keeps the old 1-or-2 rule.
   const columns = isLandscape
     ? (tileCount <= 1 ? 1 : tileCount <= 4 ? 2 : 3)
     : (tileCount <= 2 ? 1 : 2);
   const isHost = myUserId != null && call.hostId === myUserId;
-  // Screen share wins the main stage over a spotlight when both happen to
-  // be active — the shared content is almost always what everyone actually
-  // wants to look at, same precedence Zoom/Meet use.
-  const mainStageUserId = call.screenSharerId || call.spotlightUserId || null;
+  const autoStageUserId = call.screenSharerId || call.spotlightUserId || null;
+  const mainStageUserId = viewMode === "grid" ? null
+    : viewMode === "speaker" ? (pinnedUserId && (pinnedUserId === myUserId || call.participants[pinnedUserId]) ? pinnedUserId : autoStageUserId || (others[0]?.[0] ?? null))
+    : autoStageUserId;
   const toggleSpotlight = (userId) => onSpotlight(call.spotlightUserId === userId ? null : userId);
 
   return (
@@ -676,6 +897,13 @@ function ActiveGroupCall({
             REC {mmss(recorder.elapsed)}
           </div>
         )}
+        <ConnectionQuality quality={call.connectionQuality}/>
+        <ActivePollOverlay poll={activePoll} onClose={() => setActivePoll(null)}
+          onVote={(i) => setActivePoll((p) => {
+            if (!p || p.myVote != null) return p;
+            const opts = p.options.map((o, j) => j === i ? { ...o, votes: o.votes + 1 } : o);
+            return { ...p, options: opts, myVote: i, totalVotes: p.totalVotes + 1 };
+          })}/>
         {call.captionsOn && call.captions?.length > 0 && (
           <div style={{
             position: "absolute", bottom: 8, left: 8, right: 8, display: "flex",
@@ -769,6 +997,21 @@ function ActiveGroupCall({
           <CallButton onClick={() => setShowSpeakerPicker(true)} background="#ffffff26"
                       icon={I.volume("#fff", 20)} label="Speaker" small/>
         )}
+        {tileCount > 2 && (
+          <CallButton onClick={() => {
+            if (viewMode === "grid" || (viewMode === "auto" && !mainStageUserId)) {
+              setViewMode("speaker");
+              if (!pinnedUserId && others.length) setPinnedUserId(others[0][0]);
+            } else {
+              setViewMode("grid");
+              setPinnedUserId(null);
+            }
+          }} background={viewMode !== "auto" ? "#fff" : "#ffffff26"}
+             icon={<span style={{ fontSize: 16, color: viewMode !== "auto" ? "#0b1220" : "#fff" }}>
+               {(viewMode === "grid" || (viewMode === "auto" && !mainStageUserId)) ? "🔲" : "⊞"}
+             </span>}
+             label={mainStageUserId || viewMode === "speaker" ? "Grid" : "Speaker"} small/>
+        )}
         <CallButton onClick={() => setShowMore(true)} background="#ffffff26"
                     icon={I.moreVertical("#fff", 20)} label="More" small/>
         <CallButton onClick={onLeave} background="#ef4444" icon={I.callEnd("#fff", 24)} label="Leave"/>
@@ -854,6 +1097,13 @@ function ActiveGroupCall({
             }}/>,
             onClick: recorder.recording ? recorder.stop : recorder.start,
           },
+          ...(recorder.lastBlob && !recorder.recording ? [{
+            label: recorder.uploading ? "Uploading…" : "Upload recording to chat",
+            sub: "Send the last recording as a message in this chat",
+            icon: I.upload ? I.upload("#fff", 18) : I.share("#fff", 18),
+            disabled: recorder.uploading,
+            onClick: () => recorder.uploadToCloud(call.chatId, sendFileReliably),
+          }] : []),
           {
             label: call.captionsOn ? "Turn off live captions" : "Live captions",
             sub: canUseSpeechRecognition
@@ -906,6 +1156,22 @@ function ActiveGroupCall({
               setClosingBreakout(false);
             },
           }] : []),
+          {
+            label: activePoll ? "Close poll" : "Create poll",
+            icon: <span style={{ fontSize: 15 }}>📊</span>,
+            onClick: () => activePoll ? setActivePoll(null) : setShowPollCreate(true),
+          },
+          {
+            label: qaMode ? `Q&A (${qaQuestions.length})` : "Start Q&A",
+            icon: <span style={{ fontSize: 15 }}>❓</span>,
+            onClick: () => { if (!qaMode) { setQaMode(true); } setShowPanel(null); setShowMore(false); },
+            sub: qaMode ? "Tap to open the Q&A panel" : "Let participants ask questions",
+          },
+          {
+            label: "Meeting notes",
+            icon: <span style={{ fontSize: 15 }}>📝</span>,
+            onClick: () => setShowNotes(true),
+          },
         ]}/>
       )}
       {showAddPeople && (
@@ -923,6 +1189,19 @@ function ActiveGroupCall({
       {showBreakoutSetup && (
         <BreakoutRoomsSetup chatId={call.chatId} myUserId={myUserId} participants={call.participants}
                             onClose={() => setShowBreakoutSetup(false)}/>
+      )}
+      {showPollCreate && (
+        <PollCreateSheet onClose={() => setShowPollCreate(false)} onCreate={setActivePoll}/>
+      )}
+      {qaMode && showMore === false && showPanel === null && !showPollCreate && !showBreakoutSetup && !showAddPeople && (
+        <QaPanel questions={qaQuestions} isHost={isHost}
+          onClose={() => setQaMode(false)}
+          onSubmit={(text) => setQaQuestions((q) => [...q, { key: ++qaKeyCounter, text, from: "You", highlighted: false }])}
+          onHighlight={(key) => setQaQuestions((q) => q.map((item) => item.key === key ? { ...item, highlighted: !item.highlighted } : item))}
+          onDismiss={(key) => setQaQuestions((q) => q.filter((item) => item.key !== key))}/>
+      )}
+      {showNotes && (
+        <MeetingNotesSheet notes={meetingNotes} onChange={setMeetingNotes} onClose={() => setShowNotes(false)}/>
       )}
     </>
   );
@@ -1053,28 +1332,49 @@ const WHITEBOARD_COLORS = [
   "#000000", "#6b7280", "#f97316", "#ec4899", "#14b8a6", "#3b82f6",
 ];
 
+const BOARD_BACKGROUNDS = [
+  { key: "dark", label: "Dark", color: "#0b1220" },
+  { key: "white", label: "White", color: "#ffffff" },
+  { key: "chalk", label: "Chalkboard", color: "#2d4a3e" },
+  { key: "navy", label: "Navy", color: "#1a1a3e" },
+  { key: "cream", label: "Cream", color: "#f5f0e8" },
+  { key: "slate", label: "Slate", color: "#334155" },
+];
+
 const PEN_SIZES = [
   { key: "S", size: 2 },
   { key: "M", size: 4 },
   { key: "L", size: 8 },
 ];
 
+const TEXT_SIZES = [
+  { key: "S", size: 14 },
+  { key: "M", size: 20 },
+  { key: "L", size: 30 },
+  { key: "XL", size: 42 },
+];
+
 // Tools organized into categories for the tabbed toolbar
 const TOOL_CATEGORIES = [
   {
     label: "Draw", tools: [
+      { key: "select", label: "Select", icon: "☐" },
       { key: "pen", label: "Pen", icon: "✏️" },
       { key: "marker", label: "Marker", icon: "🖊️" },
       { key: "highlighter", label: "Highlighter", icon: "🖍️" },
       { key: "eraser", label: "Eraser", icon: "🧹" },
+      { key: "fill", label: "Fill", icon: "🪣" },
+      { key: "dashed", label: "Dashed", icon: "┈" },
     ],
   },
   {
     label: "Shapes", tools: [
       { key: "line", label: "Line", icon: "／" },
       { key: "arrow", label: "Arrow", icon: "➡" },
-      { key: "rect", label: "Rectangle", icon: "▭" },
+      { key: "rect", label: "Rect", icon: "▭" },
+      { key: "fillrect", label: "Fill Rect", icon: "■" },
       { key: "circle", label: "Circle", icon: "◯" },
+      { key: "fillcircle", label: "Fill Circle", icon: "●" },
       { key: "triangle", label: "Triangle", icon: "△" },
       { key: "star", label: "Star", icon: "⭐" },
       { key: "diamond", label: "Diamond", icon: "◇" },
@@ -1084,25 +1384,49 @@ const TOOL_CATEGORIES = [
     label: "Add", tools: [
       { key: "text", label: "Text", icon: "T" },
       { key: "math", label: "Math", icon: "∑" },
+      { key: "code", label: "Code", icon: "</>" },
       { key: "sticky", label: "Sticky", icon: "🗒️" },
+      { key: "table", label: "Table", icon: "⊞" },
       { key: "image", label: "Image", icon: "🖼️" },
       { key: "stamp", label: "Stamp", icon: "😊" },
+    ],
+  },
+  {
+    label: "Flow", tools: [
+      { key: "flowprocess", label: "Process", icon: "▭" },
+      { key: "flowdecision", label: "Decision", icon: "◇" },
+      { key: "flowterminal", label: "Terminal", icon: "⬭" },
+      { key: "flowio", label: "I/O", icon: "▱" },
+      { key: "flowdata", label: "Data", icon: "▤" },
+      { key: "arrow", label: "Arrow", icon: "➡" },
+      { key: "line", label: "Line", icon: "／" },
     ],
   },
   {
     label: "Board", tools: [
       { key: "laser", label: "Laser", icon: "🔴" },
       { key: "grid", label: "Grid", icon: "⊞" },
+      { key: "graphpaper", label: "Graph", icon: "▦" },
+      { key: "axes", label: "XY Axes", icon: "⌖" },
+      { key: "numberline", label: "Num Line", icon: "━" },
       { key: "ruler", label: "Ruler", icon: "📏" },
+      { key: "protractor", label: "Protrac.", icon: "⌓" },
+      { key: "bgpicker", label: "BG Color", icon: "🎨" },
       { key: "undo", label: "Undo", icon: "↩" },
+      { key: "redo", label: "Redo", icon: "↪" },
       { key: "save", label: "Save", icon: "💾" },
     ],
   },
 ];
 
-const STAMP_EMOJIS = ["✓", "✗", "⭐", "❤️", "👍", "👎", "❓", "❗", "💡", "🎯", "📌", "🔥"];
+const STAMP_EMOJIS = [
+  "✓", "✗", "⭐", "❤️", "👍", "👎", "❓", "❗", "💡", "🎯", "📌", "🔥",
+  "α", "β", "γ", "θ", "π", "Ω", "∞", "√", "∆", "≈", "≠", "±",
+  "{}", "[]", "()", "=>", "&&", "||", "!=", "==", "<<", ">>", "++", "**",
+];
 
-const SHAPE_TOOLS = ["line", "arrow", "rect", "circle", "triangle", "star", "diamond"];
+const SHAPE_TOOLS = ["line", "arrow", "rect", "fillrect", "circle", "fillcircle", "triangle", "star", "diamond", "dashed",
+  "flowprocess", "flowdecision", "flowterminal", "flowio", "flowdata"];
 
 function isLightColor(hex) {
   const value = (hex || "#000000").replace("#", "");
@@ -1143,6 +1467,7 @@ function wrapCanvasText(context, text, x, y, maxWidth, lineHeight) {
  * mode — same board, same tools, just no opaque background.
  */
 function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
+  const [wbPrompt, wbPromptModal] = usePrompt();
   const canvasRef = useRef(null);
   const drawing = useRef(false);
   const lastPoint = useRef(null);
@@ -1157,13 +1482,26 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
   const [showRuler, setShowRuler] = useState(false);
   const [showStampPicker, setShowStampPicker] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
+  const [boardBg, setBoardBg] = useState(BOARD_BACKGROUNDS[0]);
+  const [showBgPicker, setShowBgPicker] = useState(false);
+  const [showProtractor, setShowProtractor] = useState(false);
+  const [showAxes, setShowAxes] = useState(false);
+  const [showGraphPaper, setShowGraphPaper] = useState(false);
+  const [showNumberLine, setShowNumberLine] = useState(false);
+  const [textSize, setTextSize] = useState(TEXT_SIZES[1]);
+  const [opacity, setOpacity] = useState(1);
+  const [eraserPos, setEraserPos] = useState(null);
+  const selectionRef = useRef(null);
+  const selectionData = useRef(null);
+  const selectionDragging = useRef(false);
+  const selectionDragOffset = useRef(null);
+  const [selectionRect, setSelectionRect] = useState(null);
   const fileInputRef = useRef(null);
   const [laserDots, setLaserDots] = useState({});
   const laserTimers = useRef({});
   const lastLaserSent = useRef(0);
-  // Undo stack: canvas snapshots saved before each drawing action.
-  // Max 20 to avoid blowing up memory on long sessions.
   const undoStack = useRef([]);
+  const redoStack = useRef([]);
   const MAX_UNDO = 20;
 
   function ctx() {
@@ -1177,12 +1515,30 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
     const snapshot = context.getImageData(0, 0, canvas.width, canvas.height);
     undoStack.current.push(snapshot);
     if (undoStack.current.length > MAX_UNDO) undoStack.current.shift();
+    redoStack.current = [];
   }
 
   function undo() {
+    const canvas = canvasRef.current;
+    const context = ctx();
+    if (!canvas || !context) return;
     const snapshot = undoStack.current.pop();
     if (!snapshot) return;
-    ctx()?.putImageData(snapshot, 0, 0);
+    const current = context.getImageData(0, 0, canvas.width, canvas.height);
+    redoStack.current.push(current);
+    if (redoStack.current.length > MAX_UNDO) redoStack.current.shift();
+    context.putImageData(snapshot, 0, 0);
+  }
+
+  function redo() {
+    const canvas = canvasRef.current;
+    const context = ctx();
+    if (!canvas || !context) return;
+    const snapshot = redoStack.current.pop();
+    if (!snapshot) return;
+    const current = context.getImageData(0, 0, canvas.width, canvas.height);
+    undoStack.current.push(current);
+    context.putImageData(snapshot, 0, 0);
   }
 
   function resizeCanvas() {
@@ -1204,44 +1560,17 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
     return () => observer.disconnect();
   }, []);
 
-  // Draw grid overlay when enabled
-  useEffect(() => {
-    if (!showGrid) return;
-    const canvas = canvasRef.current;
-    const context = ctx();
-    if (!canvas || !context) return;
-    function drawGrid() {
-      const w = canvas.clientWidth, h = canvas.clientHeight;
-      context.save();
-      context.strokeStyle = "#ffffff18";
-      context.lineWidth = 0.5;
-      const step = 30;
-      for (let x = step; x < w; x += step) {
-        context.beginPath();
-        context.moveTo(x, 0);
-        context.lineTo(x, h);
-        context.stroke();
-      }
-      for (let y = step; y < h; y += step) {
-        context.beginPath();
-        context.moveTo(0, y);
-        context.lineTo(w, y);
-        context.stroke();
-      }
-      context.restore();
-    }
-    drawGrid();
-  }, [showGrid]);
+  // Grid is rendered as an SVG overlay, not on canvas (see return JSX)
 
-  function paintSegment(fromFrac, toFrac, strokeColor, size) {
+  function paintSegment(fromFrac, toFrac, strokeColor, size, highlight, alpha) {
     const canvas = canvasRef.current;
     const context = ctx();
     if (!canvas || !context) return;
     const w = canvas.clientWidth, h = canvas.clientHeight;
-    context.strokeStyle = strokeColor;
+    context.strokeStyle = strokeColor === "erase" ? "#000" : strokeColor;
     context.lineWidth = size;
     context.lineCap = "round";
-    context.globalAlpha = strokeColor === "highlight" ? 0.35 : 1;
+    context.globalAlpha = highlight ? 0.35 : (alpha ?? 1);
     context.globalCompositeOperation = strokeColor === "erase" ? "destination-out" : "source-over";
     context.beginPath();
     context.moveTo(fromFrac.x * w, fromFrac.y * h);
@@ -1271,8 +1600,9 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
     context.lineWidth = size;
     context.globalCompositeOperation = "source-over";
     context.globalAlpha = 1;
+    if (shapeType === "dashed") context.setLineDash([8, 6]);
     context.beginPath();
-    if (shapeType === "line") {
+    if (shapeType === "line" || shapeType === "dashed") {
       context.moveTo(x1, y1);
       context.lineTo(x2, y2);
     } else if (shapeType === "arrow") {
@@ -1280,12 +1610,25 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
       context.lineTo(x2, y2);
       context.stroke();
       paintArrowhead(context, x1, y1, x2, y2, 14);
+      context.setLineDash([]);
       return;
     } else if (shapeType === "rect") {
       context.rect(x1, y1, x2 - x1, y2 - y1);
+    } else if (shapeType === "fillrect") {
+      context.fillStyle = strokeColor;
+      context.fillRect(x1, y1, x2 - x1, y2 - y1);
+      context.setLineDash([]);
+      return;
     } else if (shapeType === "circle") {
       const rx = Math.abs(x2 - x1) / 2, ry = Math.abs(y2 - y1) / 2;
       context.ellipse((x1 + x2) / 2, (y1 + y2) / 2, rx, ry, 0, 0, Math.PI * 2);
+    } else if (shapeType === "fillcircle") {
+      const rx = Math.abs(x2 - x1) / 2, ry = Math.abs(y2 - y1) / 2;
+      context.ellipse((x1 + x2) / 2, (y1 + y2) / 2, rx, ry, 0, 0, Math.PI * 2);
+      context.fillStyle = strokeColor;
+      context.fill();
+      context.setLineDash([]);
+      return;
     } else if (shapeType === "triangle") {
       const midX = (x1 + x2) / 2;
       context.moveTo(midX, y1);
@@ -1303,7 +1646,7 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
         i === 0 ? context.moveTo(px, py) : context.lineTo(px, py);
       }
       context.closePath();
-    } else if (shapeType === "diamond") {
+    } else if (shapeType === "diamond" || shapeType === "flowdecision") {
       const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
       const hw = Math.abs(x2 - x1) / 2, hh = Math.abs(y2 - y1) / 2;
       context.moveTo(cx, cy - hh);
@@ -1311,8 +1654,42 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
       context.lineTo(cx, cy + hh);
       context.lineTo(cx - hw, cy);
       context.closePath();
+    } else if (shapeType === "flowprocess") {
+      context.rect(x1, y1, x2 - x1, y2 - y1);
+    } else if (shapeType === "flowterminal") {
+      const w2 = Math.abs(x2 - x1), h2 = Math.abs(y2 - y1);
+      const rx = Math.min(w2 / 2, h2 / 2);
+      const lx = Math.min(x1, x2), ly = Math.min(y1, y2);
+      context.moveTo(lx + rx, ly);
+      context.lineTo(lx + w2 - rx, ly);
+      context.quadraticCurveTo(lx + w2, ly, lx + w2, ly + h2 / 2);
+      context.quadraticCurveTo(lx + w2, ly + h2, lx + w2 - rx, ly + h2);
+      context.lineTo(lx + rx, ly + h2);
+      context.quadraticCurveTo(lx, ly + h2, lx, ly + h2 / 2);
+      context.quadraticCurveTo(lx, ly, lx + rx, ly);
+      context.closePath();
+    } else if (shapeType === "flowio") {
+      const skew = Math.abs(x2 - x1) * 0.15;
+      const lx = Math.min(x1, x2), ly = Math.min(y1, y2);
+      const rw = Math.abs(x2 - x1), rh = Math.abs(y2 - y1);
+      context.moveTo(lx + skew, ly);
+      context.lineTo(lx + rw, ly);
+      context.lineTo(lx + rw - skew, ly + rh);
+      context.lineTo(lx, ly + rh);
+      context.closePath();
+    } else if (shapeType === "flowdata") {
+      const lx = Math.min(x1, x2), ly = Math.min(y1, y2);
+      const rw = Math.abs(x2 - x1), rh = Math.abs(y2 - y1);
+      const curveW = rw * 0.12;
+      context.moveTo(lx + curveW, ly);
+      context.lineTo(lx + rw, ly);
+      context.quadraticCurveTo(lx + rw - curveW, ly + rh / 2, lx + rw, ly + rh);
+      context.lineTo(lx + curveW, ly + rh);
+      context.quadraticCurveTo(lx + curveW * 2, ly + rh / 2, lx + curveW, ly);
+      context.closePath();
     }
     context.stroke();
+    context.setLineDash([]);
   }
 
   function paintText(startFrac, text, strokeColor, fontSize) {
@@ -1327,7 +1704,7 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
     context.fillText(text, startFrac.x * w, startFrac.y * h);
   }
 
-  function paintMath(startFrac, text, strokeColor) {
+  function paintMath(startFrac, text, strokeColor, fontSize) {
     const canvas = canvasRef.current;
     const context = ctx();
     if (!canvas || !context || !text) return;
@@ -1335,7 +1712,7 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
     context.globalCompositeOperation = "source-over";
     context.globalAlpha = 1;
     context.fillStyle = strokeColor;
-    context.font = "italic 22px serif";
+    context.font = `italic ${fontSize || 22}px serif`;
     context.fillText(text, startFrac.x * w, startFrac.y * h);
   }
 
@@ -1369,6 +1746,69 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
     wrapCanvasText(context, text, x + pad, y + pad + 12, boxW - pad * 2, 16);
   }
 
+  function paintCode(startFrac, text, strokeColor) {
+    const canvas = canvasRef.current;
+    const context = ctx();
+    if (!canvas || !context || !text) return;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    const x = startFrac.x * w, y = startFrac.y * h;
+    const lines = text.split("\n");
+    const lineH = 16, pad = 10;
+    const boxW = Math.max(200, ...lines.map((l) => context.measureText(l).width + pad * 2 + 30));
+    const boxH = lines.length * lineH + pad * 2;
+    context.globalCompositeOperation = "source-over";
+    context.globalAlpha = 1;
+    context.fillStyle = "#1e1e2e";
+    context.strokeStyle = "#ffffff22";
+    context.lineWidth = 1;
+    const r = 8;
+    context.beginPath();
+    context.moveTo(x + r, y); context.lineTo(x + boxW - r, y); context.quadraticCurveTo(x + boxW, y, x + boxW, y + r);
+    context.lineTo(x + boxW, y + boxH - r); context.quadraticCurveTo(x + boxW, y + boxH, x + boxW - r, y + boxH);
+    context.lineTo(x + r, y + boxH); context.quadraticCurveTo(x, y + boxH, x, y + boxH - r);
+    context.lineTo(x, y + r); context.quadraticCurveTo(x, y, x + r, y);
+    context.closePath();
+    context.fill(); context.stroke();
+    context.font = "13px 'Courier New', Consolas, monospace";
+    lines.forEach((line, i) => {
+      context.fillStyle = "#6b7280";
+      context.fillText(String(i + 1).padStart(2, " "), x + pad, y + pad + 12 + i * lineH);
+      context.fillStyle = strokeColor === "#000000" ? "#e2e8f0" : strokeColor;
+      context.fillText(line, x + pad + 24, y + pad + 12 + i * lineH);
+    });
+  }
+
+  function paintTable(startFrac, rowsColsText, strokeColor) {
+    const canvas = canvasRef.current;
+    const context = ctx();
+    if (!canvas || !context || !rowsColsText) return;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    const x = startFrac.x * w, y = startFrac.y * h;
+    const parts = rowsColsText.split("x").map((s) => parseInt(s.trim()));
+    const rows = Math.min(parts[0] || 3, 12), cols = Math.min(parts[1] || 3, 12);
+    const cellW = 80, cellH = 32;
+    context.globalCompositeOperation = "source-over";
+    context.globalAlpha = 1;
+    context.strokeStyle = strokeColor;
+    context.lineWidth = 1.5;
+    for (let r = 0; r <= rows; r++) {
+      context.beginPath();
+      context.moveTo(x, y + r * cellH);
+      context.lineTo(x + cols * cellW, y + r * cellH);
+      context.stroke();
+    }
+    for (let c = 0; c <= cols; c++) {
+      context.beginPath();
+      context.moveTo(x + c * cellW, y);
+      context.lineTo(x + c * cellW, y + rows * cellH);
+      context.stroke();
+    }
+    if (rows > 0) {
+      context.fillStyle = strokeColor + "18";
+      context.fillRect(x, y, cols * cellW, cellH);
+    }
+  }
+
   function paintImage(startFrac, dataUrl, sizeFrac) {
     const canvas = canvasRef.current;
     const context = ctx();
@@ -1390,15 +1830,26 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
     } else if (stroke.kind === "text") {
       paintText(stroke.start, stroke.text, stroke.color, stroke.fontSize);
     } else if (stroke.kind === "math") {
-      paintMath(stroke.start, stroke.text, stroke.color);
+      paintMath(stroke.start, stroke.text, stroke.color, stroke.fontSize);
     } else if (stroke.kind === "stamp") {
       paintStamp(stroke.start, stroke.emoji, stroke.fontSize);
     } else if (stroke.kind === "sticky") {
       paintSticky(stroke.start, stroke.text, stroke.color);
+    } else if (stroke.kind === "code") {
+      paintCode(stroke.start, stroke.text, stroke.color);
+    } else if (stroke.kind === "table") {
+      paintTable(stroke.start, stroke.text, stroke.color);
+    } else if (stroke.kind === "fill") {
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const px = stroke.start.x * canvas.clientWidth;
+        const py = stroke.start.y * canvas.clientHeight;
+        floodFill(px, py, stroke.color);
+      }
     } else if (stroke.kind === "image") {
       paintImage(stroke.start, stroke.dataUrl, stroke.size);
     } else {
-      paintSegment(stroke.from, stroke.to, stroke.color, stroke.size);
+      paintSegment(stroke.from, stroke.to, stroke.color, stroke.size, stroke.highlight, stroke.alpha);
     }
   }
 
@@ -1432,6 +1883,7 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
         off.height = drawH;
         off.getContext("2d").drawImage(img, 0, 0, drawW, drawH);
         const dataUrl = off.toDataURL("image/jpeg", 0.72);
+        if (dataUrl.length > 512 * 1024) return;
         const start = { x: Math.max(0, 0.5 - drawW / cw / 2), y: Math.max(0, 0.5 - drawH / ch / 2) };
         const size = { w: drawW / cw, h: drawH / ch };
         saveUndoSnapshot();
@@ -1469,7 +1921,6 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
 
   function strokeColorFor() {
     if (tool === "eraser") return "erase";
-    if (tool === "highlighter") return "highlight";
     return color;
   }
 
@@ -1480,32 +1931,145 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
     return penSize.size;
   }
 
-  function handlePointerDown(event) {
+  function floodFill(startX, startY, fillColor) {
+    const canvas = canvasRef.current;
+    const context = ctx();
+    if (!canvas || !context) return;
+    const w = canvas.width, h = canvas.height;
+    const imageData = context.getImageData(0, 0, w, h);
+    const data = imageData.data;
+    const hex = fillColor.replace("#", "");
+    const fr = parseInt(hex.slice(0, 2), 16);
+    const fg = parseInt(hex.slice(2, 4), 16);
+    const fb = parseInt(hex.slice(4, 6), 16);
+    const dpr = window.devicePixelRatio || 1;
+    const px = Math.round(startX * dpr);
+    const py = Math.round(startY * dpr);
+    if (px < 0 || px >= w || py < 0 || py >= h) return;
+    const idx = (py * w + px) * 4;
+    const sr = data[idx], sg = data[idx + 1], sb = data[idx + 2], sa = data[idx + 3];
+    if (sr === fr && sg === fg && sb === fb && sa === 255) return;
+    const tolerance = 32;
+    function match(i) {
+      return Math.abs(data[i] - sr) <= tolerance
+        && Math.abs(data[i + 1] - sg) <= tolerance
+        && Math.abs(data[i + 2] - sb) <= tolerance
+        && Math.abs(data[i + 3] - sa) <= tolerance;
+    }
+    const stack = [[px, py]];
+    const visited = new Uint8Array(w * h);
+    let count = 0;
+    const maxPixels = w * h * 0.5;
+    while (stack.length > 0 && count < maxPixels) {
+      const [cx, cy] = stack.pop();
+      const ci = cy * w + cx;
+      if (cx < 0 || cx >= w || cy < 0 || cy >= h || visited[ci]) continue;
+      const di = ci * 4;
+      if (!match(di)) continue;
+      visited[ci] = 1;
+      data[di] = fr; data[di + 1] = fg; data[di + 2] = fb; data[di + 3] = 255;
+      count++;
+      stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
+    }
+    context.putImageData(imageData, 0, 0);
+  }
+
+  function clearSelection() {
+    selectionRef.current = null;
+    selectionData.current = null;
+    selectionDragging.current = false;
+    selectionDragOffset.current = null;
+    setSelectionRect(null);
+  }
+
+  async function handlePointerDown(event) {
     const point = pointFromEvent(event);
+    if (tool === "select") {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const px = event.clientX - rect.left;
+      const py = event.clientY - rect.top;
+      if (selectionRect && selectionData.current) {
+        const sr = selectionRect;
+        if (px >= sr.x && px <= sr.x + sr.w && py >= sr.y && py <= sr.y + sr.h) {
+          selectionDragging.current = true;
+          selectionDragOffset.current = { x: px - sr.x, y: py - sr.y };
+          drawing.current = true;
+          return;
+        }
+        saveUndoSnapshot();
+        const context = ctx();
+        context.putImageData(selectionRef.current, 0, 0);
+        const dpr = window.devicePixelRatio || 1;
+        context.drawImage(
+          selectionData.current,
+          sr.x * dpr, sr.y * dpr, sr.w * dpr, sr.h * dpr
+        );
+        clearSelection();
+        return;
+      }
+      drawing.current = true;
+      lastPoint.current = { px, py };
+      shapeStart.current = point;
+      const context = ctx();
+      snapshotRef.current = context.getImageData(0, 0, canvas.width, canvas.height);
+      return;
+    }
+    if (tool === "fill") {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const px = event.clientX - rect.left;
+      const py = event.clientY - rect.top;
+      saveUndoSnapshot();
+      floodFill(px, py, color);
+      send({ type: "whiteboard_draw", chat_id: chatId, stroke: { kind: "fill", start: point, color } });
+      return;
+    }
     if (tool === "text") {
-      const text = window.prompt("Text:");
+      const text = await wbPrompt("Text:");
       if (text && text.trim()) {
         saveUndoSnapshot();
-        paintText(point, text.trim(), color);
-        send({ type: "whiteboard_draw", chat_id: chatId, stroke: { kind: "text", start: point, text: text.trim(), color } });
+        paintText(point, text.trim(), color, textSize.size);
+        send({ type: "whiteboard_draw", chat_id: chatId, stroke: { kind: "text", start: point, text: text.trim(), color, fontSize: textSize.size } });
       }
       return;
     }
     if (tool === "math") {
-      const text = window.prompt("Math expression (e.g. x² + y² = r²):");
+      const text = await wbPrompt("Math expression (e.g. x² + y² = r²):");
       if (text && text.trim()) {
         saveUndoSnapshot();
-        paintMath(point, text.trim(), color);
-        send({ type: "whiteboard_draw", chat_id: chatId, stroke: { kind: "math", start: point, text: text.trim(), color } });
+        paintMath(point, text.trim(), color, textSize.size);
+        send({ type: "whiteboard_draw", chat_id: chatId, stroke: { kind: "math", start: point, text: text.trim(), color, fontSize: textSize.size } });
       }
       return;
     }
     if (tool === "sticky") {
-      const text = window.prompt("Note text:");
+      const text = await wbPrompt("Note text:");
       if (text && text.trim()) {
         saveUndoSnapshot();
         paintSticky(point, text.trim(), color);
         send({ type: "whiteboard_draw", chat_id: chatId, stroke: { kind: "sticky", start: point, text: text.trim(), color } });
+      }
+      return;
+    }
+    if (tool === "code") {
+      const text = await wbPrompt("Code snippet (use \\n for newlines):");
+      if (text && text.trim()) {
+        const code = text.trim().replace(/\\n/g, "\n");
+        saveUndoSnapshot();
+        paintCode(point, code, color);
+        send({ type: "whiteboard_draw", chat_id: chatId, stroke: { kind: "code", start: point, text: code, color } });
+      }
+      return;
+    }
+    if (tool === "table") {
+      const text = await wbPrompt("Table size (e.g. 3x4):");
+      if (text && text.trim()) {
+        saveUndoSnapshot();
+        paintTable(point, text.trim(), color);
+        send({ type: "whiteboard_draw", chat_id: chatId, stroke: { kind: "table", start: point, text: text.trim(), color } });
       }
       return;
     }
@@ -1529,6 +2093,30 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
     if (!drawing.current) return;
     const point = pointFromEvent(event);
 
+    if (tool === "select") {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const px = event.clientX - rect.left;
+      const py = event.clientY - rect.top;
+      if (selectionDragging.current && selectionRect) {
+        setSelectionRect((sr) => sr ? {
+          ...sr,
+          x: px - selectionDragOffset.current.x,
+          y: py - selectionDragOffset.current.y,
+        } : sr);
+        return;
+      }
+      if (lastPoint.current) {
+        const sx = Math.min(lastPoint.current.px, px);
+        const sy = Math.min(lastPoint.current.py, py);
+        const sw = Math.abs(px - lastPoint.current.px);
+        const sh = Math.abs(py - lastPoint.current.py);
+        setSelectionRect({ x: sx, y: sy, w: sw, h: sh });
+      }
+      return;
+    }
+
     if (tool === "laser") {
       showLaserDot("__self", point, color);
       const now = Date.now();
@@ -1547,15 +2135,46 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
 
     const size = currentPenSize();
     const strokeColor = strokeColorFor();
-    paintSegment(lastPoint.current, point, strokeColor, size);
+    const isHighlight = tool === "highlighter";
+    const alpha = isHighlight ? undefined : opacity;
+    paintSegment(lastPoint.current, point, strokeColor, size, isHighlight, alpha);
     send({
       type: "whiteboard_draw", chat_id: chatId,
-      stroke: { from: lastPoint.current, to: point, color: strokeColor, size },
+      stroke: { from: lastPoint.current, to: point, color: strokeColor, size, highlight: isHighlight || undefined, alpha: alpha !== 1 ? alpha : undefined },
     });
     lastPoint.current = point;
   }
 
   function handlePointerUp(event) {
+    if (tool === "select" && drawing.current) {
+      if (selectionDragging.current) {
+        selectionDragging.current = false;
+        drawing.current = false;
+        return;
+      }
+      const canvas = canvasRef.current;
+      const sr = selectionRect;
+      if (canvas && sr && sr.w > 5 && sr.h > 5) {
+        const dpr = window.devicePixelRatio || 1;
+        const context = ctx();
+        selectionRef.current = snapshotRef.current;
+        const tmpCanvas = document.createElement("canvas");
+        tmpCanvas.width = sr.w * dpr;
+        tmpCanvas.height = sr.h * dpr;
+        const tmpCtx = tmpCanvas.getContext("2d");
+        tmpCtx.drawImage(canvas, sr.x * dpr, sr.y * dpr, sr.w * dpr, sr.h * dpr, 0, 0, sr.w * dpr, sr.h * dpr);
+        selectionData.current = tmpCanvas;
+        context.putImageData(snapshotRef.current, 0, 0);
+        context.clearRect(sr.x * dpr, sr.y * dpr, sr.w * dpr, sr.h * dpr);
+      } else {
+        clearSelection();
+      }
+      drawing.current = false;
+      lastPoint.current = null;
+      shapeStart.current = null;
+      snapshotRef.current = null;
+      return;
+    }
     if (drawing.current && SHAPE_TOOLS.includes(tool) && shapeStart.current) {
       const point = pointFromEvent(event);
       saveUndoSnapshot();
@@ -1587,7 +2206,7 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
     tmp.width = canvas.width;
     tmp.height = canvas.height;
     const tmpCtx = tmp.getContext("2d");
-    tmpCtx.fillStyle = transparent ? "transparent" : "#0b1220";
+    tmpCtx.fillStyle = transparent ? "transparent" : boardBg.color;
     tmpCtx.fillRect(0, 0, tmp.width, tmp.height);
     tmpCtx.drawImage(canvas, 0, 0);
     const link = document.createElement("a");
@@ -1608,9 +2227,16 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
   function handleToolClick(key) {
     if (key === "image") { fileInputRef.current?.click(); return; }
     if (key === "undo") { undo(); return; }
+    if (key === "redo") { redo(); return; }
     if (key === "save") { saveBoard(); return; }
-    if (key === "grid") { setShowGrid((v) => !v); return; }
+    if (key === "grid") { setShowGrid((v) => !v); setShowGraphPaper(false); return; }
+    if (key === "graphpaper") { setShowGraphPaper((v) => !v); setShowGrid(false); return; }
+    if (key === "axes") { setShowAxes((v) => !v); return; }
     if (key === "ruler") { setShowRuler((v) => !v); return; }
+    if (key === "protractor") { setShowProtractor((v) => !v); return; }
+    if (key === "bgpicker") { setShowBgPicker((v) => !v); return; }
+    if (key === "numberline") { setShowNumberLine((v) => !v); return; }
+    if (key !== "select" && selectionRect) clearSelection();
     setTool(key);
   }
 
@@ -1620,18 +2246,27 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
   return (
     <div style={{
       position: "fixed", inset: 0, zIndex: 1150, display: "flex", flexDirection: "column",
-      background: transparent ? "transparent" : "#0b1220",
+      background: transparent ? "transparent" : boardBg.color,
       pointerEvents: transparent ? "none" : "auto",
       maxWidth: expanded ? "none" : 430, margin: "0 auto",
     }}>
       {/* Canvas area */}
-      <div style={{ position: "relative", flex: 1, pointerEvents: "auto", minHeight: 0 }}>
+      <div style={{ position: "relative", flex: 1, pointerEvents: "auto", minHeight: 0 }}
+           onPointerMove={(e) => {
+             if (tool === "eraser") {
+               const rect = canvasRef.current?.getBoundingClientRect();
+               if (rect) setEraserPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+             } else if (eraserPos) {
+               setEraserPos(null);
+             }
+           }}
+           onPointerLeave={() => eraserPos && setEraserPos(null)}>
         <canvas ref={canvasRef}
                 onPointerDown={handlePointerDown} onPointerMove={handlePointerMove}
                 onPointerUp={handlePointerUp} onPointerCancel={handlePointerUp}
                 style={{
                   width: "100%", height: "100%", touchAction: "none",
-                  cursor: tool === "laser" ? "none" : "crosshair",
+                  cursor: tool === "eraser" ? "none" : tool === "laser" ? "none" : "crosshair",
                 }}/>
         {/* Ruler overlay */}
         {showRuler && (
@@ -1655,6 +2290,121 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
             ))}
           </div>
         )}
+        {/* Simple grid overlay */}
+        {showGrid && (
+          <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}>
+            <defs>
+              <pattern id="wb-grid" width="30" height="30" patternUnits="userSpaceOnUse">
+                <path d="M 30 0 L 0 0 0 30" fill="none" stroke={isLightColor(boardBg.color) ? "#00000015" : "#ffffff18"} strokeWidth="0.5"/>
+              </pattern>
+            </defs>
+            <rect width="100%" height="100%" fill="url(#wb-grid)"/>
+          </svg>
+        )}
+        {/* Graph paper overlay */}
+        {showGraphPaper && (
+          <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}>
+            <defs>
+              <pattern id="wb-graph-sm" width="20" height="20" patternUnits="userSpaceOnUse">
+                <path d="M 20 0 L 0 0 0 20" fill="none" stroke={isLightColor(boardBg.color) ? "#00000012" : "#ffffff10"} strokeWidth="0.5"/>
+              </pattern>
+              <pattern id="wb-graph-lg" width="100" height="100" patternUnits="userSpaceOnUse">
+                <rect width="100" height="100" fill="url(#wb-graph-sm)"/>
+                <path d="M 100 0 L 0 0 0 100" fill="none" stroke={isLightColor(boardBg.color) ? "#00000022" : "#ffffff22"} strokeWidth="1"/>
+              </pattern>
+            </defs>
+            <rect width="100%" height="100%" fill="url(#wb-graph-lg)"/>
+          </svg>
+        )}
+        {/* XY Axes overlay */}
+        {showAxes && (
+          <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}>
+            {(() => {
+              const axisColor = isLightColor(boardBg.color) ? "#00000044" : "#ffffff44";
+              const tickColor = isLightColor(boardBg.color) ? "#00000033" : "#ffffff33";
+              const labelColor = isLightColor(boardBg.color) ? "#00000066" : "#ffffff88";
+              return (
+                <>
+                  <line x1="50%" y1="0" x2="50%" y2="100%" stroke={axisColor} strokeWidth="1.5"/>
+                  <line x1="0" y1="50%" x2="100%" y2="50%" stroke={axisColor} strokeWidth="1.5"/>
+                  {Array.from({ length: 19 }, (_, i) => {
+                    const pct = ((i + 1) * 5) + "%";
+                    const label = i - 9;
+                    if (label === 0) return null;
+                    return (
+                      <g key={i}>
+                        <line x1={pct} y1="49%" x2={pct} y2="51%" stroke={tickColor} strokeWidth="1"/>
+                        <text x={pct} y="53%" fill={labelColor} fontSize="8" textAnchor="middle">{label}</text>
+                        <line x1="49%" y1={pct} x2="51%" y2={pct} stroke={tickColor} strokeWidth="1"/>
+                        <text x="52%" y={pct} fill={labelColor} fontSize="8" dominantBaseline="middle">{-label}</text>
+                      </g>
+                    );
+                  })}
+                  <text x="97%" y="48%" fill={labelColor} fontSize="11" fontStyle="italic">x</text>
+                  <text x="52%" y="4%" fill={labelColor} fontSize="11" fontStyle="italic">y</text>
+                </>
+              );
+            })()}
+          </svg>
+        )}
+        {/* Protractor overlay */}
+        {showProtractor && (
+          <svg style={{
+            position: "absolute", bottom: 60, left: "50%", transform: "translateX(-50%)",
+            width: 240, height: 130, pointerEvents: "none",
+          }} viewBox="0 0 240 130">
+            {(() => {
+              const arcColor = isLightColor(boardBg.color) ? "#00000033" : "#ffffff33";
+              const textColor = isLightColor(boardBg.color) ? "#00000066" : "#ffffff88";
+              const cx = 120, cy = 125, r = 110;
+              const ticks = [];
+              for (let deg = 0; deg <= 180; deg += 10) {
+                const rad = (deg * Math.PI) / 180;
+                const x1 = cx - r * Math.cos(rad), y1 = cy - r * Math.sin(rad);
+                const inner = deg % 30 === 0 ? 0.88 : 0.93;
+                const x2 = cx - (r * inner) * Math.cos(rad), y2 = cy - (r * inner) * Math.sin(rad);
+                ticks.push(<line key={deg} x1={x1} y1={y1} x2={x2} y2={y2} stroke={arcColor} strokeWidth="1"/>);
+                if (deg % 30 === 0) {
+                  const lx = cx - (r * 0.82) * Math.cos(rad), ly = cy - (r * 0.82) * Math.sin(rad);
+                  ticks.push(<text key={`l${deg}`} x={lx} y={ly} fill={textColor} fontSize="8" textAnchor="middle" dominantBaseline="middle">{deg}°</text>);
+                }
+              }
+              return (
+                <>
+                  <path d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}`} fill="none" stroke={arcColor} strokeWidth="1.5"/>
+                  <line x1={cx - r} y1={cy} x2={cx + r} y2={cy} stroke={arcColor} strokeWidth="1"/>
+                  {ticks}
+                </>
+              );
+            })()}
+          </svg>
+        )}
+        {/* Number line overlay */}
+        {showNumberLine && (
+          <svg style={{
+            position: "absolute", bottom: 80, left: 20, right: 20, height: 44, pointerEvents: "none",
+          }} viewBox="0 0 600 44" preserveAspectRatio="none">
+            {(() => {
+              const lineColor = isLightColor(boardBg.color) ? "#00000044" : "#ffffff44";
+              const labelColor = isLightColor(boardBg.color) ? "#00000077" : "#ffffff88";
+              const ticks = [];
+              for (let i = -10; i <= 10; i++) {
+                const x = 300 + i * 28;
+                const big = i % 5 === 0;
+                ticks.push(<line key={i} x1={x} y1={big ? 12 : 16} x2={x} y2={28} stroke={lineColor} strokeWidth={big ? 1.5 : 0.8}/>);
+                if (big) ticks.push(<text key={`l${i}`} x={x} y={40} fill={labelColor} fontSize="10" textAnchor="middle">{i}</text>);
+              }
+              return (
+                <>
+                  <line x1="16" y1="28" x2="584" y2="28" stroke={lineColor} strokeWidth="1.5"/>
+                  <polygon points="584,24 596,28 584,32" fill={lineColor}/>
+                  <polygon points="16,24 4,28 16,32" fill={lineColor}/>
+                  {ticks}
+                </>
+              );
+            })()}
+          </svg>
+        )}
         {/* Laser dots */}
         {Object.entries(laserDots).map(([key, dot]) => (
           <div key={key} style={{
@@ -1663,6 +2413,27 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
             background: dot.color, boxShadow: `0 0 14px 4px ${dot.color}99`, pointerEvents: "none",
           }}/>
         ))}
+        {/* Eraser cursor */}
+        {tool === "eraser" && eraserPos && (
+          <div style={{
+            position: "absolute", left: eraserPos.x, top: eraserPos.y,
+            width: currentPenSize(), height: currentPenSize(),
+            marginLeft: -currentPenSize() / 2, marginTop: -currentPenSize() / 2,
+            borderRadius: "50%", border: "2px solid #ffffff88",
+            pointerEvents: "none",
+          }}/>
+        )}
+        {/* Selection rectangle overlay */}
+        {selectionRect && tool === "select" && (
+          <div style={{
+            position: "absolute", left: selectionRect.x, top: selectionRect.y,
+            width: selectionRect.w, height: selectionRect.h,
+            border: "2px dashed #38bdf8", background: "#38bdf808",
+            pointerEvents: selectionData.current ? "auto" : "none",
+            cursor: selectionData.current ? "move" : "default",
+            boxShadow: selectionData.current ? "0 0 0 9999px #00000033" : "none",
+          }}/>
+        )}
         {/* Stamp picker popup */}
         {showStampPicker && (
           <div onClick={() => setShowStampPicker(false)} style={{
@@ -1728,14 +2499,51 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
           </div>
         )}
 
+        {/* BG picker row */}
+        {showBgPicker && (
+          <div style={{
+            display: "flex", gap: 6, padding: "8px 12px", overflowX: "auto",
+            borderBottom: "1px solid #ffffff12",
+          }}>
+            {BOARD_BACKGROUNDS.map((bg) => (
+              <div key={bg.key} onClick={() => { setBoardBg(bg); setShowBgPicker(false); }}
+                   title={bg.label} style={{
+                width: 30, height: 30, borderRadius: 6, background: bg.color, cursor: "pointer",
+                flexShrink: 0, border: boardBg.key === bg.key ? "2px solid #fff" : `2px solid ${bg.color === "#ffffff" ? "#ccc" : "transparent"}`,
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>
+                <span style={{ fontSize: 8, color: isLightColor(bg.color) ? "#000" : "#fff", fontWeight: 600 }}>{bg.label.slice(0, 2)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Opacity slider — Draw tab only */}
+        {toolTab === 0 && (
+          <div style={{
+            display: "flex", alignItems: "center", gap: 8, padding: "6px 12px",
+            borderBottom: "1px solid #ffffff12",
+          }}>
+            <span style={{ fontSize: 10, color: "#ffffffaa", flexShrink: 0 }}>Opacity</span>
+            <input type="range" min="0.05" max="1" step="0.05" value={opacity}
+              onChange={(e) => setOpacity(parseFloat(e.target.value))}
+              style={{ flex: 1, accentColor: color, height: 4 }}/>
+            <span style={{ fontSize: 10, color: "#fff", minWidth: 28, textAlign: "right" }}>
+              {Math.round(opacity * 100)}%
+            </span>
+          </div>
+        )}
+
         {/* Tools row for current category */}
         <div style={{
           display: "flex", gap: 4, padding: "6px 8px", overflowX: "auto",
           alignItems: "center",
         }}>
           {currentCategory.tools.map((t) => {
-            const isActive = (t.key === "grid" && showGrid) || (t.key === "ruler" && showRuler)
-              || (t.key !== "undo" && t.key !== "save" && t.key !== "grid" && t.key !== "ruler" && tool === t.key);
+            const TOGGLE_KEYS = { grid: showGrid, ruler: showRuler, graphpaper: showGraphPaper, axes: showAxes, protractor: showProtractor, bgpicker: showBgPicker, numberline: showNumberLine };
+            const isToggle = t.key in TOGGLE_KEYS;
+            const isAction = t.key === "undo" || t.key === "redo" || t.key === "save";
+            const isActive = isToggle ? TOGGLE_KEYS[t.key] : (!isAction && tool === t.key);
             return (
               <div key={t.key}
                    onClick={() => handleToolClick(t.key)}
@@ -1769,6 +2577,18 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
             </div>
           ))}
 
+          {/* Text size selector — shown for Add tab */}
+          {toolTab === 2 && TEXT_SIZES.map((ts) => (
+            <div key={ts.key} onClick={() => setTextSize(ts)} title={`Text ${ts.key}`} style={{
+              minWidth: 28, height: 36, borderRadius: 6, cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+              background: textSize.key === ts.key ? "#ffffff22" : "transparent",
+              padding: "0 4px",
+            }}>
+              <span style={{ fontSize: Math.max(9, ts.size * 0.5), color: "#fff", fontWeight: 600 }}>{ts.key}</span>
+            </div>
+          ))}
+
           {/* Spacer */}
           <div style={{ flex: 1 }}/>
 
@@ -1783,6 +2603,7 @@ function Whiteboard({ chatId, events, send, onClose, transparent, expanded }) {
           }}>Close</div>
         </div>
       </div>
+      {wbPromptModal}
     </div>
   );
 }

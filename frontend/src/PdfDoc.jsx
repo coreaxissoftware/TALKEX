@@ -18,13 +18,14 @@ import * as pdfjsLib from "pdfjs-dist";
 // human-readable too, consistent with the rest of the un-minified build.
 import workerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
 import { canvasesToPdfBlob } from "./imageToPdf.js";
-import { G, I } from "./ui.jsx";
+import { G, I, usePrompt } from "./ui.jsx";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
 const PEN_COLORS = ["#ff3b30", "#0a84ff", "#111111", "#34c759", "#ffcc00"];
 
 export default function PdfDoc({ src, name, onClose, onDownloadOriginal, toast }) {
+  const [promptFn, promptModal] = usePrompt();
   const [pages, setPages] = useState(null); // [{ canvas, width, height }]
   const [error, setError] = useState(false);
   const [mode, setMode] = useState("view"); // "view" | "edit"
@@ -120,12 +121,12 @@ export default function PdfDoc({ src, name, onClose, onDownloadOriginal, toast }
     };
   }
 
-  function onPointerDown(pageIndex, event) {
+  async function onPointerDown(pageIndex, event) {
     if (mode !== "edit") return;
     const canvas = overlayRefs.current[pageIndex];
     const point = toCanvasPoint(canvas, event);
     if (tool === "text") {
-      const text = window.prompt("Text");
+      const text = await promptFn("Text:");
       if (text && text.trim()) {
         marksRef.current[pageIndex].push({ kind: "text", x: point.x, y: point.y, text: text.trim(), color });
         repaintOverlay(pageIndex);
@@ -287,6 +288,7 @@ export default function PdfDoc({ src, name, onClose, onDownloadOriginal, toast }
           </div>
         ))}
       </div>
+      {promptModal}
     </div>
   );
 }

@@ -194,7 +194,8 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
     let localStream;
     try {
       localStream = await navigator.mediaDevices.getUserMedia({
-        audio: true, video: callKind === "video" ? CAMERA_CONSTRAINTS : false,
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        video: callKind === "video" ? CAMERA_CONSTRAINTS : false,
       });
     } catch (problem) {
       toastRef.current?.(problem.name === "NotAllowedError"

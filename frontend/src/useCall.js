@@ -209,7 +209,8 @@ export function useCall(events, send, toast) {
     let localStream;
     try {
       localStream = await navigator.mediaDevices.getUserMedia({
-        audio: true, video: callKind === "video" ? CAMERA_CONSTRAINTS : false,
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        video: callKind === "video" ? CAMERA_CONSTRAINTS : false,
       });
     } catch (problem) {
       toastRef.current?.(problem.name === "NotAllowedError"
@@ -289,7 +290,8 @@ export function useCall(events, send, toast) {
     let localStream;
     try {
       localStream = await navigator.mediaDevices.getUserMedia({
-        audio: true, video: current.callKind === "video" ? CAMERA_CONSTRAINTS : false,
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        video: current.callKind === "video" ? CAMERA_CONSTRAINTS : false,
       });
     } catch (problem) {
       toastRef.current?.(problem.name === "NotAllowedError"
@@ -525,10 +527,52 @@ export function useCall(events, send, toast) {
     canvas.width = w;
     canvas.height = h;
     const ctx = canvas.getContext("2d");
+    const blurCanvas = document.createElement("canvas");
+    blurCanvas.width = w;
+    blurCanvas.height = h;
+    const blurCtx = blurCanvas.getContext("2d");
+    const radialMask = ctx.createRadialGradient(w / 2, h * 0.38, Math.min(w, h) * 0.22, w / 2, h * 0.45, Math.max(w, h) * 0.7);
+    radialMask.addColorStop(0, "rgba(0,0,0,1)");
+    radialMask.addColorStop(0.6, "rgba(0,0,0,0.6)");
+    radialMask.addColorStop(1, "rgba(0,0,0,0)");
     const eff = { video, canvas, rawTrack, filter, raf: 0 };
     const draw = () => {
-      ctx.filter = eff.filter;
-      try { ctx.drawImage(video, 0, 0, w, h); } catch { /* frame not ready yet */ }
+      const f = eff.filter;
+      try {
+        if (f.startsWith("bgblur:")) {
+          const px = f.split(":")[1] || "10";
+          blurCtx.filter = `blur(${px}px)`;
+          blurCtx.drawImage(video, 0, 0, w, h);
+          ctx.filter = "none";
+          ctx.drawImage(blurCanvas, 0, 0, w, h);
+          ctx.save();
+          ctx.globalCompositeOperation = "destination-in";
+          ctx.fillStyle = "#000";
+          ctx.fillRect(0, 0, w, h);
+          ctx.globalCompositeOperation = "source-over";
+          ctx.save();
+          ctx.beginPath();
+          ctx.ellipse(w / 2, h * 0.38, w * 0.34, h * 0.42, 0, 0, Math.PI * 2);
+          ctx.clip();
+          ctx.drawImage(video, 0, 0, w, h);
+          ctx.restore();
+          ctx.restore();
+        } else if (f.startsWith("vbg:")) {
+          const color = f.slice(4);
+          ctx.filter = "none";
+          ctx.fillStyle = color;
+          ctx.fillRect(0, 0, w, h);
+          ctx.save();
+          ctx.beginPath();
+          ctx.ellipse(w / 2, h * 0.38, w * 0.34, h * 0.42, 0, 0, Math.PI * 2);
+          ctx.clip();
+          ctx.drawImage(video, 0, 0, w, h);
+          ctx.restore();
+        } else {
+          ctx.filter = f;
+          ctx.drawImage(video, 0, 0, w, h);
+        }
+      } catch { /* frame not ready yet */ }
       eff.raf = requestAnimationFrame(draw);
     };
     eff.raf = requestAnimationFrame(draw);
@@ -744,8 +788,18 @@ export function useCall(events, send, toast) {
     };
   }, []);
 
+  const toggleHold = useCallback(() => {
+    const current = callRef.current;
+    if (!current || current.phase !== "active") return;
+    const next = !current.onHold;
+    const stream = localStreamRef.current;
+    if (stream) stream.getTracks().forEach((t) => { t.enabled = !next; });
+    setCall((c) => c ? { ...c, onHold: next } : c);
+    sendRef.current({ type: next ? "call_hold" : "call_resume", to: current.peerId, chat_id: current.chatId });
+  }, []);
+
   return {
     call, startCall, acceptIncoming, rejectIncoming, endCall, toggleMute, toggleCamera, switchCamera,
-    shareScreen, stopSharingScreen, setVideoEffect,
+    shareScreen, stopSharingScreen, setVideoEffect, toggleHold,
   };
 }

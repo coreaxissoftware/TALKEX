@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { Button, G, I } from "./ui.jsx";
+import { Button, G, I, usePrompt } from "./ui.jsx";
 
 const FILTERS = [
   { key: "none", label: "Original", css: "none" },
@@ -30,7 +30,8 @@ const DRAW_COLORS = ["#ffffff", "#ef4444", "#f59e0b", "#22c55e", "#38bdf8", "#a8
 const STICKER_EMOJIS = ["😀", "😂", "😍", "🔥", "❤️", "👍", "🎉", "😎", "✨", "😢", "😮", "🙌",
                         "🥳", "💪", "🤩", "🥺", "😴", "🤯", "🫡", "🚀", "💯", "🎊", "🦋", "🌈"];
 
-const VIEWPORT_MAX_WIDTH = 340;
+const VIEWPORT_MAX_WIDTH = 380;
+const PREVIEW_MAX_DIM = 800;
 const OUTPUT_LONG_EDGE = 1600;
 const OUTPUT_LONG_EDGE_HD = 2400;
 
@@ -56,8 +57,8 @@ const TABS = [
 ];
 
 // Crop handle size
-const HANDLE_SIZE = 22;
-const HANDLE_HIT = 28;
+const HANDLE_SIZE = 24;
+const HANDLE_HIT = 36;
 
 let _editorStylesInjected = false;
 function injectEditorStyles() {
@@ -192,6 +193,7 @@ const TOOL_ICON_MAP = {
  * Pinch-to-zoom replaces the zoom slider.
  */
 export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, initialTool }) {
+  const [promptFn, promptModal] = usePrompt();
   const [rotatedSrc, setRotatedSrc] = useState(null);
   const [rotation, setRotation] = useState(0);
   const [flipped, setFlipped] = useState(false);
@@ -265,15 +267,29 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
     const swapped = rotation === 90 || rotation === 270;
     const w = swapped ? sourceImg.naturalHeight : sourceImg.naturalWidth;
     const h = swapped ? sourceImg.naturalWidth : sourceImg.naturalHeight;
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    ctx.translate(w / 2, h / 2);
-    ctx.rotate((rotation * Math.PI) / 180);
-    if (flipped) ctx.scale(-1, 1);
-    ctx.drawImage(sourceImg, -sourceImg.naturalWidth / 2, -sourceImg.naturalHeight / 2);
-    setRotatedSrc({ canvas, w, h });
+
+    const drawRotated = (canvas, cw, ch) => {
+      canvas.width = cw;
+      canvas.height = ch;
+      const ctx = canvas.getContext("2d");
+      ctx.translate(cw / 2, ch / 2);
+      const scale = cw / w;
+      ctx.scale(scale, scale);
+      ctx.rotate((rotation * Math.PI) / 180);
+      if (flipped) ctx.scale(-1, 1);
+      ctx.drawImage(sourceImg, -sourceImg.naturalWidth / 2, -sourceImg.naturalHeight / 2);
+    };
+
+    const fullCanvas = document.createElement("canvas");
+    drawRotated(fullCanvas, w, h);
+
+    const ratio = Math.min(1, PREVIEW_MAX_DIM / Math.max(w, h));
+    const pw = Math.round(w * ratio);
+    const ph = Math.round(h * ratio);
+    const prevCanvas = document.createElement("canvas");
+    drawRotated(prevCanvas, pw, ph);
+
+    setRotatedSrc({ canvas: fullCanvas, w, h, previewCanvas: prevCanvas, pw, ph });
     setPan({ x: 0, y: 0 });
     setZoom(1);
     setMarks([]);
@@ -403,12 +419,9 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
     const handle = getCropHandle(px, py);
-    // A corner/edge handle resizes the crop box. Anything else (the interior or
-    // the dark area around it) pans the IMAGE behind the box — so the user
-    // frames by moving/zooming the photo, WhatsApp/Instagram-style.
-    if (handle && handle !== "move") {
+    if (handle) {
       cropDragRef.current = {
-        type: handle,
+        type: handle === "move" ? "move" : handle,
         startRect: { ...cropRect },
         startX: e.clientX,
         startY: e.clientY,
@@ -417,7 +430,7 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
       e.stopPropagation();
       return;
     }
-    if (pinchRef.current) return; // two-finger pinch owns the gesture
+    if (pinchRef.current) return;
     dragRef.current = { startX: e.clientX, startY: e.clientY, startPan: pan };
     e.currentTarget.setPointerCapture?.(e.pointerId);
   }
@@ -513,9 +526,10 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
     if (cropActive) return;
     if ((tool === "draw" || tool === "highlighter" || tool === "eraser") && strokingRef.current) {
       if (strokingRef.current.length > 1) {
-        const strokeColor = tool === "eraser" ? "erase" : tool === "highlighter" ? "highlight" : drawColor;
-        const size = tool === "highlighter" ? 14 : tool === "eraser" ? 22 : drawSize;
-        setMarks((current) => [...current, { kind: "stroke", points: strokingRef.current, color: strokeColor, size }]);
+        const isHighlight = tool === "highlighter";
+        const strokeColor = tool === "eraser" ? "erase" : drawColor;
+        const size = isHighlight ? 14 : tool === "eraser" ? 22 : drawSize;
+        setMarks((current) => [...current, { kind: "stroke", points: strokingRef.current, color: strokeColor, size, highlight: isHighlight }]);
       }
       strokingRef.current = null;
       return;
@@ -531,11 +545,11 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
     dragRef.current = null;
   }
 
-  function onViewportTap(event) {
+  async function onViewportTap(event) {
     if (cropActive) return;
     if (tool === "text") {
       const point = pointFromEvent(event);
-      const text = window.prompt("Text:");
+      const text = await promptFn("Text:");
       if (text && text.trim()) {
         setMarks((current) => [...current, { kind: "text", x: point.x, y: point.y, text: text.trim(), color: drawColor }]);
       }
@@ -550,11 +564,11 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
 
   function paintMark(ctx, w, h, mark) {
     if (mark.kind === "stroke") {
-      ctx.strokeStyle = mark.color === "highlight" ? drawColor : mark.color;
+      ctx.strokeStyle = mark.color === "erase" ? "#000" : mark.color;
       ctx.lineWidth = mark.size || Math.max(2, w * 0.01);
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
-      ctx.globalAlpha = mark.color === "highlight" ? 0.35 : 1;
+      ctx.globalAlpha = mark.highlight ? 0.35 : 1;
       ctx.globalCompositeOperation = mark.color === "erase" ? "destination-out" : "source-over";
       ctx.beginPath();
       mark.points.forEach((point, i) => {
@@ -611,9 +625,10 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     for (const mark of marks) paintMark(ctx, canvas.width, canvas.height, mark);
     if (strokingRef.current) {
-      const strokeColor = tool === "eraser" ? "erase" : tool === "highlighter" ? "highlight" : drawColor;
-      const size = tool === "highlighter" ? 14 : tool === "eraser" ? 22 : drawSize;
-      paintMark(ctx, canvas.width, canvas.height, { kind: "stroke", points: strokingRef.current, color: strokeColor, size });
+      const isHighlight = tool === "highlighter";
+      const strokeColor = tool === "eraser" ? "erase" : drawColor;
+      const size = isHighlight ? 14 : tool === "eraser" ? 22 : drawSize;
+      paintMark(ctx, canvas.width, canvas.height, { kind: "stroke", points: strokingRef.current, color: strokeColor, size, highlight: isHighlight });
     }
     if (shapeEnd && shapeStartRef.current) {
       paintMark(ctx, canvas.width, canvas.height, {
@@ -631,7 +646,7 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [marks, viewportW, viewportH]);
 
-  const rotatedUrl = useMemo(() => (rotatedSrc ? rotatedSrc.canvas.toDataURL() : null), [rotatedSrc]);
+  const rotatedUrl = useMemo(() => (rotatedSrc ? rotatedSrc.previewCanvas.toDataURL() : null), [rotatedSrc]);
 
   // Activate/deactivate crop mode
   useEffect(() => {
@@ -745,13 +760,12 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
   }
 
   function paintMarkAbsolute(ctx, mark) {
-    // Same as paintMark but coords are already in canvas pixels
     if (mark.kind === "stroke") {
-      ctx.strokeStyle = mark.color === "highlight" ? drawColor : mark.color;
+      ctx.strokeStyle = mark.color === "erase" ? "#000" : mark.color;
       ctx.lineWidth = mark.size || 3;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
-      ctx.globalAlpha = mark.color === "highlight" ? 0.35 : 1;
+      ctx.globalAlpha = mark.highlight ? 0.35 : 1;
       ctx.globalCompositeOperation = mark.color === "erase" ? "destination-out" : "source-over";
       ctx.beginPath();
       mark.points.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
@@ -1239,6 +1253,7 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
           {processing ? "Processing…" : "Done ✓"}
         </button>
       </div>
+      {promptModal}
     </div>
   );
 }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Chats, Meetings, Scheduled, meetingLink } from "../api.js";
 import {
-  Button, Field, G, I, Spinner, countdown, localInputToUnix, unixToLocalInput, whenLabel,
+  Button, Field, G, I, Spinner, countdown, localInputToUnix, unixToLocalInput, usePrompt, whenLabel,
 } from "../ui.jsx";
 import { MeetingSheet } from "./ChatView.jsx";
 
@@ -12,6 +12,7 @@ import { MeetingSheet } from "./ChatView.jsx";
  * have I got waiting" — so they share a screen.
  */
 export default function Planner({ toast, onOpenChat, chats, onJoinCall, me }) {
+  const [promptFn, promptModal] = usePrompt();
   const [tab, setTab] = useState("meetings");
   const [meetings, setMeetings] = useState([]);
   const [queue, setQueue] = useState([]);
@@ -55,8 +56,8 @@ export default function Planner({ toast, onOpenChat, chats, onJoinCall, me }) {
   // rather than requiring the host to click a separate "Start" button.
   async function joinMeeting(meeting) {
     if (meeting.has_password) {
-      const password = window.prompt("This meeting has a password:");
-      if (password === null) return; // cancelled
+      const password = await promptFn("Meeting password:");
+      if (password === null) return;
       try {
         await Meetings.start(meeting.id);
         onJoinCall(meeting.chat_id, "video", password);
@@ -288,6 +289,7 @@ export default function Planner({ toast, onOpenChat, chats, onJoinCall, me }) {
                        }
                      }}/>
       )}
+      {promptModal}
     </div>
   );
 }

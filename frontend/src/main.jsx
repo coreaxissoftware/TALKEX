@@ -5,6 +5,9 @@ import ErrorBoundary from './ErrorBoundary.jsx'
 import { I18nProvider } from './i18n.jsx'
 import './locales/en.js'
 import './locales/hi.js'
+import { ensureLocaleLoaded } from './i18n.jsx'
+
+ensureLocaleLoaded(localStorage.getItem("talkex_lang"));
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>

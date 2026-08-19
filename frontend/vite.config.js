@@ -10,11 +10,8 @@ export default defineConfig({
   // config, so TalkEx runs on its own pair of ports.
   server: { port: 3020 },
   build: {
-    // Human-readable output: the bundle is left un-minified and line-wrapped
-    // so the shipped JS/CSS can actually be read. Trade-off (accepted): the
-    // files are larger than a minified build.
-    minify: false,
-    cssMinify: false,
+    sourcemap: true,
+    minify: 'esbuild',
     rollupOptions: {
       output: {
         // The whole app was one ~900KB JS file, so every screen (chat,
@@ -28,9 +25,9 @@ export default defineConfig({
         manualChunks: {
           vendor: ['react', 'react-dom'],
         },
-        entryFileNames: 'assets/[name].js',
-        chunkFileNames: 'assets/[name].js',
-        assetFileNames: 'assets/[name][extname]',
+        entryFileNames: 'assets/[name]-[hash:8].js',
+        chunkFileNames: 'assets/[name]-[hash:8].js',
+        assetFileNames: 'assets/[name]-[hash:8][extname]',
       },
     },
   },

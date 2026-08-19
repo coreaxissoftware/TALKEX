@@ -67,7 +67,7 @@ export function useGroupCallSfu(events, send, toast) {
     let localStream;
     try {
       localStream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         video: callKind === "video" ? CAMERA_CONSTRAINTS : false,
       });
     } catch {
@@ -134,6 +134,12 @@ export function useGroupCallSfu(events, send, toast) {
       setCall(null);
     });
 
+    room.on(lk.RoomEvent.ConnectionQualityChanged, (quality, participant) => {
+      if (participant.isLocal) {
+        setCall((cur) => cur ? { ...cur, connectionQuality: quality } : cur);
+      }
+    });
+
     try {
       await room.connect(tokenData.url, tokenData.token);
     } catch (err) {
@@ -185,6 +191,7 @@ export function useGroupCallSfu(events, send, toast) {
       raisedHands: {},
       reactions: [],
       captions: [],
+      connectionQuality: null,
     });
   }, [teardown]);
 
@@ -303,20 +310,166 @@ export function useGroupCallSfu(events, send, toast) {
       } else if (t === "group_call_spotlight_changed") {
         setCall((cur) => cur?.chatId === event.chat_id
           ? { ...cur, spotlightUserId: event.user_id } : cur);
+      } else if (t === "group_call_raise_hand") {
+        setCall((cur) => cur?.chatId === event.chat_id
+          ? { ...cur, raisedHands: { ...cur.raisedHands, [event.user_id]: true } } : cur);
+      } else if (t === "group_call_lower_hand") {
+        setCall((cur) => {
+          if (!cur || cur.chatId !== event.chat_id) return cur;
+          const next = { ...cur.raisedHands };
+          delete next[event.user_id];
+          return { ...cur, raisedHands: next };
+        });
+      } else if (t === "whiteboard_open") {
+        setCall((cur) => cur?.chatId === event.chat_id ? { ...cur, whiteboardOpen: true } : cur);
+      } else if (t === "whiteboard_close") {
+        setCall((cur) => cur?.chatId === event.chat_id ? { ...cur, whiteboardOpen: false } : cur);
+      } else if (t === "group_call_permissions_changed") {
+        setCall((cur) => cur?.chatId === event.chat_id
+          ? { ...cur, permissions: { ...cur.permissions, [event.feature]: event.policy } } : cur);
+      } else if (t === "group_call_action_denied") {
+        toastRef.current?.(event.reason || "Action not allowed");
+        if (event.action === "whiteboard_open") {
+          setCall((cur) => cur?.chatId === event.chat_id ? { ...cur, whiteboardOpen: false } : cur);
+        }
+      } else if (t === "group_call_force_muted" || t === "group_call_muted_by_host") {
+        const room = roomRef.current;
+        if (room) room.localParticipant.setMicrophoneEnabled(false);
+        setCall((cur) => cur?.chatId === event.chat_id ? { ...cur, muted: true } : cur);
+        toastRef.current?.("You were muted by the host");
+      } else if (t === "breakout_rooms_created") {
+        setCall((cur) => cur?.chatId === event.chat_id ? { ...cur, breakoutRooms: event.rooms } : cur);
+      } else if (t === "breakout_rooms_closed") {
+        setCall((cur) => cur?.chatId === event.chat_id
+          ? { ...cur, breakoutRooms: null, breakoutParentChatId: null } : cur);
       }
     }
   }, [events, teardown]);
 
+  const toggleRaiseHand = useCallback(() => {
+    const current = callRef.current;
+    if (!current) return;
+    const next = !current.handRaised;
+    setCall((c) => (c ? { ...c, handRaised: next } : c));
+    sendRef.current({ type: next ? "group_call_raise_hand" : "group_call_lower_hand", chat_id: current.chatId });
+  }, []);
+
+  const sendCaption = useCallback((text) => {
+    const current = callRef.current;
+    if (!current || !text.trim()) return;
+    setCall((c) => (c ? {
+      ...c, captions: [...(c.captions || []), { from: "me", text, key: `${Date.now()}-me` }].slice(-MAX_CAPTION_LINES),
+    } : c));
+    sendRef.current({ type: "group_call_caption", chat_id: current.chatId, text });
+  }, []);
+
+  const switchCamera = useCallback(async () => {
+    const room = roomRef.current;
+    if (!room) return;
+    const pub = room.localParticipant.getTrackPublication("camera");
+    if (!pub?.track) return;
+    try {
+      const current = pub.track.mediaStreamTrack;
+      const settings = current.getSettings();
+      const nextFacing = settings.facingMode === "user" ? "environment" : "user";
+      await pub.track.restartTrack({ ...CAMERA_CONSTRAINTS, facingMode: nextFacing });
+    } catch { /* camera switch unavailable on this device */ }
+  }, []);
+
+  const declineIncoming = useCallback(() => setCall(null), []);
+
+  const forceMuteAll = useCallback(() => {
+    const c = callRef.current;
+    if (c) sendRef.current({ type: "group_call_force_mute_all", chat_id: c.chatId });
+  }, []);
+
+  const muteParticipant = useCallback((userId) => {
+    const c = callRef.current;
+    if (c) sendRef.current({ type: "group_call_mute_participant", chat_id: c.chatId, target: userId });
+  }, []);
+
+  const kickParticipant = useCallback((userId) => {
+    const c = callRef.current;
+    if (c) sendRef.current({ type: "group_call_kick", chat_id: c.chatId, target: userId });
+  }, []);
+
+  const addPeople = useCallback((userIds) => {
+    const c = callRef.current;
+    if (c && userIds.length) sendRef.current({ type: "group_call_add_people", chat_id: c.chatId, call_kind: c.callKind, targets: userIds });
+  }, []);
+
+  const toggleWhiteboard = useCallback(() => {
+    const c = callRef.current;
+    if (!c) return;
+    const next = !c.whiteboardOpen;
+    setCall((cur) => cur ? { ...cur, whiteboardOpen: next } : cur);
+    sendRef.current({ type: next ? "whiteboard_open" : "whiteboard_close", chat_id: c.chatId });
+  }, []);
+
+  const toggleCaptions = useCallback(() => {
+    setCall((c) => c ? { ...c, captionsOn: !c.captionsOn, captions: c.captionsOn ? c.captions : [] } : c);
+  }, []);
+
+  const spotlight = useCallback((userId) => {
+    const c = callRef.current;
+    if (c) sendRef.current({ type: "group_call_spotlight", chat_id: c.chatId, target: userId });
+  }, []);
+
+  const transferHost = useCallback((userId) => {
+    const c = callRef.current;
+    if (c) sendRef.current({ type: "group_call_transfer_host", chat_id: c.chatId, target: userId });
+  }, []);
+
+  const setPermission = useCallback((feature, policy) => {
+    const c = callRef.current;
+    if (c) sendRef.current({ type: "group_call_set_permission", chat_id: c.chatId, feature, policy });
+  }, []);
+
+  const admitParticipant = useCallback((userId) => {
+    const c = callRef.current;
+    if (!c) return;
+    sendRef.current({ type: "group_call_admit", chat_id: c.chatId, target: userId });
+    setCall((cur) => cur ? { ...cur, joinRequests: (cur.joinRequests || []).filter((r) => r.user_id !== userId) } : cur);
+  }, []);
+
+  const denyParticipant = useCallback((userId) => {
+    const c = callRef.current;
+    if (!c) return;
+    sendRef.current({ type: "group_call_deny", chat_id: c.chatId, target: userId });
+    setCall((cur) => cur ? { ...cur, joinRequests: (cur.joinRequests || []).filter((r) => r.user_id !== userId) } : cur);
+  }, []);
+
+  const setScreenOptimization = useCallback(() => {}, []);
+
+  const joinBreakoutRoom = useCallback(() => {}, []);
+  const returnToMainCall = useCallback(() => {}, []);
+
   return {
     call,
     join,
+    declineIncoming,
     leave,
     toggleMute,
     toggleCamera,
-    toggleScreenShare,
+    shareScreen: toggleScreenShare,
+    setScreenOptimization,
+    switchCamera,
+    forceMuteAll,
+    kickParticipant,
+    addPeople,
+    toggleWhiteboard,
     sendReaction,
-    switchCamera: useCallback(() => {}, []),
-    raiseHand: useCallback(() => {}, []),
-    sendCaption: useCallback(() => {}, []),
+    toggleRaiseHand,
+    toggleCaptions,
+    sendCaption,
+    joinBreakoutRoom,
+    returnToMainCall,
+    admitParticipant,
+    denyParticipant,
+    muteParticipant,
+    spotlight,
+    transferHost,
+    setPermission,
+    raiseHand: toggleRaiseHand,
   };
 }
