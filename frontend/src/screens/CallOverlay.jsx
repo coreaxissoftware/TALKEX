@@ -437,6 +437,7 @@ export default function CallOverlay({
         <ActiveCall call={call} onEnd={onEnd} onToggleMute={onToggleMute} onToggleCamera={onToggleCamera}
                     onSwitchCamera={onSwitchCamera} onMinimize={() => setMinimized(true)}
                     onShareScreen={onShareScreen} onEffect={onEffect} onAddParticipant={onAddParticipant}
+                    onToggleHold={onToggleHold}
                     sinkId={sinkId} onSinkId={setSinkId}
                     isLandscape={isLandscape}/>
       )}
@@ -582,7 +583,7 @@ const VIDEO_EFFECTS = [
   { key: "vivid", label: "Vivid", filter: "saturate(1.8) contrast(1.1)" },
 ];
 
-function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen, onEffect, onAddParticipant, onMinimize, sinkId, onSinkId, isLandscape }) {
+function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen, onEffect, onAddParticipant, onToggleHold, onMinimize, sinkId, onSinkId, isLandscape }) {
   const [showSpeakerPicker, setShowSpeakerPicker] = useState(false);
   const [showMore, setShowMore] = useState(false);
   const [showEffects, setShowEffects] = useState(false);

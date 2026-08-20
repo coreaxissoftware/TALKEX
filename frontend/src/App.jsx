@@ -33,6 +33,14 @@ const Planner = lazy(() => import("./screens/Planner.jsx"));
 const Settings = lazy(() => import("./screens/Settings.jsx"));
 const Status = lazy(() => import("./screens/Status.jsx"));
 
+// Plain content comparison for reloadChats below — a chat list is small
+// (tens of rows, not thousands), so JSON.stringify is cheap enough here and
+// correct by construction, unlike hand-picking "the fields that matter"
+// and inevitably missing one the next time a chat field gets added.
+function sameChats(a, b) {
+  return a.length === b.length && JSON.stringify(a) === JSON.stringify(b);
+}
+
 // "Discover" (people/contacts/channels/communities/join-via-code) used to be
 // its own bottom tab. It's really a set of "start something new" actions, not
 // a place you go back to — so it now lives behind the "+" button on Chats
@@ -252,14 +260,25 @@ export default function App() {
 
   const reloadChats = useCallback(() => {
     if (!getToken()) return;
+    // Every realtime event that touches a chat (a new message, a read
+    // receipt, someone's online status) used to call this, and this always
+    // called setChats with a BRAND NEW array from IndexedDB/the network —
+    // even when the data that came back was byte-for-byte identical to
+    // what was already on screen. React can't tell "same content, new
+    // array" from "actually changed" on its own, so a busy conversation
+    // (read receipts alone can fire every few seconds) re-rendered the
+    // entire chat list over and over, which is what showed up as the list
+    // visibly reflowing/flickering with nothing having actually changed.
+    // Bailing out with the PREVIOUS reference when the JSON is identical
+    // is what actually stops that re-render, not just deduping the fetch.
     offlineDb.getChats().then((cached) => {
       if (cached.length > 0) {
-        setChats(cached);
+        setChats((current) => sameChats(current, cached) ? current : cached);
         setLoadingChats(false);
       }
     });
     Chats.list()
-      .then(setChats)
+      .then((fresh) => setChats((current) => sameChats(current, fresh) ? current : fresh))
       .catch(() => {})
       .finally(() => setLoadingChats(false));
   }, []);

@@ -729,10 +729,12 @@ export async function flushPendingActions() {
 // send (Uploads.create, then Messages.send) — the difference is that
 // failing either one queues the raw file itself, not a half-finished
 // attachment id that would be meaningless once retried later.
-export async function sendFileReliably({ chatId, file, kind, text = "", viewOnce = false, clientMsgId = null }) {
+export async function sendFileReliably({
+  chatId, file, kind, text = "", viewOnce = false, clientMsgId = null, signal = null,
+}) {
   const id = clientMsgId || newClientMessageId();
   try {
-    const attachment = await Uploads.create(file);
+    const attachment = await Uploads.create(file, { signal });
     return await Messages.send({
       chat_id: chatId, kind, text,
       payload: { attachment_id: attachment.attachment_id },
@@ -740,6 +742,11 @@ export async function sendFileReliably({ chatId, file, kind, text = "", viewOnce
       view_once: viewOnce && (kind === "photo" || kind === "video"),
     });
   } catch (error) {
+    // A deliberate cancel (the person tapped × on the upload) is not a
+    // network failure — queuing it for a background retry would silently
+    // resurrect and send a file they explicitly stopped. Let it propagate
+    // as-is so the caller's own catch just cleans up the optimistic bubble.
+    if (error?.name === "AbortError") throw error;
     if (error instanceof ApiError && error.status >= 400 && error.status < 500) throw error;
     await offlineDb.queuePendingUpload({
       client_msg_id: id, chat_id: chatId, kind, text, view_once: viewOnce,
@@ -809,8 +816,13 @@ export const Uploads = {
    * Send a file to the server and get back an attachment id to put in a
    * message's payload. Two steps on purpose: if the send that follows fails
    * and is retried, the file is not re-transmitted.
+   *
+   * `signal` (an AbortController's) is what lets ChatView's cancel button
+   * actually stop an in-flight upload instead of just hiding it client-side
+   * while the transfer keeps running in the background — fetch() aborts
+   * both the request and (per spec) the underlying TCP write.
    */
-  async create(file) {
+  async create(file, { signal } = {}) {
     const body = new FormData();
     body.append("file", file);
 
@@ -818,6 +830,7 @@ export const Uploads = {
       method: "POST",
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       body,
+      signal,
     });
 
     if (!response.ok) {

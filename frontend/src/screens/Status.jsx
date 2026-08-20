@@ -399,7 +399,16 @@ export default function Status({ me, toast }) {
           it back, since it visually rotates into an "×" at that point and
           reads as the same close affordance. */}
       <div style={{
-        position: "fixed", bottom: 80, right: 20, display: "flex", flexDirection: "column",
+        position: "fixed",
+        // A flat 80px cleared the tab bar's typical height on most phones,
+        // but not its own env(safe-area-inset-bottom) padding (see TabBar
+        // in App.jsx) — on a phone with a tall gesture-nav inset the pill
+        // nav grows taller than 80px and this FAB sat half-overlapping it.
+        // Adding the same safe-area term the tab bar itself adds keeps the
+        // gap constant across devices instead of just on ones with a small
+        // inset.
+        bottom: "calc(84px + env(safe-area-inset-bottom, 0px))", right: 20,
+        display: "flex", flexDirection: "column",
         alignItems: "flex-end", gap: 12, zIndex: 30, maxWidth: 430,
       }}>
         {fabOpen && (

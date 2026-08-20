@@ -332,6 +332,23 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
     }
   }, [events, chat.id, reloadPins]);
 
+  // Opening a chat (or switching to a different one) should land at the very
+  // bottom immediately, the way every WhatsApp-style app opens — not
+  // animate a visible scroll through the history. A single scrollIntoView
+  // right on mount was also too easy to leave "stuck in the middle": a
+  // photo/video bubble that finishes loading its image AFTER this first
+  // fires grows the content's height and pushes the real bottom further
+  // down, with nothing re-triggering a scroll to compensate — which is
+  // exactly what a long chat with media showed. Re-firing a few times over
+  // the first second catches that late layout shift without having to
+  // instrument every attachment's own load event individually.
+  useEffect(() => {
+    const delays = [0, 60, 200, 500, 1000];
+    const timers = delays.map((delay) =>
+      setTimeout(() => bottom.current?.scrollIntoView({ behavior: "auto" }), delay));
+    return () => timers.forEach(clearTimeout);
+  }, [chat.id]);
+
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
@@ -788,7 +805,18 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
     ];
   }
 
-  const [uploading, setUploading] = useState(false);
+  // Was a single boolean that disabled the attach button until the ONE
+  // in-flight upload finished — which meant picking a second file mid-
+  // upload was simply impossible, unlike WhatsApp where every attachment
+  // uploads independently and you can keep composing/attaching in the
+  // meantime. A Map keyed by clientMsgId (rather than a count) is what
+  // lets a specific upload be found again for cancelUpload below.
+  const uploadControllers = useRef(new Map()); // clientMsgId -> AbortController
+  const [uploadingIds, setUploadingIds] = useState(() => new Set());
+
+  function cancelUpload(clientMsgId) {
+    uploadControllers.current.get(clientMsgId)?.abort();
+  }
 
   function sendVoiceNote(blob, transcript) {
     // MediaRecorder produces a Blob, not a File — Uploads.create needs
@@ -830,9 +858,13 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
     };
     setMessages((current) => [...current, temporary]);
 
-    setUploading(true);
+    const controller = new AbortController();
+    uploadControllers.current.set(clientMsgId, controller);
+    setUploadingIds((current) => new Set(current).add(clientMsgId));
     try {
-      const stored = await sendFileReliably({ chatId: chat.id, file, kind, text, viewOnce, clientMsgId });
+      const stored = await sendFileReliably({
+        chatId: chat.id, file, kind, text, viewOnce, clientMsgId, signal: controller.signal,
+      });
       setMessages((current) =>
         stored
           ? upsertMessage(current, stored)
@@ -843,9 +875,17 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
     } catch (problem) {
       setMessages((current) => current.filter((m) => m.id !== temporary.id));
       if (localUrl) URL.revokeObjectURL(localUrl);
-      toast(problem.message || "Could not send file");
+      // A deliberate cancel isn't a failure worth a toast — the person just
+      // watches their own bubble disappear, same as WhatsApp's cancelled
+      // upload leaves nothing behind.
+      if (problem?.name !== "AbortError") toast(problem.message || "Could not send file");
     } finally {
-      setUploading(false);
+      uploadControllers.current.delete(clientMsgId);
+      setUploadingIds((current) => {
+        const next = new Set(current);
+        next.delete(clientMsgId);
+        return next;
+      });
     }
   }
 
@@ -1055,9 +1095,14 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
     }
   }
 
-  async function sendScanPdf(pdfBlob) {
+  function sendScanPdf(pdfBlob) {
+    // Not awaited — sendFile already shows its own optimistic bubble and
+    // uploads in the background (with its own progress/cancel UI); waiting
+    // for that here would hold the scan sheet open with a spinner for as
+    // long as the actual upload took, on top of however long building the
+    // PDF itself already took.
     const pdfFile = new File([pdfBlob], "scan.pdf", { type: "application/pdf" });
-    await sendFile(pdfFile, "document");
+    sendFile(pdfFile, "document");
     setSheet(null);
     setScanFile(null);
   }
@@ -1342,6 +1387,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
               <ErrorBoundary key={message.id} compact>
               <Bubble message={message} me={me}
                       chatAccent={chatAccent}
+                      onCancelUpload={cancelUpload}
                       translatedText={translations[message.id]}
                       replyTarget={messagesById.get(message.reply_to_id)}
                       meetingUpdates={meetingUpdates}
@@ -1436,7 +1482,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         onSend={send}
         onSchedule={() => setSheet("schedule")}
         onVoice={sendVoiceNote}
-        uploading={uploading}
+        uploading={uploadingIds.size > 0}
         disappearSecs={chat.disappear_secs}
         editing={Boolean(editing)}
         members={members}
@@ -2203,7 +2249,7 @@ const SWIPE_REPLY_TRIGGER = 56;
 const SWIPE_REPLY_MAX = 74;
 
 function Bubble({ message, me, chatAccent, translatedText, replyTarget, meetingUpdates, isPinned, isRead, isDelivered, signature,
-                  commentsOn, onComments, onDoubleTap, onLongPress, onSwipeReply, onVote, onForward, onOpenMedia, onCallAgain, onJoinMeeting, toast }) {
+                  commentsOn, onComments, onDoubleTap, onLongPress, onSwipeReply, onVote, onForward, onOpenMedia, onCallAgain, onJoinMeeting, onCancelUpload, toast }) {
   const mine = message.sender_id === me.id;
   const gone = message.deleted_at || message.expired;
   const spamSettings = getSpamSettings();
@@ -2441,7 +2487,8 @@ function Bubble({ message, me, chatAccent, translatedText, replyTarget, meetingU
               // out, same as any other pending attachment until it actually
               // reaches the server.
               ? <ViewOnceAttachment message={message} mine={mine}/>
-              : <Attachment message={message} mine={mine} onForward={onForward} onOpenMedia={onOpenMedia} toast={toast}/>}
+              : <Attachment message={message} mine={mine} onForward={onForward} onOpenMedia={onOpenMedia}
+                             onCancelUpload={onCancelUpload} toast={toast}/>}
             {message.text && (
               <div style={{
                 fontSize: 14, lineHeight: 1.4, whiteSpace: "pre-wrap", marginTop: 6,
@@ -2963,7 +3010,7 @@ function ViewOnceText({ message, mine }) {
  * cannot carry an Authorization header, only cookies, which this app does not
  * use for auth.
  */
-function Attachment({ message, mine, onForward, onOpenMedia, toast }) {
+function Attachment({ message, mine, onForward, onOpenMedia, onCancelUpload, toast }) {
   const [blobUrl, setBlobUrl] = useState(null);
   const [error, setError] = useState(false);
   // Tapping a photo/video opens it full-screen, the way WhatsApp does —
@@ -3007,6 +3054,40 @@ function Attachment({ message, mine, onForward, onOpenMedia, toast }) {
   }, [attachmentId, wantsDownload, localUrl]);
 
   const effectiveUrl = localUrl || blobUrl;
+
+  // Still going up (message.pending) or sitting in the offline retry queue
+  // (message.queued) — either way not yet a real server attachment. A
+  // document never gets a localUrl at all (see sendFile in ChatView), so
+  // before this branch existed a document in either state fell straight
+  // into the "Attachment unavailable" case below and read as a permanent
+  // failure the whole time it was simply still going up or waiting for a
+  // connection. Cancel is only offered for `pending` — a `queued` item's
+  // AbortController is long gone (the attempt that failed already tore it
+  // down before queuing), cancelling that one is a "remove from the retry
+  // queue" action this doesn't wire up.
+  if (message.pending || message.queued) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 180, padding: "2px 0" }}>
+        <Spinner small/>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {message.queued ? "Waiting to send…" : "Uploading…"}
+          </div>
+          <div style={{ fontSize: 11, opacity: 0.7, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {fileName}
+          </div>
+        </div>
+        {onCancelUpload && !message.queued && (
+          <button onClick={(event) => { event.stopPropagation(); onCancelUpload(message.client_msg_id); }}
+                  title="Cancel upload" style={{
+                    width: 26, height: 26, borderRadius: "50%", flexShrink: 0, cursor: "pointer",
+                    border: "none", background: mine ? "#ffffff33" : G.dim,
+                    color: mine ? "#fff" : G.text, fontSize: 15, lineHeight: 1,
+                  }}>×</button>
+        )}
+      </div>
+    );
+  }
 
   if (!attachmentId && !localUrl) {
     return <div style={{ fontSize: 13, fontStyle: "italic", opacity: 0.7 }}>Attachment unavailable</div>;
@@ -3600,9 +3681,20 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
         </IconButton>
       )}
 
-      <IconButton onClick={() => !uploading && toggleAttach()} label={attachOpen ? "Keyboard" : "Attach"}
-                  disabled={uploading} style={{ opacity: uploading ? 0.5 : 1 }}>
-        {uploading ? <Spinner small/> : attachOpen ? I.keyboard(G.sub, 20) : I.paperclip(G.sub, 20)}
+      {/* Never disabled by `uploading` — WhatsApp lets you keep attaching
+          more files while one is still going up, and blocking on a single
+          in-flight upload (the old behavior here) was exactly the bug: pick
+          one file, and the attach button stayed dead until that upload
+          finished. `uploading` now only drives a small badge, not the
+          button's own clickability. */}
+      <IconButton onClick={toggleAttach} label={attachOpen ? "Keyboard" : "Attach"} style={{ position: "relative" }}>
+        {attachOpen ? I.keyboard(G.sub, 20) : I.paperclip(G.sub, 20)}
+        {uploading && (
+          <div style={{
+            position: "absolute", top: -2, right: -2, width: 9, height: 9, borderRadius: "50%",
+            background: G.accent, border: `1.5px solid ${G.surface}`,
+          }}/>
+        )}
       </IconButton>
       <IconButton onClick={onSchedule} label="Schedule this message">
         {I.clock(G.sub, 20)}
@@ -4318,7 +4410,6 @@ function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker
  */
 function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
   const [caption, setCaption] = useState("");
-  const [sending, setSending] = useState(false);
   const [previewUrl, setPreviewUrl] = useState(null);
   const [viewOnce, setViewOnce] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -4346,14 +4437,18 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [firstFile]);
 
-  async function send() {
-    setSending(true);
-    try {
-      await onSend(workingFiles, kindOverride, caption.trim(), viewOnce);
-      onClose();
-    } finally {
-      setSending(false);
-    }
+  function send() {
+    // Fire-and-forget, not awaited: onSend (ChatView's sendFile/sendFiles)
+    // already does the actual WhatsApp thing on its own — an optimistic
+    // local-preview bubble appears in the chat immediately, then the real
+    // upload runs in the background with its own progress/cancel UI (see
+    // Attachment's pending branch). Awaiting the whole upload here before
+    // closing was the freeze this replaces: "Sending…" sat on screen,
+    // blocking the composer, for as long as the upload took, instead of
+    // landing straight back in the conversation — which is where WhatsApp
+    // actually puts you the instant you tap send.
+    onSend(workingFiles, kindOverride, caption.trim(), viewOnce);
+    onClose();
   }
 
   if (editing) {
@@ -4444,8 +4539,8 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
              onChange={(event) => setCaption(event.target.value)}
              placeholder="Add a caption…"/>
 
-      <Button onClick={send} disabled={sending} style={{ width: "100%" }}>
-        {sending ? "Sending…" : workingFiles.length > 1 ? `Send ${workingFiles.length}` : "Send"}
+      <Button onClick={send} style={{ width: "100%" }}>
+        {workingFiles.length > 1 ? `Send ${workingFiles.length}` : "Send"}
       </Button>
     </Sheet>
   );
