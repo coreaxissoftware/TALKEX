@@ -14,6 +14,7 @@ import {
 } from "../ui.jsx";
 import { useVoiceRecorder } from "../useVoiceRecorder.js";
 import { canvasesToPdfBlob } from "../imageToPdf.js";
+import ErrorBoundary from "../ErrorBoundary.jsx";
 import { STICKER_PACKS, STICKERS_BY_ID, getEnabledPacks, setEnabledPacks } from "../stickers.jsx";
 import { checkSpam, getSpamSettings, setSpamSettings } from "../spamFilter.js";
 import { shouldAutoDownload } from "../mediaPrefs.js";
@@ -1329,6 +1330,16 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
               </div>
             )}
             <div style={{ flex: 1 }}>
+              {/* key={message.id} so a crashed boundary resets when React
+                  swaps in a different message at this slot, instead of one
+                  bad message's caught-error state bleeding into whatever
+                  renders here next. This is the actual containment for
+                  "some chats crash the whole screen" — one malformed
+                  message (an old/legacy payload shape a renderer doesn't
+                  guard against, say) now degrades to a single inline
+                  notice instead of taking every other message in the
+                  conversation down with it. */}
+              <ErrorBoundary key={message.id} compact>
               <Bubble message={message} me={me}
                       chatAccent={chatAccent}
                       translatedText={translations[message.id]}
@@ -1371,6 +1382,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
                         && chat.comments_enabled !== 0 && !message.deleted_at && !message.expired}
                       onComments={() => setCommentsFor(message)}
                       onCallAgain={(kind) => onStartCall(kind)} onJoinMeeting={joinMeeting} toast={toast}/>
+              </ErrorBoundary>
             </div>
           </div>
           )
@@ -2562,14 +2574,18 @@ function ReactionPills({ reactions, messageId }) {
 }
 
 function Poll({ message, mine, onVote }) {
-  const options = message.payload?.options || [];
-  const total = options.reduce((sum, option) => sum + option.votes, 0);
+  // Array.isArray guard, not just `|| []` — a truthy non-array payload
+  // (e.g. a malformed/legacy row) would otherwise reach .reduce/.map below
+  // and throw, taking the whole chat screen down with it instead of just
+  // this one bubble degrading.
+  const options = Array.isArray(message.payload?.options) ? message.payload.options : [];
+  const total = options.reduce((sum, option) => sum + (option?.votes || 0), 0);
 
   return (
     <div style={{ minWidth: 200 }}>
       <div style={{ fontSize: 14.5, fontWeight: 600, marginBottom: 8 }}>{message.text}</div>
       {options.map((option, index) => {
-        const share = total ? Math.round((option.votes / total) * 100) : 0;
+        const share = total ? Math.round(((option?.votes || 0) / total) * 100) : 0;
         return (
           <div key={index} onClick={(event) => { event.stopPropagation(); onVote(index); }}
             style={{
@@ -2586,7 +2602,7 @@ function Poll({ message, mine, onVote }) {
               position: "relative", display: "flex", justifyContent: "space-between",
               fontSize: 13,
             }}>
-              <span>{option.text}</span>
+              <span>{option?.text || "Option"}</span>
               <span style={{ opacity: 0.8 }}>{share}%</span>
             </div>
           </div>

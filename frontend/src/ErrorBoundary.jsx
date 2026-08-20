@@ -28,6 +28,20 @@ export default class ErrorBoundary extends Component {
   render() {
     if (!this.state.error) return this.props.children;
 
+    // A single bad message shouldn't blank the whole chat — one bubble's
+    // render throwing (a malformed/legacy payload the current renderer
+    // doesn't guard against, say) degrades to a small inline notice instead
+    // of taking down every other message in the conversation with it.
+    if (this.props.compact) {
+      return (
+        <div style={{
+          fontSize: 12.5, fontStyle: "italic", color: G.muted, padding: "6px 2px",
+        }}>
+          ⚠️ This message could not be displayed
+        </div>
+      );
+    }
+
     return (
       <div style={{
         minHeight: "100vh", background: G.bg, color: G.text, maxWidth: 430,

@@ -157,6 +157,11 @@ export default function Status({ me, toast }) {
   const [highlights, setHighlights] = useState([]);
   const [loading, setLoading] = useState(true);
   const [composing, setComposing] = useState(false);
+  // Whether the two compose options (text / photo) are expanded out from the
+  // "+" FAB — collapsed by default so the status feed isn't sharing screen
+  // real estate with two floating buttons all the time, only when someone
+  // actually wants to post.
+  const [fabOpen, setFabOpen] = useState(false);
   const [viewing, setViewing] = useState(null);
   const [viewingAuthor, setViewingAuthor] = useState(null); // for cycling through an author's stories
   const [privacyOpen, setPrivacyOpen] = useState(false);
@@ -388,27 +393,66 @@ export default function Status({ me, toast }) {
         ]}/>
       )}
 
-      {/* FAB — WhatsApp-style floating compose buttons */}
+      {/* FAB — a single "+" that expands into the text/photo compose
+          options, rather than both floating on screen permanently. Tapping
+          the "+" itself (not just an outside click) is also what collapses
+          it back, since it visually rotates into an "×" at that point and
+          reads as the same close affordance. */}
       <div style={{
-        position: "fixed", bottom: 80, right: 20, display: "flex", flexDirection: "column", gap: 12,
-        zIndex: 30, maxWidth: 430,
+        position: "fixed", bottom: 80, right: 20, display: "flex", flexDirection: "column",
+        alignItems: "flex-end", gap: 12, zIndex: 30, maxWidth: 430,
       }}>
-        <div onClick={() => setComposing("text")} style={{
-          width: 44, height: 44, borderRadius: "50%", background: G.card,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          cursor: "pointer", boxShadow: "0 2px 12px #00000033",
-          border: `1px solid ${G.border}`,
-        }}>
-          <span style={{ fontSize: 18, fontWeight: 700, color: G.sub }}>Aa</span>
-        </div>
-        <div onClick={() => setComposing("photo")} style={{
+        {fabOpen && (
+          <>
+            <div onClick={() => { setFabOpen(false); setComposing("text"); }} style={{
+              display: "flex", alignItems: "center", gap: 10,
+            }}>
+              <span style={{
+                fontSize: 12.5, fontWeight: 600, color: G.text, background: G.card,
+                padding: "5px 10px", borderRadius: 8, border: `1px solid ${G.border}`,
+                boxShadow: "0 2px 8px #00000022",
+              }}>Text status</span>
+              <div style={{
+                width: 44, height: 44, borderRadius: "50%", background: G.card,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                cursor: "pointer", boxShadow: "0 2px 12px #00000033",
+                border: `1px solid ${G.border}`, flexShrink: 0,
+              }}>
+                <span style={{ fontSize: 18, fontWeight: 700, color: G.sub }}>Aa</span>
+              </div>
+            </div>
+            <div onClick={() => { setFabOpen(false); setComposing("photo"); }} style={{
+              display: "flex", alignItems: "center", gap: 10,
+            }}>
+              <span style={{
+                fontSize: 12.5, fontWeight: 600, color: G.text, background: G.card,
+                padding: "5px 10px", borderRadius: 8, border: `1px solid ${G.border}`,
+                boxShadow: "0 2px 8px #00000022",
+              }}>Photo / video</span>
+              <div style={{
+                width: 44, height: 44, borderRadius: "50%", background: G.card,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                cursor: "pointer", boxShadow: "0 2px 12px #00000033",
+                border: `1px solid ${G.border}`, flexShrink: 0,
+              }}>
+                {I.image(G.sub, 20)}
+              </div>
+            </div>
+          </>
+        )}
+        <div onClick={() => setFabOpen((v) => !v)} style={{
           width: 56, height: 56, borderRadius: "50%", background: G.accent,
           display: "flex", alignItems: "center", justifyContent: "center",
           cursor: "pointer", boxShadow: `0 4px 16px ${G.accentGlow}`,
+          transform: fabOpen ? "rotate(45deg)" : "rotate(0deg)",
+          transition: "transform .2s ease",
         }}>
-          {I.image("#fff", 24)}
+          {I.plus ? I.plus("#fff", 26) : <span style={{ fontSize: 28, fontWeight: 400, color: "#fff", lineHeight: 1 }}>+</span>}
         </div>
       </div>
+      {fabOpen && (
+        <div onClick={() => setFabOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 29 }}/>
+      )}
 
       {composing && (
         <Compose initialKind={composing === "text" ? "text" : "photo"}
