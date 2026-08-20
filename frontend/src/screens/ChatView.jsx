@@ -1403,7 +1403,16 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
             }}
             aria-label="Scroll to bottom"
           >
-            <I name="keyboard_arrow_down" sz={24}/>
+            {/* `I` is TalkEx's icon OBJECT (I.send, I.chevronDown, ...) — a
+                plain object of icon-generator functions, not itself a
+                component. `<I name="..." sz={24}/>` used the object as a
+                JSX element type directly, which is React error #130
+                ("Element type is invalid... got: object") the instant this
+                button actually renders. It only renders once a chat has
+                enough messages to scroll away from the bottom — which is
+                exactly why this only ever crashed on long chats and never
+                on short ones. */}
+            {I.chevronDown(G.text, 24)}
           </button>
         )}
       </div>
