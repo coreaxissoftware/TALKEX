@@ -9,7 +9,7 @@
 // online visit after a deploy "warms" the cache with whatever that build's
 // real filenames are, no build step needed to keep this file in sync.
 
-const SHELL_CACHE = "talkex-shell-v46";
+const SHELL_CACHE = "talkex-shell-v52";
 
 self.addEventListener("install", () => {
   // Take over immediately rather than waiting for every open tab to close
@@ -132,30 +132,36 @@ self.addEventListener("push", (event) => {
     payload = { title: "TalkEx", body: event.data.text() };
   }
 
+  const isCall = payload.data?.incoming_call === "true";
+
   event.waitUntil(
     self.registration.showNotification(payload.title || "TalkEx", {
       body: payload.body || "",
+      icon: "/icon-192.png",
+      badge: "/icon-192.png",
       data: payload.data || {},
-      // One notification per chat replaces the last rather than stacking —
-      // five separate OS notifications for five messages in the same
-      // conversation is noise; the badge/body already says what's new.
       tag: payload.data?.chat_id || "talkex",
       renotify: true,
+      requireInteraction: isCall,
+      vibrate: isCall ? [500, 200, 500, 200, 500, 1000] : [200, 100, 200],
+      silent: false,
     })
   );
 });
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
+  const chatId = event.notification.data?.chat_id;
   event.waitUntil(
     (async () => {
       const clientsList = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
       const existing = clientsList[0];
       if (existing) {
         existing.focus();
+        if (chatId) existing.postMessage({ type: "openChat", chatId });
         return;
       }
-      await self.clients.openWindow("/");
+      await self.clients.openWindow(chatId ? `/?chat=${chatId}` : "/");
     })()
   );
 });

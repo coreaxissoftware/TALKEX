@@ -46,15 +46,15 @@ export const getToken = () => token;
 // the registration payload and cleared the moment an account is created, so it
 // only ever credits the very first signup on this device — never a later one.
 const REF_KEY = "talkex_ref";
+const REF_DM_KEY = "talkex_ref_dm";
 (function captureReferral() {
   try {
     const url = new URL(window.location.href);
     const ref = url.searchParams.get("ref");
     if (!ref) return;
-    localStorage.setItem(REF_KEY, ref.slice(0, 32));
-    // Tidy the address bar the same way App.jsx's other one-shot query params
-    // (?invite=, ?meeting=, ?user=) get stripped after being read — the value
-    // is already safely stashed above.
+    const clean = ref.slice(0, 32);
+    localStorage.setItem(REF_KEY, clean);
+    localStorage.setItem(REF_DM_KEY, clean);
     url.searchParams.delete("ref");
     window.history.replaceState(null, "", url.pathname + url.search + url.hash);
   } catch { /* no URL / storage — nothing to capture */ }
@@ -64,6 +64,42 @@ export const storedReferral = () => {
 };
 export const clearStoredReferral = () => {
   try { localStorage.removeItem(REF_KEY); } catch { /* ignore */ }
+};
+export const storedRefDm = () => {
+  try { return localStorage.getItem(REF_DM_KEY) || undefined; } catch { return undefined; }
+};
+export const clearRefDm = () => {
+  try { localStorage.removeItem(REF_DM_KEY); } catch { /* ignore */ }
+};
+
+const PHONE_LINK_KEY = "talkex_phone_link";
+const PHONE_TEXT_KEY = "talkex_phone_text";
+(function capturePhoneLink() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    let phone = null;
+    let text = params.get("text");
+    const path = window.location.pathname.replace(/^\/+/, "");
+    if (path && /^\+?\d[\d\s-]{5,}$/.test(path)) {
+      phone = path.replace(/[\s-]/g, "");
+    }
+    if (!phone && params.get("phone")) {
+      phone = params.get("phone").replace(/[^\d+]/g, "");
+    }
+    if (!phone || phone.replace(/\D/g, "").length < 6) return;
+    localStorage.setItem(PHONE_LINK_KEY, phone);
+    if (text) localStorage.setItem(PHONE_TEXT_KEY, text.slice(0, 1000));
+    window.history.replaceState(null, "", "/");
+  } catch { /* ignore */ }
+})();
+export const storedPhoneLink = () => {
+  try { return localStorage.getItem(PHONE_LINK_KEY) || undefined; } catch { return undefined; }
+};
+export const storedPhoneText = () => {
+  try { return localStorage.getItem(PHONE_TEXT_KEY) || undefined; } catch { return undefined; }
+};
+export const clearPhoneLink = () => {
+  try { localStorage.removeItem(PHONE_LINK_KEY); localStorage.removeItem(PHONE_TEXT_KEY); } catch { /* ignore */ }
 };
 
 // ── Saved accounts (quick account switching) ──────────────────────────────────
@@ -354,6 +390,7 @@ export const Users = {
   // Given phone numbers from the device, return the ones already on TalkEx —
   // WhatsApp's "contacts who are on here" suggestion list.
   matchContacts: (phones) => post(`/users/match-contacts`, { phones }),
+  byPhone: (phone) => get(`/users/by-phone/${encodeURIComponent(phone)}`),
   block: (userId) => post(`/users/${userId}/block`),
   unblock: (userId) => remove(`/users/${userId}/block`),
   blocked: () => get("/blocks"),
@@ -1337,7 +1374,7 @@ export const E2EE = {
 // 404s otherwise), same as opening the chat any other way — this is a
 // convenience shortcut, not a new access grant.
 export function meetingLink(meetingId) {
-  return `${window.location.origin}/?meeting=${meetingId}`;
+  return `https://web.talkex.in/?meeting=${meetingId}`;
 }
 
 export function newClientMessageId() {

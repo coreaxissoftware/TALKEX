@@ -1267,6 +1267,8 @@ COLUMNS_ADDED_LATER = [
     ("users", "nearby_updated_at", "REAL"),
     ("users", "plan", "TEXT NOT NULL DEFAULT 'free'"),
     ("users", "plan_expires_at", "REAL"),
+    ("chat_members", "last_delivered_at", "REAL"),
+    ("chat_members", "last_read_at", "REAL"),
 ]
 
 

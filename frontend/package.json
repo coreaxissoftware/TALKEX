@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@capacitor/android": "^6.2.1",
+    "@capacitor/app": "^6.0.0",
     "@capacitor/cli": "^6.2.1",
     "@capacitor/core": "^6.2.1",
     "@capacitor/push-notifications": "^6.0.5",

@@ -290,26 +290,30 @@ def set_last_read(chat_id: str, user_id: str, seq: int):
     Deliberately never moves backwards: an out-of-order request from a second
     device would otherwise resurrect messages the user has already seen.
     """
+    import time
+    now = time.time()
     db.execute(
         """
         UPDATE chat_members
-        SET last_read_seq = ?
+        SET last_read_seq = ?, last_read_at = ?
         WHERE chat_id = ? AND user_id = ? AND last_read_seq < ?
         """,
-        (seq, chat_id, user_id, seq),
+        (seq, now, chat_id, user_id, seq),
     )
 
 
 def set_last_delivered(chat_id: str, user_id: str, seq: int):
     """Move a member's DELIVERY marker forward (never backwards), same rule as
     the read marker one step earlier in a message's life."""
+    import time
+    now = time.time()
     db.execute(
         """
         UPDATE chat_members
-        SET last_delivered_seq = ?
+        SET last_delivered_seq = ?, last_delivered_at = ?
         WHERE chat_id = ? AND user_id = ? AND last_delivered_seq < ?
         """,
-        (seq, chat_id, user_id, seq),
+        (seq, now, chat_id, user_id, seq),
     )
 
 
@@ -331,15 +335,17 @@ def mark_all_delivered(user_id: str) -> list[tuple[str, int]]:
         """,
         (user_id,),
     )
+    import time
+    now = time.time()
     advanced: list[tuple[str, int]] = []
     for row in behind:
         db.execute(
             """
             UPDATE chat_members
-            SET last_delivered_seq = ?
+            SET last_delivered_seq = ?, last_delivered_at = ?
             WHERE chat_id = ? AND user_id = ? AND last_delivered_seq < ?
             """,
-            (row["last_seq"], row["chat_id"], user_id, row["last_seq"]),
+            (row["last_seq"], now, row["chat_id"], user_id, row["last_seq"]),
         )
         advanced.append((row["chat_id"], row["last_seq"]))
     return advanced

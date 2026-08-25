@@ -281,7 +281,7 @@ export default function Planner({ toast, onOpenChat, chats, onJoinCall, me }) {
                            && confirm("Share this meeting's link now?")) {
                          Chats.createInvite(schedulingChat.id)
                            .then(async ({ invite_code: code }) => {
-                             const url = `${window.location.origin}/?invite=${code}`;
+                             const url = `https://web.talkex.in/?invite=${code}`;
                              if (navigator.share) await navigator.share({ url, text: `Join ${schedulingChat.name || "the chat"} on TalkEx` });
                              else { await navigator.clipboard.writeText(url); toast("Link copied"); }
                            })

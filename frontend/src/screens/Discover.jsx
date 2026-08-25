@@ -173,6 +173,7 @@ export default function Discover({ onOpenChat, onChanged, toast }) {
               border: `1px solid ${tab === option ? G.accent : G.border}`,
               background: tab === option ? G.accentSoft : "transparent",
               color: tab === option ? G.accentText : G.sub,
+              transition: "background .15s ease, border-color .15s ease, color .15s ease",
             }}>{option}</button>
         ))}
       </div>
@@ -214,7 +215,7 @@ export default function Discover({ onOpenChat, onChanged, toast }) {
                       online={person.online} photoId={person.avatar_attachment_id}/>
                   <div style={{ flex: 1 }}>
                     <div style={{ fontSize: 15, fontWeight: 600, display: "flex", alignItems: "center", gap: 5 }}>
-                      {person.name} {person.blue_tick && I.blueTick(13)}
+                      {person.name} {person.blue_tick ? I.blueTick(13) : null}
                     </div>
                     <div style={{ fontSize: 12.5, color: G.muted }}>@{person.username}</div>
                   </div>
@@ -245,7 +246,7 @@ export default function Discover({ onOpenChat, onChanged, toast }) {
           <Av av={person.avatar_letter} color={person.color} size={44} online={person.online} photoId={person.avatar_attachment_id}/>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 15, fontWeight: 600, display: "flex", alignItems: "center", gap: 5 }}>
-              {person.name} {person.blue_tick && I.blueTick(13)}
+              {person.name} {person.blue_tick ? I.blueTick(13) : null}
             </div>
             <div style={{ fontSize: 12.5, color: G.muted }}>
               @{person.username}{person.bio ? ` · ${person.bio}` : ""}

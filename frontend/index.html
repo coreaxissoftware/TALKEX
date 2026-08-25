@@ -36,7 +36,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes"/>
   <meta name="apple-mobile-web-app-title" content="TalkEx"/>
   <style>
-    *{margin:0;padding:0;box-sizing:border-box;}
+    *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
     /* Lock the document itself so the page can NEVER scroll. Without this, iOS
        Safari scrolls the whole document up when the keyboard opens to reveal a
        focused input — dragging the header off the top and the composer out of
@@ -45,7 +45,11 @@
        scroll happens inside the app's own flex:1/overflowY:auto panes instead. */
     html,body{height:100%;overflow:hidden;overscroll-behavior:none;}
     #root{height:100%;}
-    body{background:#f5f9fc;}
+    body{background:#f5f9fc;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility;}
+    button,input,textarea,select{font-family:inherit;}
+    button{-webkit-tap-highlight-color:transparent;touch-action:manipulation;}
+    button:active{transform:scale(0.97);transition:transform 0.08s ease-out;}
+    img,video{-webkit-user-drag:none;user-select:none;}
     /* Thin scrollbars everywhere — Firefox via scrollbar-width, everything
        else (Chrome/Safari/Edge) via the ::-webkit-scrollbar pseudo-elements. */
     *{scrollbar-width:thin;scrollbar-color:#8884 transparent;}
@@ -53,6 +57,9 @@
     ::-webkit-scrollbar-track{background:transparent;}
     ::-webkit-scrollbar-thumb{background:#88888844;border-radius:10px;}
     ::-webkit-scrollbar-thumb:hover{background:#88888888;}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @keyframes fadeIn{from{opacity:0}to{opacity:1}}
+    @keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
   </style>
   <script src="/theme-init.js"></script>
 </head>

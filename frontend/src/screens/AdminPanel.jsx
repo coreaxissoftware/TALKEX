@@ -259,7 +259,7 @@ function Integrations({ toast }) {
                          placeholder="••••••••"/>
       <IntegrationField label="Sending domain" value={mailgun.mailgun_domain}
                          onChange={(e) => setMailgun({ ...mailgun, mailgun_domain: e.target.value })}
-                         placeholder="talkex.coreaxis.cloud"/>
+                         placeholder="talkex.in"/>
       <IntegrationField label="Base URL" value={mailgun.mailgun_base_url}
                          onChange={(e) => setMailgun({ ...mailgun, mailgun_base_url: e.target.value })}
                          placeholder="https://api.mailgun.net"/>

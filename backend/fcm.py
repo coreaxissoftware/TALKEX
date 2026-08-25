@@ -45,9 +45,19 @@ def _load_credentials():
         return _creds
     raw = os.environ.get("FCM_SERVICE_ACCOUNT_JSON")
     if not raw or not _IMPORTS_OK:
+        if not _IMPORTS_OK:
+            logger.warning("fcm: google-auth/requests import failed — FCM disabled")
         return None
-    info = json.loads(raw)
+    try:
+        info = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.error("fcm: FCM_SERVICE_ACCOUNT_JSON is not valid JSON: %s", e)
+        return None
     _project_id = info.get("project_id")
+    if not _project_id:
+        logger.error("fcm: FCM_SERVICE_ACCOUNT_JSON has no project_id field")
+        return None
+    logger.info("fcm: credentials loaded for project %s", _project_id)
     _creds = service_account.Credentials.from_service_account_info(info, scopes=[_SCOPE])
     return _creds
 
@@ -92,17 +102,20 @@ def send(token: str, title: str, body: str, data: dict | None = None) -> str:
     is_call = str(str_data.get("incoming_call", "")).lower() == "true"
 
     if is_call:
-        # Calls go DATA-ONLY (no `notification` block): that forces
-        # onMessageReceived to run in the native service even when the app is
-        # killed, so it can raise the full-screen Accept/Decline call UI itself.
-        # Title/body ride along in data as a fallback for the notification text.
         str_data.setdefault("title", title)
         str_data.setdefault("body", body)
         message = {
             "message": {
                 "token": token,
                 "data": str_data,
-                "android": {"priority": "high"},
+                "android": {
+                    "priority": "high",
+                    "notification": {
+                        "sound": "default",
+                        "channel_id": "talkex_calls",
+                    },
+                },
+                "notification": {"title": title, "body": body},
             }
         }
     else:

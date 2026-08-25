@@ -566,18 +566,18 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
                   background: G.surface, border: `1px solid ${G.border}`, borderRadius: 12,
                   boxShadow: `0 8px 24px ${G.border}`, overflow: "hidden",
                 }}>
-                  {me.cover_attachment_id && (
+                  {me.cover_attachment_id ? (
                     <PhotoMenuRow icon={I.eye(G.text, 17)} label="View cover"
                                   onClick={() => { setCoverMenu(false); setViewingCover(true); }}/>
-                  )}
+                  ) : null}
                   <PhotoMenuRow icon={I.camera(G.text, 17)} label="Take photo"
                                 onClick={() => { setCoverMenu(false); coverCameraInputRef.current?.click(); }}/>
                   <PhotoMenuRow icon={I.image(G.text, 17)} label="Upload cover"
                                 onClick={() => { setCoverMenu(false); coverInputRef.current?.click(); }}/>
-                  {me.cover_attachment_id && (
+                  {me.cover_attachment_id ? (
                     <PhotoMenuRow icon={I.trash(G.red, 17)} label="Remove cover" danger
                                   onClick={() => { setCoverMenu(false); removeCoverPhoto(); }}/>
-                  )}
+                  ) : null}
                 </div>
               </>
             )}
@@ -611,25 +611,25 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
                     background: G.surface, border: `1px solid ${G.border}`, borderRadius: 12,
                     boxShadow: `0 8px 24px ${G.border}`, overflow: "hidden",
                   }}>
-                    {me.avatar_attachment_id && (
+                    {me.avatar_attachment_id ? (
                       <PhotoMenuRow icon={I.eye(G.text, 17)} label="View photo"
                                     onClick={() => { setPhotoMenu(false); setViewingPhoto(true); }}/>
-                    )}
+                    ) : null}
                     <PhotoMenuRow icon={I.camera(G.text, 17)} label="Take photo"
                                   onClick={() => { setPhotoMenu(false); cameraInputRef.current?.click(); }}/>
                     <PhotoMenuRow icon={I.image(G.text, 17)} label="Upload photo"
                                   onClick={() => { setPhotoMenu(false); avatarInputRef.current?.click(); }}/>
-                    {me.avatar_attachment_id && (
+                    {me.avatar_attachment_id ? (
                       <PhotoMenuRow icon={I.trash(G.red, 17)} label="Remove photo" danger
                                     onClick={() => { setPhotoMenu(false); removeAvatarPhoto(); }}/>
-                    )}
+                    ) : null}
                   </div>
                 </>
               )}
             </div>
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 19, fontWeight: 700, display: "flex", alignItems: "center", gap: 5 }}>
-                {me.name} {me.blue_tick && I.blueTick(16)}
+                {me.name} {me.blue_tick ? I.blueTick(16) : null}
               </div>
               <div onClick={() => setEditingUsername(true)}
                    style={{ fontSize: 13, color: G.sub, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 4 }}>
@@ -1016,16 +1016,17 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
         {!subSection && (<>
           <SRow icon={I.globe(G.text, 18)} label={t("settings.appearance.language")}
                 sub={LANGUAGES.find((l) => l.code === lang)?.nativeLabel || lang}/>
-          <div style={{ padding: "0 20px 14px", display: "flex", gap: 6 }}>
-            {LANGUAGES.map((l) => (
-              <button key={l.code} onClick={() => setLang(l.code)} style={{
-                flex: 1, padding: "9px 4px", borderRadius: 10, cursor: "pointer",
-                fontSize: 12.5, fontWeight: 600,
-                border: `1px solid ${lang === l.code ? G.accent : G.border}`,
-                background: lang === l.code ? G.accentSoft : "transparent",
-                color: lang === l.code ? G.accentText : G.sub,
-              }}>{l.nativeLabel}</button>
-            ))}
+          <div style={{ padding: "0 20px 14px" }}>
+            <select value={lang} onChange={(e) => setLang(e.target.value)} style={{
+              width: "100%", padding: "11px 14px", borderRadius: 12, cursor: "pointer",
+              fontSize: 14, fontWeight: 500, appearance: "auto",
+              border: `1px solid ${G.border}`, background: G.dim, color: G.text,
+              outline: "none",
+            }}>
+              {LANGUAGES.map((l) => (
+                <option key={l.code} value={l.code}>{l.nativeLabel} — {l.label}</option>
+              ))}
+            </select>
           </div>
 
           <div style={{ padding: "0 20px 14px" }}>
@@ -1059,12 +1060,12 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
                  onBack={() => setSubSection(null)}>
           <div style={{ padding: "12px 20px 20px", textAlign: "center" }}>
             <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
-              <Suspense fallback={null}><QrView value={`${window.location.origin}/?user=${me.username}`} size={220}/></Suspense>
+              <Suspense fallback={null}><QrView value={`https://web.talkex.in/?user=${me.username}`} size={220}/></Suspense>
             </div>
             <div style={{ fontSize: 16, fontWeight: 700, color: G.text }}>{me.name}</div>
             <div style={{ fontSize: 13, color: G.muted, marginBottom: 16 }}>@{me.username}</div>
             <Button style={{ width: "100%", marginBottom: 8 }} onClick={async () => {
-              const url = `${window.location.origin}/?user=${me.username}`;
+              const url = `https://web.talkex.in/?user=${me.username}`;
               if (navigator.share) { try { await navigator.share({ title: me.name, url }); } catch { /* cancelled */ } }
               else { navigator.clipboard?.writeText(url); toast("Profile link copied"); }
             }}>Share my code</Button>
@@ -1514,7 +1515,7 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
                 sub="Questions, bugs or feedback"
                 onClick={() => {
                   const subject = encodeURIComponent("TalkEx feedback");
-                  window.location.href = `mailto:support@coreaxis.cloud?subject=${subject}`;
+                  window.location.href = `mailto:support@talkex.in?subject=${subject}`;
                 }}/>
           <SRow icon={I.star(G.text, 18)} label="Send feedback"
                 sub="Answer a few quick questions"
@@ -2815,20 +2816,27 @@ function TwoStepSheet({ enabled, onClose, onChanged, toast }) {
 const HAS_DEVICE_CONTACTS = contactsAvailable();
 
 function InviteFriend({ me, toast }) {
-  const inviteUrl = `${window.location.origin}/?ref=${me?.username || ""}`;
+  const inviteUrl = `https://web.talkex.in/?ref=${me?.username || ""}`;
   const inviteText = `Hey! Join me on TalkEx — it's free, fast, and secure messaging & calling.\n${inviteUrl}`;
 
-  // Saved TalkEx contacts — used to show "already on TalkEx" vs "invite"
   const [contacts, setContacts] = useState(null);
   const [query, setQuery] = useState("");
   const [deviceContacts, setDeviceContacts] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [selected, setSelected] = useState(new Set());
+  const loadAttempted = useRef(false);
 
   useEffect(() => {
     Contacts.list().then(setContacts).catch(() => {});
   }, []);
 
-  // Load device contacts (phones), match against backend, merge in saved
+  useEffect(() => {
+    if (HAS_DEVICE_CONTACTS && !loadAttempted.current) {
+      loadAttempted.current = true;
+      loadDeviceContacts();
+    }
+  }, []);
+
   async function loadDeviceContacts() {
     if (!HAS_DEVICE_CONTACTS) return;
     setLoading(true);
@@ -2842,7 +2850,6 @@ function InviteFriend({ me, toast }) {
         }
       }
       if (entries.length === 0) { setLoading(false); return; }
-      // Ask backend which of these phones are TalkEx users
       const phones = entries.map((entry) => entry.phone);
       let matched = [];
       try {
@@ -2854,7 +2861,6 @@ function InviteFriend({ me, toast }) {
         onTalkEx: matchedSet.has(entry.phone),
         user: matched.find((m) => m.phone === entry.phone) || null,
       }));
-      // Sort: non-TalkEx users first (the ones you'd want to invite)
       merged.sort((a, b) => (a.onTalkEx === b.onTalkEx ? 0 : a.onTalkEx ? 1 : -1));
       setDeviceContacts(merged);
     } catch (problem) {
@@ -2864,23 +2870,44 @@ function InviteFriend({ me, toast }) {
   }
 
   const allContacts = deviceContacts || [];
+  const invitable = allContacts.filter((c) => !c.onTalkEx);
   const filtered = query.trim()
     ? allContacts.filter((c) => c.name.toLowerCase().includes(query.trim().toLowerCase())
         || c.phone.includes(query.trim()))
     : allContacts;
 
+  function toggleSelect(phone) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(phone)) next.delete(phone); else next.add(phone);
+      return next;
+    });
+  }
+
+  function selectAll() {
+    const phonesOnScreen = filtered.filter((c) => !c.onTalkEx).map((c) => c.phone);
+    const allSelected = phonesOnScreen.every((p) => selected.has(p));
+    setSelected((prev) => {
+      const next = new Set(prev);
+      phonesOnScreen.forEach((p) => allSelected ? next.delete(p) : next.add(p));
+      return next;
+    });
+  }
+
+  function sendBulkInvite() {
+    if (selected.size === 0) { toast("Select contacts to invite"); return; }
+    const phones = Array.from(selected).join(",");
+    const encoded = encodeURIComponent(inviteText);
+    window.open(`sms:${phones}?&body=${encoded}`, "_self");
+  }
+
   function sendSmsInvite(phone) {
-    // Open the native SMS composer with the invite message pre-filled.
-    // `sms:` URI is the standard way to do this — works on Android (Chrome),
-    // iOS Safari, and Capacitor WebView. The `?body=` or `&body=` form varies
-    // by platform, but `?&body=` covers both Android (needs &) and iOS (needs ?).
     const encoded = encodeURIComponent(inviteText);
     window.open(`sms:${phone}?&body=${encoded}`, "_self");
   }
 
   return (
     <div style={{ padding: "4px 0 18px" }}>
-      {/* Share invite link */}
       <div style={{ padding: "0 20px", marginBottom: 14 }}>
         <div style={{ fontSize: 13, color: G.muted, marginBottom: 12 }}>
           Invite friends to join TalkEx. When {me?.blue_tick ? "" : "10 friends sign up through your link, you earn the "}
@@ -2889,7 +2916,7 @@ function InviteFriend({ me, toast }) {
         </div>
         <Button style={{ width: "100%", marginBottom: 8 }} onClick={async () => {
           if (navigator.share) {
-            try { await navigator.share({ title: "TalkEx", text: inviteText, url: inviteUrl }); } catch { /* cancelled */ }
+            try { await navigator.share({ title: "TalkEx", text: inviteText }); } catch { /* cancelled */ }
           } else {
             navigator.clipboard?.writeText(inviteText);
             toast("Invite link copied");
@@ -2901,31 +2928,65 @@ function InviteFriend({ me, toast }) {
         }}>Copy link</Button>
       </div>
 
-      {/* Device contacts */}
-      {HAS_DEVICE_CONTACTS && !deviceContacts && (
+      {HAS_DEVICE_CONTACTS && loading && !deviceContacts && (
+        <div style={{ padding: "20px", textAlign: "center", fontSize: 13, color: G.muted }}>
+          Loading contacts...
+        </div>
+      )}
+
+      {HAS_DEVICE_CONTACTS && !loading && !deviceContacts && (
         <div style={{ padding: "0 20px", marginBottom: 14 }}>
           <Button variant="ghost" style={{ width: "100%" }} onClick={loadDeviceContacts}>
-            {loading ? "Loading…" : "📇 Load phone contacts"}
+            Load phone contacts
           </Button>
         </div>
       )}
 
       {deviceContacts && (
         <>
-          <div style={{ padding: "0 20px 10px" }}>
+          <div style={{ padding: "0 20px 10px", display: "flex", gap: 8, alignItems: "center" }}>
             <input value={query} onChange={(e) => setQuery(e.target.value)}
-                   placeholder="Search" style={{
-              width: "100%", padding: "8px 12px", borderRadius: 10,
+                   placeholder="Search contacts" style={{
+              flex: 1, padding: "8px 12px", borderRadius: 10,
               background: G.dim, border: `1px solid ${G.border}`, color: G.text,
               fontSize: 13.5, outline: "none", boxSizing: "border-box",
             }}/>
           </div>
+
+          {invitable.length > 0 && (
+            <div style={{ padding: "0 20px 8px", display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between" }}>
+              <button onClick={selectAll} style={{
+                background: "none", border: "none", color: G.accent, fontSize: 12.5,
+                fontWeight: 600, cursor: "pointer", padding: 0,
+              }}>
+                {filtered.filter((c) => !c.onTalkEx).every((c) => selected.has(c.phone)) ? "Deselect all" : "Select all"}
+              </button>
+              {selected.size > 0 && (
+                <Button size="sm" onClick={sendBulkInvite} style={{ fontSize: 12.5, padding: "5px 14px" }}>
+                  Invite {selected.size} selected
+                </Button>
+              )}
+            </div>
+          )}
+
           <div style={{ maxHeight: 350, overflowY: "auto" }}>
             {filtered.map((contact, idx) => (
-              <div key={contact.phone + idx} style={{
+              <div key={contact.phone + idx} onClick={() => !contact.onTalkEx && toggleSelect(contact.phone)} style={{
                 display: "flex", alignItems: "center", gap: 12,
                 padding: "10px 20px", borderBottom: `1px solid ${G.border}`,
+                cursor: contact.onTalkEx ? "default" : "pointer",
               }}>
+                {!contact.onTalkEx && (
+                  <div style={{
+                    width: 22, height: 22, borderRadius: 6, flexShrink: 0,
+                    border: `2px solid ${selected.has(contact.phone) ? G.accent : G.muted + "66"}`,
+                    background: selected.has(contact.phone) ? G.accent : "transparent",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    transition: "background .15s ease, border-color .15s ease",
+                  }}>
+                    {selected.has(contact.phone) && I.check("#fff", 14)}
+                  </div>
+                )}
                 <div style={{
                   width: 40, height: 40, borderRadius: "50%",
                   background: contact.onTalkEx ? G.accent + "22" : G.dim,
@@ -2939,11 +3000,11 @@ function InviteFriend({ me, toast }) {
                     {contact.name}
                   </div>
                   <div style={{ fontSize: 12, color: contact.onTalkEx ? G.accent : G.muted }}>
-                    {contact.onTalkEx ? "On TalkEx ✓" : contact.phone}
+                    {contact.onTalkEx ? "On TalkEx" : contact.phone}
                   </div>
                 </div>
                 {!contact.onTalkEx && (
-                  <button onClick={() => sendSmsInvite(contact.phone)} style={{
+                  <button onClick={(e) => { e.stopPropagation(); sendSmsInvite(contact.phone); }} style={{
                     padding: "6px 14px", borderRadius: 8, border: `1px solid ${G.accent}`,
                     background: "transparent", color: G.accent, fontSize: 12.5,
                     fontWeight: 600, cursor: "pointer", flexShrink: 0,
@@ -2953,7 +3014,7 @@ function InviteFriend({ me, toast }) {
             ))}
             {filtered.length === 0 && (
               <div style={{ fontSize: 13, color: G.muted, textAlign: "center", padding: 20 }}>
-                {query ? "No matches" : "No contacts loaded"}
+                {query ? "No matches" : "No contacts found"}
               </div>
             )}
           </div>
@@ -3173,7 +3234,7 @@ const PRIVACY_SECTIONS = [
   },
   {
     title: "Contact",
-    body: "Questions about your data or these terms? Email support@coreaxis.cloud. TalkEx is a product of CoreAxis (coreaxis.cloud).",
+    body: "Questions about your data or these terms? Email support@talkex.in. TalkEx is a product of CoreAxis (coreaxis.cloud).",
   },
 ];
 

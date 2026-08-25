@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import {
   ApiError, Auth, Calls, Chats, Contacts, E2EE, Me, Meetings, Messages, Scheduled, Search, Users,
   clearToken, flushEverything, getToken, rememberAccount,
+  storedRefDm, clearRefDm, storedPhoneLink, storedPhoneText, clearPhoneLink,
 } from "./api.js";
 import { initE2EE, clearE2EEKeys } from "./e2ee.js";
 import { initNativePush, stopNativePush } from "./pushNative.js";
@@ -158,9 +159,11 @@ export default function App() {
     document.body.style.background = G.bg;
   }, [theme]);
 
+  const toastTimer = useRef(null);
   const toast = useCallback((text) => {
     setToastText(text);
-    setTimeout(() => setToastText(""), 2200);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToastText(""), 2200);
   }, []);
 
   // Reachable straight from the desktop rail, not just buried in Settings →
@@ -185,6 +188,22 @@ export default function App() {
       setTab("chats");
       try { const chat = await Chats.get(chatId); if (chat) setOpenChat(chat); } catch { /* ignore */ }
     });
+  }, [me?.id]);
+
+  // Request all runtime permissions upfront on native Android so the user
+  // approves them once right after sign-in instead of being surprised later.
+  useEffect(() => {
+    if (!me?.id) return;
+    const PERM_KEY = "talkex_permissions_requested";
+    if (localStorage.getItem(PERM_KEY)) return;
+    localStorage.setItem(PERM_KEY, "1");
+    (async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+        stream.getTracks().forEach((t) => t.stop());
+      } catch { /* user denied or no device — fine */ }
+      try { navigator.geolocation.getCurrentPosition(() => {}, () => {}, { timeout: 1 }); } catch {}
+    })();
   }, [me?.id]);
 
   // Initialize E2EE after user is loaded
@@ -349,6 +368,49 @@ export default function App() {
       .catch((problem) => toast(problem.message || "That profile link is invalid"));
   }, [me]);
 
+  useEffect(() => {
+    if (!me) return;
+    const refUsername = storedRefDm();
+    if (!refUsername) return;
+    clearRefDm();
+    Users.list(refUsername)
+      .then((matches) => {
+        const person = (matches || []).find((u) => u.username?.toLowerCase() === refUsername.toLowerCase());
+        if (!person || person.id === me.id) return;
+        return Chats.dm(person.id);
+      })
+      .then((chat) => { if (chat) { reloadChats(); setOpenChat(chat); } })
+      .catch(() => {});
+  }, [me]);
+
+  useEffect(() => {
+    if (!me) return;
+    const chatId = new URLSearchParams(window.location.search).get("chat");
+    if (!chatId) return;
+    window.history.replaceState(null, "", window.location.pathname);
+    Chats.get(chatId).then(setOpenChat).catch(() => {});
+  }, [me]);
+
+  useEffect(() => {
+    if (!me) return;
+    const phone = storedPhoneLink();
+    if (!phone) return;
+    const prefill = storedPhoneText();
+    clearPhoneLink();
+    Users.byPhone(phone)
+      .then((person) => {
+        if (!person || person.id === me.id) return null;
+        return Chats.dm(person.id);
+      })
+      .then((chat) => {
+        if (!chat) return;
+        reloadChats();
+        if (prefill) chat.draft = prefill;
+        setOpenChat(chat);
+      })
+      .catch(() => toast("No TalkEx account found for that number"));
+  }, [me]);
+
   // Just a count for the tab badge — Planner itself fetches the real lists.
   // "What have I got waiting" mirrors Planner's own framing of the screen:
   // upcoming meetings plus messages still queued to send.
@@ -457,21 +519,35 @@ export default function App() {
     function onPop() {
       if (suppressPop.current > 0) { suppressPop.current -= 1; return; }
       const layers = backLayersRef.current;
-      if (layers.length === 0) {
-        // Nothing left to close — re-seed one entry so a subsequent back still
-        // has something to consume rather than immediately exiting mid-use.
-        // (When the user genuinely wants to leave, a second back with no
-        // layers open falls through to the platform's real exit.)
-        return;
-      }
-      // The back press already consumed one history entry, so our depth drops
-      // by one; update it BEFORE closing the layer so the sync effect above
-      // sees a matching count and doesn't try to rewrite history again.
+      if (layers.length === 0) return;
       backDepth.current = layers.length - 1;
       layers[layers.length - 1]();
     }
     window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
+
+    // On Android (Capacitor), the hardware back button bypasses popstate when
+    // the WebView history is empty and exits the app immediately. The
+    // @capacitor/app plugin intercepts it BEFORE the WebView processes it, so
+    // we can close layers instead of exiting.
+    let capCleanup;
+    import("@capacitor/app").then(({ App }) => {
+      App.addListener("backButton", ({ canGoBack }) => {
+        const layers = backLayersRef.current;
+        if (layers.length > 0) {
+          backDepth.current = Math.max(0, backDepth.current - 1);
+          layers[layers.length - 1]();
+        } else if (canGoBack) {
+          window.history.back();
+        } else {
+          App.minimizeApp();
+        }
+      }).then((handle) => { capCleanup = handle; });
+    }).catch(() => {});
+
+    return () => {
+      window.removeEventListener("popstate", onPop);
+      capCleanup?.remove();
+    };
   }, []);
 
   // ── Realtime ───────────────────────────────────────────────────────────────
@@ -707,6 +783,9 @@ export default function App() {
     // instead and lets that tab's own, already-correct flush do the work.
     function onSwMessage(event) {
       if (event.data?.type === "flush") flush();
+      if (event.data?.type === "openChat" && event.data.chatId) {
+        Chats.get(event.data.chatId).then(setOpenChat).catch(() => {});
+      }
     }
     navigator.serviceWorker?.addEventListener?.("message", onSwMessage);
     return () => {
@@ -994,7 +1073,7 @@ export default function App() {
                        onInvite={() => {
                          setBlueTickNudge(null);
                          // Trigger the Web Share invite with the user's referral link
-                         const url = `${window.location.origin}/?ref=${me?.username || ""}`;
+                         const url = `https://web.talkex.in/?ref=${me?.username || ""}`;
                          if (navigator.share) {
                            navigator.share({ title: "Join me on TalkEx", text: "Hey! Try TalkEx — it's free, fast, and secure messaging. Join here:", url }).catch(() => {});
                          } else {
@@ -1241,7 +1320,8 @@ function TopBar({ status, tab, onNewChat, onMenuClick, onNewCall, onCallsMenuCli
   const label = tab === "admin" ? "Admin" : (entry?.i18n ? t(entry.i18n) : "TalkEx");
   return (
     <div style={{
-      display: "flex", alignItems: "center", gap: 10, padding: "14px 16px",
+      display: "flex", alignItems: "center", gap: 10,
+      padding: "14px 16px", paddingTop: "max(14px, env(safe-area-inset-top, 0px))",
       borderBottom: `1px solid ${G.border}`, background: G.surface,
       position: "sticky", top: 0, zIndex: 5, flexShrink: 0,
     }}>
@@ -1344,6 +1424,7 @@ function TabBar({ tab, onChange, unread, plannerCount, missedCalls, tabs = TAB_K
               <div style={{
                 fontSize: 10.5, marginTop: 3, color: active ? G.accentText : G.muted,
                 fontWeight: active ? 600 : 400,
+                transition: "color .15s ease",
               }}>{entry.i18n ? t(entry.i18n) : entry.label}</div>
 
               {badgeFor(entry.key) > 0 && (
@@ -1659,7 +1740,11 @@ function Toast({ text }) {
       background: G.card2, border: `1px solid ${G.border}`, color: G.text,
       padding: "11px 18px", borderRadius: 14, fontSize: 13.5, zIndex: 90,
       maxWidth: 360, textAlign: "center", boxShadow: "0 8px 30px #00000066",
-    }}>{text}</div>
+      animation: "talkexToastIn .25s cubic-bezier(.32,.72,.37,1.1)",
+    }}>
+      <style>{`@keyframes talkexToastIn{from{opacity:0;transform:translateX(-50%) translateY(16px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}`}</style>
+      {text}
+    </div>
   );
 }
 

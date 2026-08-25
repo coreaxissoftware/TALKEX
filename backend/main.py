@@ -2596,6 +2596,26 @@ def match_contacts(request: MatchContactsRequest, user: dict = Depends(current_u
     return matched
 
 
+@app.get("/users/by-phone/{phone:path}")
+def get_user_by_phone(phone: str, user: dict = Depends(current_user)):
+    digits = "".join(ch for ch in (phone or "") if ch.isdigit())
+    if len(digits) < 6:
+        raise HTTPException(400, "Invalid phone number")
+    suffix = digits[-10:]
+    row = db.query_one(
+        "SELECT * FROM users WHERE phone LIKE ? AND disabled_at IS NULL AND phone != ''",
+        (f"%{suffix}",),
+    )
+    if not row and len(digits) > 10:
+        row = db.query_one(
+            "SELECT * FROM users WHERE phone LIKE ? AND disabled_at IS NULL AND phone != ''",
+            (f"%{digits}",),
+        )
+    if not row:
+        raise HTTPException(404, "No user with that phone number")
+    return public_user(row, viewer_id=user["id"])
+
+
 @app.get("/users/{user_id}")
 def get_user(user_id: str, user: dict = Depends(current_user)):
     row = db.query_one("SELECT * FROM users WHERE id = ?", (user_id,))
@@ -4377,7 +4397,9 @@ def get_read_state(chat_id: str, user: dict = Depends(current_user)):
         """
         SELECT m.user_id AS user_id,
                m.last_delivered_seq AS last_delivered_seq,
-               CASE WHEN u.show_read_receipts = 1 THEN m.last_read_seq ELSE NULL END AS last_read_seq
+               m.last_delivered_at AS last_delivered_at,
+               CASE WHEN u.show_read_receipts = 1 THEN m.last_read_seq ELSE NULL END AS last_read_seq,
+               CASE WHEN u.show_read_receipts = 1 THEN m.last_read_at ELSE NULL END AS last_read_at
         FROM chat_members m
         JOIN users u ON u.id = m.user_id
         WHERE m.chat_id = ? AND m.user_id != ?

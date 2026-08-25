@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Actions, Chats, Contacts, Me, Users } from "../api.js";
 import { Av, Button, ContextMenu, G, I, SRow, Spinner, whenLabel } from "../ui.jsx";
 import { MuteSheet, LockSheet, FolderSheet, muteLabel } from "./ChatView.jsx";
@@ -17,8 +17,10 @@ const LONG_PRESS_MOVE_TOLERANCE = 8;
 // (archive/clear/delete) opens further and needs an explicit tap on one of
 // the revealed icons, since those are more consequential.
 const PIN_SWIPE_TRIGGER = 46;
+const ARCHIVE_SWIPE_TRIGGER = 140;
 const ACTIONS_WIDTH = 168;
 const ACTIONS_OPEN_TRIGGER = 90;
+const DELETE_SWIPE_TRIGGER = 140;
 // Below this much horizontal travel a pointer gesture is treated as a tap
 // (open the chat), not a swipe — finger jitter of a few pixels during a tap
 // must never register as a drag, or the tap gets eaten and the chat needs a
@@ -52,6 +54,7 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [contactUserIds, setContactUserIds] = useState(new Set());
+  const [contactNameMap, setContactNameMap] = useState(new Map());
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [menu, setMenu] = useState(null); // { x, y, chat } for the right-click/long-press row menu
@@ -59,6 +62,7 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
   const [contactFor, setContactFor] = useState(null); // chat currently showing the contact-info sheet
   const [lockFor, setLockFor] = useState(null); // { chat, mode: 'set' | 'remove' } for the chat-lock sheet
   const [folderFor, setFolderFor] = useState(null); // chat currently showing the "add to list" sheet
+  const [confirmDelete, setConfirmDelete] = useState(null); // chat awaiting delete confirmation
   const [showStarred, setShowStarred] = useState(false);
   const [appLockOn, setAppLockOn] = useState(isAppLockEnabled);
   const [appLockSetupOpen, setAppLockSetupOpen] = useState(false);
@@ -70,7 +74,13 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
   // its peer's phone number matches something in your saved address book.
   useEffect(() => {
     Contacts.list()
-      .then((rows) => setContactUserIds(new Set(rows.filter((c) => c.user).map((c) => c.user.id))))
+      .then((rows) => {
+        const withUser = rows.filter((c) => c.user);
+        setContactUserIds(new Set(withUser.map((c) => c.user.id)));
+        const nameMap = new Map();
+        withUser.forEach((c) => { if (c.name && c.user?.id) nameMap.set(c.user.id, c.name); });
+        setContactNameMap(nameMap);
+      })
       .catch(() => {});
   }, []);
 
@@ -104,10 +114,10 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
 
     if (query.trim()) {
       const needle = query.trim().toLowerCase();
-      list = list.filter((chat) => displayName(chat).toLowerCase().includes(needle));
+      list = list.filter((chat) => displayName(chat, contactNameMap).toLowerCase().includes(needle));
     }
     return list;
-  }, [activeChats, archivedChats, category, contactUserIds, query]);
+  }, [activeChats, archivedChats, category, contactUserIds, contactNameMap, query]);
 
   async function togglePin(chat) {
     try {
@@ -129,13 +139,15 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
     onChanged();
   }
 
-  async function deleteChat(chat) {
-    // "Delete" here means what WhatsApp's own "Delete chat" means: your view
-    // of the history is wiped and it drops off your active list. The chat
-    // itself (and the other side's copy) is untouched — a DM peer or group
-    // still exists, exactly like clearing plus archiving.
-    await Chats.clear(chat.id);
-    await Chats.settings(chat.id, { archived: true });
+  function deleteChat(chat) {
+    setConfirmDelete(chat);
+  }
+
+  async function confirmDeleteChat() {
+    if (!confirmDelete) return;
+    await Chats.clear(confirmDelete.id);
+    await Chats.settings(confirmDelete.id, { archived: true });
+    setConfirmDelete(null);
     toast("Chat deleted");
     onChanged();
   }
@@ -402,7 +414,8 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
                  onDelete={() => deleteChat(chat)}
                  onMenu={(x, y) => setMenu({ x, y, chat })}
                  selectMode={selectMode} selected={selectedIds.has(chat.id)}
-                 onToggleSelect={() => toggleSelected(chat.id)}/>
+                 onToggleSelect={() => toggleSelected(chat.id)}
+                 contactNames={contactNameMap}/>
       ))}
 
       {visible.length === 0 && (
@@ -445,7 +458,8 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
                  onDelete={() => deleteChat(chat)}
                  onMenu={(x, y) => setMenu({ x, y, chat })}
                  selectMode={selectMode} selected={selectedIds.has(chat.id)}
-                 onToggleSelect={() => toggleSelected(chat.id)}/>
+                 onToggleSelect={() => toggleSelected(chat.id)}
+                 contactNames={contactNameMap}/>
       ))}
 
       {menu && (
@@ -475,6 +489,27 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
                        toast(folder ? `Added to "${folder}"` : "Removed from list");
                        onChanged();
                      }}/>
+      )}
+      {confirmDelete && (
+        <div onClick={() => setConfirmDelete(null)} style={{
+          position: "fixed", inset: 0, background: "#00000066", zIndex: 60,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          animation: "talkexFadeIn .18s ease",
+        }}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            background: G.surface, borderRadius: 16, padding: "22px 20px 16px", width: 300,
+            maxWidth: "85vw", boxShadow: "0 12px 40px #00000044", border: `1px solid ${G.border}`,
+          }}>
+            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>Delete chat?</div>
+            <div style={{ fontSize: 13.5, color: G.sub, marginBottom: 18, lineHeight: 1.5 }}>
+              Messages will be cleared and the chat will be archived. This can't be undone.
+            </div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <Button variant="ghost" onClick={() => setConfirmDelete(null)}>Cancel</Button>
+              <Button variant="danger" onClick={confirmDeleteChat}>Delete</Button>
+            </div>
+          </div>
+        </div>
       )}
       {headerMenuPos && (
         <ContextMenu x={headerMenuPos.x} y={headerMenuPos.y} items={headerMenuItems()} onClose={onHeaderMenuClose}/>
@@ -668,13 +703,16 @@ function ContactQuickSheet({ chat, onClose, toast, onChanged }) {
   );
 }
 
-function displayName(chat) {
+function displayName(chat, contactNames) {
+  if (chat.type === "dm" && chat.peer_id && contactNames?.get(chat.peer_id)) {
+    return contactNames.get(chat.peer_id);
+  }
   if (chat.name) return chat.name;
   return chat.type === "dm" ? "Direct message" : "Chat";
 }
 
-function ChatRow({ chat, typing, onOpen, onPin, onArchive, onClear, onDelete, onMenu,
-                   selectMode, selected, onToggleSelect }) {
+const ChatRow = memo(function ChatRow({ chat, typing, onOpen, onPin, onArchive, onClear, onDelete, onMenu,
+                   selectMode, selected, onToggleSelect, contactNames }) {
   const typingNames = Object.values(typing || {});
   const [dragX, setDragX] = useState(0);
   const dragging = useRef(false);
@@ -778,7 +816,7 @@ function ChatRow({ chat, typing, onOpen, onPin, onArchive, onClear, onDelete, on
     if (axis.current !== "x") return;   // vertical scroll or still undecided
     // Right swipe (positive) is a short one-shot pin gesture; left swipe
     // (negative) opens further to reveal three action icons.
-    setDragX(Math.max(-ACTIONS_WIDTH, Math.min(PIN_SWIPE_TRIGGER + 20, delta)));
+    setDragX(Math.max(-ACTIONS_WIDTH, Math.min(ARCHIVE_SWIPE_TRIGGER + 20, delta)));
   }
 
   function onPointerUpOrCancel(event) {
@@ -792,8 +830,14 @@ function ChatRow({ chat, typing, onOpen, onPin, onArchive, onClear, onDelete, on
     // scrolling) must never open the chat.
     if (wasScroll) { setDragX(0); return; }
 
-    if (dragX >= PIN_SWIPE_TRIGGER) {
+    if (dragX >= ARCHIVE_SWIPE_TRIGGER) {
+      onArchive();
+      setDragX(0);
+    } else if (dragX >= PIN_SWIPE_TRIGGER) {
       onPin();
+      setDragX(0);
+    } else if (Math.abs(dragX) >= DELETE_SWIPE_TRIGGER) {
+      onDelete();
       setDragX(0);
     } else if (dragX <= -ACTIONS_OPEN_TRIGGER) {
       setDragX(-ACTIONS_WIDTH);
@@ -842,10 +886,14 @@ function ChatRow({ chat, typing, onOpen, onPin, onArchive, onClear, onDelete, on
         justifyContent: "space-between",
       }}>
         <div style={{
-          width: ACTIONS_WIDTH, display: "flex", alignItems: "center",
-          justifyContent: "flex-start", paddingLeft: 20, background: G.accentSoft,
+          width: ARCHIVE_SWIPE_TRIGGER + 20, display: "flex", alignItems: "center",
+          justifyContent: "flex-start", paddingLeft: 20,
+          background: dragX >= ARCHIVE_SWIPE_TRIGGER ? G.yellow : G.accentSoft,
+          transition: "background 0.15s",
         }}>
-          {I.pin(G.accent, 18)}
+          {dragX >= ARCHIVE_SWIPE_TRIGGER
+            ? I.archive("#fff", 18)
+            : I.pin(G.accent, 18)}
         </div>
         <div style={{ display: "flex" }}>
           <SwipeAction color={G.yellow} icon={I.archive("#fff", 17)} label="Archive"
@@ -916,7 +964,7 @@ function ChatRow({ chat, typing, onOpen, onPin, onArchive, onClear, onDelete, on
             <div style={{
               fontSize: 14, fontWeight: 600, whiteSpace: "nowrap",
               overflow: "hidden", textOverflow: "ellipsis",
-            }}>{displayName(chat)}</div>
+            }}>{displayName(chat, contactNames)}</div>
             {chat.peer_blue_tick ? <span style={{ flexShrink: 0, lineHeight: 0 }}>{I.blueTick(14)}</span> : null}
             {chat.is_verified ? I.verified() : null}
             {chat.is_locked ? I.lock() : null}
@@ -946,7 +994,7 @@ function ChatRow({ chat, typing, onOpen, onPin, onArchive, onClear, onDelete, on
       </div>
     </div>
   );
-}
+});
 
 function SwipeAction({ color, icon, label, onClick }) {
   return (

@@ -302,10 +302,6 @@ export default function CallOverlay({
     if (!call || call.phase !== "active") setMinimized(false);
   }, [call?.phase, call?.chatId]);
 
-  // Ringback (outgoing) / ringtone (incoming) — synthesized with Web Audio
-  // so there's no binary asset to ship or license. Neither phase used to
-  // play any sound at all: "Ringing…" was just text. Stops itself the
-  // moment the phase moves on (answered, declined, cancelled, timed out).
   useEffect(() => {
     const phase = call?.phase;
     if (phase !== "outgoing" && phase !== "incoming") return undefined;
@@ -317,13 +313,13 @@ export default function CallOverlay({
     let stopped = false;
     const timers = [];
 
-    function beep(freq1, freq2, duration) {
+    function tone(freq1, freq2, duration, volume) {
       if (stopped) return;
       const now = ctx.currentTime;
       const gain = ctx.createGain();
       gain.gain.setValueAtTime(0, now);
-      gain.gain.linearRampToValueAtTime(0.16, now + 0.03);
-      gain.gain.setValueAtTime(0.16, Math.max(now + 0.03, now + duration - 0.03));
+      gain.gain.linearRampToValueAtTime(volume, now + 0.02);
+      gain.gain.setValueAtTime(volume, Math.max(now + 0.02, now + duration - 0.04));
       gain.gain.linearRampToValueAtTime(0, now + duration);
       gain.connect(ctx.destination);
       [freq1, freq2].forEach((freq) => {
@@ -336,17 +332,26 @@ export default function CallOverlay({
       });
     }
 
+    function ringChord(startDelay) {
+      if (stopped) return;
+      timers.push(setTimeout(() => {
+        if (stopped) return;
+        tone(523.25, 659.25, 0.15, 0.18);
+        timers.push(setTimeout(() => { if (!stopped) tone(783.99, 987.77, 0.15, 0.16); }, 170));
+        timers.push(setTimeout(() => { if (!stopped) tone(1046.5, 1318.5, 0.12, 0.12); }, 340));
+      }, startDelay));
+    }
+
     function schedule() {
       if (stopped) return;
       if (phase === "outgoing") {
-        // Classic ringback cadence: ~1s tone, ~3s silence.
-        beep(440, 480, 1.0);
+        tone(440, 480, 1.0, 0.14);
         timers.push(setTimeout(schedule, 4000));
       } else {
-        // Phone-ring cadence: two short bursts, then a pause.
-        beep(950, 950, 0.4);
-        timers.push(setTimeout(() => beep(950, 950, 0.4), 550));
-        timers.push(setTimeout(schedule, 2200));
+        ringChord(0);
+        ringChord(600);
+        if (navigator.vibrate) navigator.vibrate([400, 200, 400, 1200]);
+        timers.push(setTimeout(schedule, 2400));
       }
     }
     schedule();
@@ -354,6 +359,7 @@ export default function CallOverlay({
     return () => {
       stopped = true;
       timers.forEach(clearTimeout);
+      if (navigator.vibrate) navigator.vibrate(0);
       ctx.close?.().catch(() => {});
     };
   }, [call?.phase]);
@@ -591,7 +597,15 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
   // Tap the small self/peer tile to swap which feed is the big one — the
   // WhatsApp "tap to make my camera the main view" gesture. Pure local UI.
   const [swapped, setSwapped] = useState(false);
+  const [controlsVisible, setControlsVisible] = useState(true);
+  const hideTimer = useRef(null);
 
+  function resetHideTimer() {
+    clearTimeout(hideTimer.current);
+    setControlsVisible(true);
+    hideTimer.current = setTimeout(() => setControlsVisible(false), 4000);
+  }
+  useEffect(() => () => clearTimeout(hideTimer.current), []);
   // The remote peer's OWN media state, not mine — turning my camera off must
   // not blank out video they're still sending. remoteCameraOff arrives via the
   // call_media_state ping (useCall.js), so their tile shows their identity the
@@ -602,6 +616,11 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
   // Which stream is on the main stage vs. in the little corner tile.
   const mainIsLocal = swapped && hasLocalVideo;
   const showMainVideo = mainIsLocal ? hasLocalVideo : hasRemoteVideo;
+
+  useEffect(() => {
+    if (showMainVideo && call.phase === "active") resetHideTimer();
+    else { clearTimeout(hideTimer.current); setControlsVisible(true); }
+  }, [showMainVideo, call.phase]);
 
   // A front camera's own preview should look like a mirror — that's how
   // everyone expects to see themselves (their right hand on their visual
@@ -654,7 +673,8 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
           something inside this area ever again asks for more room than
           it's actually got, it gets clipped here instead of pushing the
           Mute/Camera/End call bar below it clean off the screen. */}
-      <div style={{ flex: 1, position: "relative", overflow: "hidden", minHeight: 0 }}>
+      <div onClick={() => { if (showMainVideo) { controlsVisible ? setControlsVisible(false) : resetHideTimer(); } }}
+           style={{ flex: 1, position: "relative", overflow: "hidden", minHeight: 0 }}>
         {/* Remote video always mounted (even when hidden) so remote audio
             plays on a voice-only call and setSinkId has an element to route
             through. When swapped, the remote feed rides in the corner tile
@@ -676,10 +696,11 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
             subtitle={call.onHold ? "On Hold" : call.phase === "active" ? mmss(call.duration) : (call.ringConfirmed ? "Ringing…" : "Calling…")}/>
         )}
 
-        {showMainVideo && (
+        {showMainVideo && controlsVisible && (
           <div style={{
             position: "absolute", top: isLandscape ? 8 : 16, left: 0, right: 0,
             textAlign: "center", fontSize: 13, color: "#ffffffcc",
+            transition: "opacity 0.25s ease",
           }}>
             {call.peerName} · {call.onHold ? "On Hold" : mmss(call.duration)}
           </div>
@@ -750,22 +771,21 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
 
       <div style={{
         display: "flex", justifyContent: "center", gap: isLandscape ? 12 : 16,
-        // Landscape: compact single row with minimal padding — every pixel
-        // of vertical space matters when the screen is short and wide.
-        // Portrait: generous bottom padding absorbs the iPhone safe area.
         padding: isLandscape ? "8px 20px 12px" : "0 20px 60px",
         flexWrap: "wrap",
+        opacity: controlsVisible ? 1 : 0, pointerEvents: controlsVisible ? "auto" : "none",
+        transition: "opacity 0.25s ease",
       }}>
-        <CallButton onClick={onToggleMute} background={call.muted ? "#fff" : "#ffffff26"}
+        <CallButton onClick={() => { onToggleMute(); resetHideTimer(); }} background={call.muted ? "#fff" : "#ffffff26"}
                     icon={call.muted ? I.micOff("#0b1220", 20) : I.mic("#fff", 20)} label="Mute" small/>
-        <CallButton onClick={onToggleCamera} background={call.cameraOff ? "#fff" : "#ffffff26"}
+        <CallButton onClick={() => { onToggleCamera(); resetHideTimer(); }} background={call.cameraOff ? "#fff" : "#ffffff26"}
                     icon={call.cameraOff ? I.videoOff("#0b1220", 20) : I.video("#fff", 20)}
                     label={call.callKind === "video" ? "Camera" : "Video"} small/>
         {canPickAudioOutput && (
-          <CallButton onClick={() => setShowSpeakerPicker(true)} background="#ffffff26"
+          <CallButton onClick={() => { setShowSpeakerPicker(true); resetHideTimer(); }} background="#ffffff26"
                       icon={I.volume("#fff", 20)} label="Speaker" small/>
         )}
-        <CallButton onClick={() => setShowMore(true)} background="#ffffff26"
+        <CallButton onClick={() => { setShowMore(true); resetHideTimer(); }} background="#ffffff26"
                     icon={I.moreVertical("#fff", 20)} label="More" small/>
         <CallButton onClick={onEnd} background="#ef4444" icon={I.callEnd("#fff", 24)} label="End"/>
       </div>

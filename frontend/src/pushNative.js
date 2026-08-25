@@ -38,16 +38,27 @@ export async function initNativePush(onOpenChat) {
   if (Capacitor.getPlatform?.() === "android") {
     try {
       await PushNotifications.createChannel({
-        id: "talkex_default", name: "TalkEx", importance: 5, visibility: 1, sound: "default",
+        id: "talkex_default", name: "TalkEx", importance: 5, visibility: 1,
+        sound: "default", vibration: true, lights: true, lightColor: "#0088FF",
+      });
+      await PushNotifications.createChannel({
+        id: "talkex_calls", name: "TalkEx Calls", importance: 5, visibility: 1,
+        sound: "default", vibration: true, lights: true, lightColor: "#00CC66",
       });
     } catch { /* older Android / already exists */ }
   }
 
   await PushNotifications.addListener("registration", async (token) => {
     lastToken = token.value;
-    try { await Push.registerFcmToken(token.value); } catch { /* retried on next launch */ }
+    console.log("[push] FCM token registered:", token.value?.slice(0, 20) + "…");
+    try { await Push.registerFcmToken(token.value); } catch (err) {
+      console.warn("[push] Failed to send FCM token to backend:", err);
+    }
   });
-  await PushNotifications.addListener("registrationError", () => { started = false; });
+  await PushNotifications.addListener("registrationError", (err) => {
+    console.error("[push] FCM registration failed:", err);
+    started = false;
+  });
 
   // Tap on a notification (app in background/closed) -> open that chat.
   await PushNotifications.addListener("pushNotificationActionPerformed", (action) => {

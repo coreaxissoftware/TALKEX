@@ -54,11 +54,11 @@ export function useIsLandscape() {
   useEffect(() => {
     const check = () => setIsLandscape(window.innerWidth > window.innerHeight);
     window.addEventListener("resize", check);
-    // orientation change event fires on mobile rotation
-    window.addEventListener("orientationchange", () => setTimeout(check, 100));
+    const onOrientation = () => setTimeout(check, 100);
+    window.addEventListener("orientationchange", onOrientation);
     return () => {
       window.removeEventListener("resize", check);
-      window.removeEventListener("orientationchange", check);
+      window.removeEventListener("orientationchange", onOrientation);
     };
   }, []);
   return isLandscape;
@@ -1150,7 +1150,9 @@ export function ContextMenu({ x, y, items, onClose }) {
       position: "fixed", inset: 0, zIndex: 1200, background: "transparent",
     }}>
       <div ref={ref} role="menu" onClick={(e) => e.stopPropagation()} style={{
-        position: "fixed", left: pos.left, top: pos.top, opacity: pos.visible ? 1 : 0,
+        position: "fixed", left: pos.left, top: pos.top,
+        opacity: pos.visible ? 1 : 0, transform: pos.visible ? "scale(1)" : "scale(0.92)",
+        transition: "opacity .12s ease, transform .12s ease",
         minWidth: 200, maxWidth: 260, background: G.card, border: `1px solid ${G.border}`,
         borderRadius: 12, boxShadow: "0 8px 28px #00000033", padding: 6, color: G.text,
       }}>
@@ -1164,6 +1166,7 @@ export function ContextMenu({ x, y, items, onClose }) {
                  borderRadius: 8, cursor: item.disabled ? "default" : "pointer",
                  opacity: item.disabled ? 0.45 : 1,
                  color: item.danger ? G.red : G.text,
+                 transition: "background .12s ease",
                }}
                onMouseEnter={(e) => !item.disabled && (e.currentTarget.style.background = G.dim)}
                onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
@@ -1290,6 +1293,7 @@ export function SRow({ icon, label, sub, right, onClick, danger }) {
       style={{
         display: "flex", alignItems: "center", gap: 14, padding: "14px 20px",
         borderBottom: `1px solid ${G.border}`, cursor: onClick ? "pointer" : "default",
+        transition: "background .12s ease",
       }}
       onMouseEnter={(e) => onClick && (e.currentTarget.style.background = G.card)}
       onMouseLeave={(e) => onClick && (e.currentTarget.style.background = "transparent")}>
@@ -1312,10 +1316,14 @@ export function Button({ children, onClick, variant = "solid", style, disabled }
   const base = {
     padding: "12px 18px", borderRadius: 12, fontSize: 14, fontWeight: 600,
     cursor: disabled ? "not-allowed" : "pointer", border: "none",
-    opacity: disabled ? 0.5 : 1, ...style,
+    opacity: disabled ? 0.5 : 1,
+    transition: "transform 0.1s ease, box-shadow 0.15s ease, opacity 0.15s ease",
+    WebkitTapHighlightColor: "transparent", touchAction: "manipulation",
+    ...style,
   };
   const looks = {
-    solid: { background: `linear-gradient(135deg,${G.accent},${G.accentD})`, color: "#fff" },
+    solid: { background: `linear-gradient(135deg,${G.accent},${G.accentD})`, color: "#fff",
+             boxShadow: `0 2px 8px ${G.accent}33` },
     ghost: { background: G.dim, color: G.text, border: `1px solid ${G.border}` },
     danger: { background: `${G.red}22`, color: G.red, border: `1px solid ${G.red}44` },
   };
@@ -1333,8 +1341,13 @@ export function Field({ label, ...props }) {
       <input {...props} style={{
         width: "100%", padding: "12px 14px", borderRadius: 12,
         background: G.dim, border: `1px solid ${G.border}`, color: G.text,
-        fontSize: 15, outline: "none", boxSizing: "border-box", ...props.style,
-      }}/>
+        fontSize: 15, outline: "none", boxSizing: "border-box",
+        transition: "border-color .15s ease, box-shadow .15s ease",
+        ...props.style,
+      }}
+      onFocus={(e) => { e.target.style.borderColor = G.accent; e.target.style.boxShadow = `0 0 0 3px ${G.accent}22`; props.onFocus?.(e); }}
+      onBlur={(e) => { e.target.style.borderColor = G.border; e.target.style.boxShadow = "none"; props.onBlur?.(e); }}
+      />
     </label>
   );
 }
@@ -1344,9 +1357,20 @@ export function Field({ label, ...props }) {
 /** Server timestamps are Unix seconds; JavaScript dates want milliseconds. */
 export const toDate = (seconds) => new Date(seconds * 1000);
 
+const _systemHour12 = (() => {
+  try {
+    const hc = new Intl.DateTimeFormat([], { hour: "numeric" }).resolvedOptions().hourCycle;
+    if (hc === "h23" || hc === "h24") return false;
+    if (hc === "h11" || hc === "h12") return true;
+  } catch {}
+  return undefined;
+})();
+
 export function clockTime(seconds) {
   if (!seconds) return "";
-  return toDate(seconds).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const opts = { hour: "2-digit", minute: "2-digit" };
+  if (_systemHour12 !== undefined) opts.hour12 = _systemHour12;
+  return toDate(seconds).toLocaleTimeString([], opts);
 }
 
 export function whenLabel(seconds) {

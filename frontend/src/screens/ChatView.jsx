@@ -9,7 +9,7 @@ import { playNotifyTone, TONE_OPTIONS } from "../notifyTone.js";
 import {
   Av, Button, ChatBackdrop, ContextMenu, CoverImage, EMOJIS, EMOJI_GROUPS, Field, G, I, SRow, SocialLinks,
   Spinner, Toggle,
-  clockTime, countdown, durationLabel, lastSeenLabel, localInputToUnix, whenLabel, useEnterToSend,
+  clockTime, countdown, durationLabel, lastSeenLabel, localInputToUnix, toDate, whenLabel, useEnterToSend,
   useIsDesktop, usePrompt,
 } from "../ui.jsx";
 import { useVoiceRecorder } from "../useVoiceRecorder.js";
@@ -171,6 +171,31 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
     const idx = mediaMessages.findIndex((m) => m.id === message.id);
     setLightboxIndex(idx >= 0 ? idx : 0);
   }, [mediaMessages]);
+  const mediaGroupMap = useMemo(() => {
+    const map = new Map();
+    let cur = null;
+    for (let i = 0; i < visibleMessages.length; i++) {
+      const m = visibleMessages[i];
+      const isMedia = (m.kind === "photo" || m.kind === "video") && !m.deleted_at && !m.unsent_at && !m.view_once && !m.text;
+      if (isMedia && cur) {
+        const first = cur[0];
+        if (m.sender_id === first.sender_id && Math.abs(m.created_at - first.created_at) < 60) {
+          cur.push(m);
+          continue;
+        }
+      }
+      if (cur && cur.length > 1) {
+        const gid = cur[0].id;
+        cur.forEach((msg, idx) => map.set(msg.id, { groupId: gid, members: cur, index: idx }));
+      }
+      cur = isMedia ? [m] : null;
+    }
+    if (cur && cur.length > 1) {
+      const gid = cur[0].id;
+      cur.forEach((msg, idx) => map.set(msg.id, { groupId: gid, members: cur, index: idx }));
+    }
+    return map;
+  }, [visibleMessages]);
   const pinnedIds = useMemo(() => new Set(pins.map((p) => p.id)), [pins]);
   const [starredIds, setStarredIds] = useState(() => new Set());
   const [showPins, setShowPins] = useState(false);
@@ -707,7 +732,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         const result = await Chats.createInvite(chat.id);
         code = result.invite_code;
       }
-      const url = `${window.location.origin}/?invite=${code}`;
+      const url = `https://web.talkex.in/?invite=${code}`;
       if (navigator.share) {
         await navigator.share({ url, text: `Join ${chat.name || "the chat"} on TalkEx` });
       } else {
@@ -953,19 +978,22 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   // lands in the chat in the same order they were picked, and one failure
   // partway through doesn't leave the upload endpoint fighting itself.
   async function sendFiles(files, kindOverride, text = "", viewOnce = false) {
-    for (const file of files) {
-      await sendFile(file, kindOverride, text, viewOnce);
+    for (let i = 0; i < files.length; i++) {
+      await sendFile(files[i], kindOverride, i === files.length - 1 ? text : "", viewOnce);
     }
   }
 
   // Only one live share can be running from this tab at a time. A ref, not
   // state — nothing here needs to trigger a re-render, and a ref survives
   // the setTimeout closure below without going stale.
-  const liveLocationRef = useRef(null); // { watchId, messageId }
+  const liveLocationRef = useRef(null); // { watchId, messageId, timerId }
 
   const stopLiveLocation = useCallback(() => {
     if (liveLocationRef.current?.watchId != null) {
       navigator.geolocation.clearWatch(liveLocationRef.current.watchId);
+    }
+    if (liveLocationRef.current?.timerId != null) {
+      clearTimeout(liveLocationRef.current.timerId);
     }
     liveLocationRef.current = null;
   }, []);
@@ -989,12 +1017,10 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
       () => {},
       { enableHighAccuracy: true },
     );
-    liveLocationRef.current = { watchId, messageId };
-    setTimeout(() => {
-      // Only stop if nothing newer has started in the meantime — a stale
-      // timeout from a share that already ended must not clear a fresh one.
+    const timerId = setTimeout(() => {
       if (liveLocationRef.current?.messageId === messageId) stopLiveLocation();
     }, liveSeconds * 1000);
+    liveLocationRef.current = { watchId, messageId, timerId };
   }
 
   // Takes an already-confirmed lat/lng (the picker sheet shows the map and
@@ -1349,8 +1375,46 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
             </div>
           </div>
         )}
-        {loading ? <Spinner/> : visibleMessages.map((message) => (
-          message.kind === "system" ? (
+        {loading ? <Spinner/> : visibleMessages.map((message) => {
+          const albumInfo = mediaGroupMap.get(message.id);
+          if (albumInfo && albumInfo.index > 0) return null;
+          if (albumInfo && albumInfo.index === 0) {
+            const mine = message.sender_id === me?.id;
+            const last = albumInfo.members[albumInfo.members.length - 1];
+            return (
+              <div key={message.id} style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start", marginBottom: 8 }}>
+                <div style={{ maxWidth: "min(78%, 300px)", borderRadius: 16, overflow: "hidden",
+                  borderBottomRightRadius: mine ? 4 : 16, borderBottomLeftRadius: mine ? 16 : 4,
+                  background: mine ? (chatAccent || G.accent) : G.card, border: mine ? "none" : `1px solid ${G.border}`, padding: 3,
+                }}>
+                  <div style={{ display: "grid", gridTemplateColumns: albumInfo.members.length === 1 ? "1fr" : "1fr 1fr", gap: 2, borderRadius: 13, overflow: "hidden" }}>
+                    {albumInfo.members.slice(0, 4).map((m, idx) => (
+                      <div key={m.id} onClick={() => openMedia(m)} style={{
+                        position: "relative", cursor: "pointer", aspectRatio: albumInfo.members.length === 3 && idx === 2 ? "2/1" : "1/1",
+                        gridColumn: albumInfo.members.length === 3 && idx === 2 ? "1 / -1" : undefined,
+                        overflow: "hidden",
+                      }}>
+                        <AlbumThumb message={m}/>
+                        {idx === 3 && albumInfo.members.length > 4 && (
+                          <div style={{ position: "absolute", inset: 0, background: "#00000066", display: "flex", alignItems: "center", justifyContent: "center",
+                            fontSize: 28, fontWeight: 700, color: "#fff" }}>+{albumInfo.members.length - 4}</div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 5, padding: "2px 8px 4px" }}>
+                    <span style={{ fontSize: 10.5, color: mine ? "#ffffffaa" : G.muted }}>{clockTime(last.created_at)}</span>
+                    {mine && (
+                      <span style={{ display: "inline-flex" }}>
+                        {last.pending || last.queued ? I.clock("#ffffff99", 11) : I.checkDouble(readUpToSeq !== null && last.seq <= readUpToSeq ? "#53bdeb" : "#ffffffaa", 12)}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          }
+          return message.kind === "system" ? (
             <div key={message.id} style={{ textAlign: "center", margin: "8px 0" }}>
               <span style={{
                 display: "inline-block", padding: "5px 12px", borderRadius: 10,
@@ -1418,6 +1482,10 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
                         if (message.pending || message.queued) return;
                         setReplyTo(message);
                       }}
+                      onSwipeInfo={() => {
+                        if (message.pending || message.queued) return;
+                        setInfoFor(message);
+                      }}
                       onVote={(index) => vote(message, index)}
                       onForward={canForwardHere ? () => setForwarding(message) : undefined}
                       onOpenMedia={openMedia}
@@ -1431,8 +1499,8 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
               </ErrorBoundary>
             </div>
           </div>
-          )
-        ))}
+          );
+        })}
         <div ref={bottom}/>
         </div>
 
@@ -1540,7 +1608,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
       )}
       {infoFor && (
         <MessageInfoSheet message={infoFor} chat={chat} members={members} readState={readState}
-                          onClose={() => setInfoFor(null)}/>
+                          me={me} onClose={() => setInfoFor(null)}/>
       )}
 
       {forwarding && (
@@ -1733,7 +1801,8 @@ function Header({ chat, typing, onBack, onTimer, onMeeting, onInfo, onVoiceCall,
   const [callMenu, setCallMenu] = useState(null); // {x,y} for the voice/video dropdown
   return (
     <div style={{
-      display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", paddingBottom: 18,
+      display: "flex", alignItems: "center", gap: 12,
+      padding: "12px 14px", paddingBottom: 18, paddingTop: "max(12px, env(safe-area-inset-top, 0px))",
       borderBottom: `1px solid ${G.border}`, background: G.surface,
       position: "sticky", top: 0, zIndex: 5, flexShrink: 0,
     }}>
@@ -1747,7 +1816,7 @@ function Header({ chat, typing, onBack, onTimer, onMeeting, onInfo, onVoiceCall,
             textOverflow: "ellipsis", display: "flex", alignItems: "center", gap: 4,
           }}>
             <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{chat.name || "Direct message"}</span>
-            {chat.peer_blue_tick && <span style={{ flexShrink: 0 }}>{I.blueTick(14)}</span>}
+            {chat.peer_blue_tick ? <span style={{ flexShrink: 0 }}>{I.blueTick(14)}</span> : null}
           </div>
           <div style={{
             fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
@@ -2143,7 +2212,7 @@ function firstUrl(text) {
  * all until (and unless) that returns something worth showing, so a plain
  * message with a bare link is never pushed around by an empty box.
  */
-function LinkPreview({ text, mine }) {
+const LinkPreview = memo(function LinkPreview({ text, mine }) {
   const url = firstUrl(text);
   const [data, setData] = useState(null);
 
@@ -2189,7 +2258,7 @@ function LinkPreview({ text, mine }) {
       </div>
     </a>
   );
-}
+});
 
 function ComposerLinkPreview({ text }) {
   const url = firstUrl(text);
@@ -2247,9 +2316,11 @@ function ComposerLinkPreview({ text }) {
 
 const SWIPE_REPLY_TRIGGER = 56;
 const SWIPE_REPLY_MAX = 74;
+const SWIPE_INFO_TRIGGER = -56;
+const SWIPE_INFO_MAX = -74;
 
-function Bubble({ message, me, chatAccent, translatedText, replyTarget, meetingUpdates, isPinned, isRead, isDelivered, signature,
-                  commentsOn, onComments, onDoubleTap, onLongPress, onSwipeReply, onVote, onForward, onOpenMedia, onCallAgain, onJoinMeeting, onCancelUpload, toast }) {
+const Bubble = memo(function Bubble({ message, me, chatAccent, translatedText, replyTarget, meetingUpdates, isPinned, isRead, isDelivered, signature,
+                  commentsOn, onComments, onDoubleTap, onLongPress, onSwipeReply, onSwipeInfo, onVote, onForward, onOpenMedia, onCallAgain, onJoinMeeting, onCancelUpload, toast }) {
   const mine = message.sender_id === me.id;
   const gone = message.deleted_at || message.expired;
   const spamSettings = getSpamSettings();
@@ -2280,7 +2351,9 @@ function Bubble({ message, me, chatAccent, translatedText, replyTarget, meetingU
   // long-press timer, mirroring ChatList's ChatRow swipe-to-pin gesture.
   const swipeAxis = useRef(null);
   const [dragX, setDragX] = useState(0);
-  const canSwipe = Boolean(onSwipeReply) && !message.pending && !message.queued && !gone;
+  const canSwipeRight = Boolean(onSwipeReply) && !message.pending && !message.queued && !gone;
+  const canSwipeLeft = Boolean(onSwipeInfo) && !message.pending && !message.queued && !gone;
+  const canSwipe = canSwipeRight || canSwipeLeft;
 
   function handlePointerDown(event) {
     if (event.pointerType !== "touch") return;
@@ -2308,7 +2381,10 @@ function Bubble({ message, me, chatAccent, translatedText, replyTarget, meetingU
       }
     }
     if (swipeAxis.current === "x") {
-      setDragX(Math.max(0, Math.min(SWIPE_REPLY_MAX, dx)));
+      const clamped = dx > 0
+        ? (canSwipeRight ? Math.min(SWIPE_REPLY_MAX, dx) : 0)
+        : (canSwipeLeft ? Math.max(SWIPE_INFO_MAX, dx) : 0);
+      setDragX(clamped);
     }
   }
   function clearPressTimer() {
@@ -2332,7 +2408,10 @@ function Bubble({ message, me, chatAccent, translatedText, replyTarget, meetingU
       onLongPress();
     }
     longPressFired.current = false;
-    if (swipeAxis.current === "x" && dragX >= SWIPE_REPLY_TRIGGER) onSwipeReply?.();
+    if (swipeAxis.current === "x") {
+      if (dragX >= SWIPE_REPLY_TRIGGER) onSwipeReply?.();
+      else if (dragX <= SWIPE_INFO_TRIGGER) onSwipeInfo?.();
+    }
     swipeAxis.current = null;
     setDragX(0);
   }
@@ -2358,6 +2437,14 @@ function Bubble({ message, me, chatAccent, translatedText, replyTarget, meetingU
       width: 26, height: 26, borderRadius: "50%", background: G.card,
       display: "flex", alignItems: "center", justifyContent: "center",
     }}>{I.reply(G.muted, 14)}</div>
+  );
+  const swipeInfoIcon = dragX < 0 && (
+    <div style={{
+      position: "absolute", right: -34, top: "50%", transform: "translateY(-50%)",
+      opacity: Math.min(1, Math.abs(dragX) / Math.abs(SWIPE_INFO_TRIGGER)),
+      width: 26, height: 26, borderRadius: "50%", background: G.card,
+      display: "flex", alignItems: "center", justifyContent: "center",
+    }}>{I.info(G.muted, 14)}</div>
   );
 
   // The little "⌄" WhatsApp Web shows at a bubble's corner on hover — a
@@ -2386,6 +2473,7 @@ function Bubble({ message, me, chatAccent, translatedText, replyTarget, meetingU
              ...swipeStyle,
            }}>
         {swipeReplyIcon}
+        {swipeInfoIcon}
         <StickerMessage message={message}/>
         <span style={{ fontSize: 10.5, color: G.muted, marginTop: 2 }}>{clockTime(message.created_at)}</span>
       </div>
@@ -2399,7 +2487,7 @@ function Bubble({ message, me, chatAccent, translatedText, replyTarget, meetingU
         {...pressHandlers}
         onMouseEnter={showChevron} onMouseLeave={hideChevron}
         style={{
-          position: "relative", maxWidth: "78%",
+          position: "relative", maxWidth: mediaFlush ? "min(78%, 300px)" : "78%",
           padding: mediaFlush ? 3 : "9px 13px", borderRadius: 16,
           borderBottomRightRadius: mine ? 4 : 16,
           borderBottomLeftRadius: mine ? 16 : 4,
@@ -2410,6 +2498,7 @@ function Bubble({ message, me, chatAccent, translatedText, replyTarget, meetingU
           ...swipeStyle,
         }}>
         {swipeReplyIcon}
+        {swipeInfoIcon}
 
         {spamResult && spamHidden && (
           <div onClick={(e) => { e.stopPropagation(); setSpamHidden(false); }} style={{
@@ -2584,7 +2673,7 @@ function Bubble({ message, me, chatAccent, translatedText, replyTarget, meetingU
       </div>
     </div>
   );
-}
+});
 
 function ReactionPills({ reactions, messageId }) {
   const [detail, setDetail] = useState(null);
@@ -3010,7 +3099,33 @@ function ViewOnceText({ message, mine }) {
  * cannot carry an Authorization header, only cookies, which this app does not
  * use for auth.
  */
-function Attachment({ message, mine, onForward, onOpenMedia, onCancelUpload, toast }) {
+function AlbumThumb({ message }) {
+  const [url, setUrl] = useState(message.payload?._localUrl || null);
+  const attachmentId = message.payload?.attachment_id;
+  useEffect(() => {
+    if (url || !attachmentId) return;
+    let cancelled = false;
+    Uploads.fetchBlobUrl(attachmentId, { cache: true })
+      .then((u) => { if (!cancelled) setUrl(u); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [attachmentId, url]);
+  if (!url) return <div style={{ width: "100%", height: "100%", background: "#00000022" }}/>;
+  if (message.kind === "video") {
+    return (
+      <div style={{ position: "relative", width: "100%", height: "100%" }}>
+        <video src={url} muted style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>
+        <div style={{ position: "absolute", bottom: 4, left: 4, display: "flex", alignItems: "center", gap: 3,
+          padding: "1px 6px", borderRadius: 6, background: "#00000088", fontSize: 10, color: "#fff" }}>
+          {I.video("#fff", 10)} Video
+        </div>
+      </div>
+    );
+  }
+  return <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>;
+}
+
+const Attachment = memo(function Attachment({ message, mine, onForward, onOpenMedia, onCancelUpload, toast }) {
   const [blobUrl, setBlobUrl] = useState(null);
   const [error, setError] = useState(false);
   // Tapping a photo/video opens it full-screen, the way WhatsApp does —
@@ -3247,7 +3362,7 @@ function Attachment({ message, mine, onForward, onOpenMedia, onCancelUpload, toa
       )}
     </div>
   );
-}
+});
 
 /** A small pill button used under a file/video bubble. Adapts its colours to
  *  whether it sits inside the sender's (coloured) bubble or a received one. */
@@ -3699,13 +3814,6 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
       <IconButton onClick={onSchedule} label="Schedule this message">
         {I.clock(G.sub, 20)}
       </IconButton>
-      {!editing && canSilent && (
-        <IconButton onClick={onToggleSilent}
-                    label={silent ? "Silent: won't notify subscribers" : "Post silently (no notification)"}
-                    style={{ borderRadius: "50%", background: silent ? G.accentSoft : "transparent" }}>
-          {(silent ? I.bellOff : I.bell)(silent ? G.accent : G.sub, 20)}
-        </IconButton>
-      )}
       <IconButton onClick={toggleEmoji} label={emojiOpen ? "Keyboard" : "Emoji"} style={{ fontSize: 19 }}>
         {emojiOpen ? I.keyboard(G.sub, 20) : "🙂"}
       </IconButton>
@@ -3830,14 +3938,15 @@ function Sheet({ title, children, onClose, side = "bottom" }) {
       display: "flex",
       alignItems: asRightPanel ? "stretch" : "flex-end",
       justifyContent: asRightPanel ? "flex-end" : "center",
+      animation: "talkexFadeIn .18s ease",
     }}>
-      <style>{"@keyframes talkexSlideInRight{from{transform:translateX(100%)}to{transform:translateX(0)}}"}</style>
+      <style>{`@keyframes talkexSlideInRight{from{transform:translateX(100%)}to{transform:translateX(0)}}
+@keyframes talkexSlideUp{from{transform:translateY(100%);opacity:.8}to{transform:translateY(0);opacity:1}}
+@keyframes talkexFadeIn{from{opacity:0}to{opacity:1}}`}</style>
       <div ref={panelRef} onClick={(event) => event.stopPropagation()}
            role="dialog" aria-modal="true" aria-label={typeof title === "string" ? title : undefined}
            tabIndex={-1}
            style={asRightPanel ? {
-        // Right-anchored, full-height slide-in panel — the WhatsApp Web
-        // "Contact info" column. Slides in from the right edge.
         width: 400, maxWidth: "90vw", height: "100%", background: G.surface, padding: 20,
         borderLeft: `1px solid ${G.border}`, overflowY: "auto", outline: "none",
         animation: "talkexSlideInRight .22s ease",
@@ -3846,6 +3955,7 @@ function Sheet({ title, children, onClose, side = "bottom" }) {
         borderTopLeftRadius: 22, borderTopRightRadius: 22,
         border: `1px solid ${G.border}`, maxHeight: "80vh", overflowY: "auto",
         outline: "none",
+        animation: "talkexSlideUp .22s cubic-bezier(.32,.72,.37,1.12)",
       }}>
         <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 14 }}>{title}</div>
         {children}
@@ -3978,59 +4088,109 @@ function MessageMenu({ message, me, isModerator, reactionsEnabled = true, isPinn
  * last_read_seq watermark — so this can only say read/not-read, not "read
  * at 3:42pm" the way WhatsApp's own Message Info does.
  */
-function MessageInfoSheet({ message, chat, members, readState, onClose }) {
+function MessageInfoSheet({ message, chat, members, readState, me, onClose }) {
+  const mine = message.sender_id === me?.id;
   const isDm = chat.type === "dm";
   const others = isDm
     ? (chat.peer_id ? [{ id: chat.peer_id, name: chat.name, avatar_letter: chat.avatar_letter, color: chat.color }] : [])
     : members.filter((m) => m.id !== message.sender_id);
 
+  const rowFor = (userId) => readState.find((r) => r.user_id === userId);
   const statusFor = (userId) => {
-    const row = readState.find((r) => r.user_id === userId);
+    const row = rowFor(userId);
     if (!row) return null;
-    // last_read_seq is null when that member hides read receipts — they can
-    // still be "delivered", just never "read".
     if (row.last_read_seq != null && row.last_read_seq >= message.seq) return "read";
     if ((row.last_delivered_seq ?? 0) >= message.seq) return "delivered";
     return "sent";
   };
 
-  const read = others.filter((person) => statusFor(person.id) === "read");
-  const delivered = others.filter((person) => statusFor(person.id) === "delivered");
+  const read = mine ? others.filter((person) => statusFor(person.id) === "read") : [];
+  const delivered = mine ? others.filter((person) => statusFor(person.id) === "delivered") : [];
+
+  const sentDate = message.created_at ? toDate(message.created_at) : null;
+  const senderName = mine ? "You" : (members.find((m) => m.id === message.sender_id)?.name || chat.name || "Unknown");
+
+  const fmtTs = (unixSec) => {
+    if (!unixSec) return null;
+    const d = new Date(unixSec * 1000);
+    return d.toLocaleString(undefined, { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  };
+
+  const deliveredAt = mine && isDm && others[0] ? rowFor(others[0].id)?.last_delivered_at : null;
+  const readAt = mine && isDm && others[0] ? rowFor(others[0].id)?.last_read_at : null;
 
   return (
     <Sheet title="Message info" onClose={onClose}>
-      {read.length === 0 && delivered.length === 0 && (
+      <div style={{ padding: "6px 0 10px", borderBottom: `1px solid ${G.border}`, marginBottom: 10 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
+          <span style={{ color: G.muted }}>From</span>
+          <span>{senderName}</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
+          <span style={{ color: G.muted }}>Sent</span>
+          <span>{sentDate ? sentDate.toLocaleString(undefined, { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"}</span>
+        </div>
+        {mine && (
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
+            <span style={{ color: G.muted }}>Delivered</span>
+            <span>{fmtTs(deliveredAt) || (delivered.length > 0 || read.length > 0 ? "Yes" : "—")}</span>
+          </div>
+        )}
+        {mine && (
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
+            <span style={{ color: G.muted }}>Read</span>
+            <span style={{ color: readAt ? G.accent : undefined }}>{fmtTs(readAt) || (read.length > 0 ? "Yes" : "—")}</span>
+          </div>
+        )}
+      </div>
+
+      {mine && !isDm && (read.length > 0 || delivered.length > 0) && (
+        <div style={{ borderBottom: `1px solid ${G.border}`, paddingBottom: 10, marginBottom: 10 }}>
+          {read.length > 0 && (
+            <>
+              <div style={{ fontSize: 12, color: G.muted, marginBottom: 6, marginTop: 4 }}>
+                {I.checkDouble(G.accent, 12)} Read by
+              </div>
+              {read.map((person) => {
+                const row = rowFor(person.id);
+                return (
+                  <div key={person.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0" }}>
+                    <Av av={person.avatar_letter} color={person.color} size={30}/>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13.5 }}>{person.name}</div>
+                      {row?.last_read_at && <div style={{ fontSize: 11, color: G.muted }}>{fmtTs(row.last_read_at)}</div>}
+                    </div>
+                  </div>
+                );
+              })}
+            </>
+          )}
+          {delivered.length > 0 && (
+            <>
+              <div style={{ fontSize: 12, color: G.muted, marginBottom: 6, marginTop: read.length > 0 ? 14 : 4 }}>
+                {I.checkDouble(G.muted, 12)} Delivered to
+              </div>
+              {delivered.map((person) => {
+                const row = rowFor(person.id);
+                return (
+                  <div key={person.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0" }}>
+                    <Av av={person.avatar_letter} color={person.color} size={30}/>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13.5 }}>{person.name}</div>
+                      {row?.last_delivered_at && <div style={{ fontSize: 11, color: G.muted }}>{fmtTs(row.last_delivered_at)}</div>}
+                    </div>
+                  </div>
+                );
+              })}
+            </>
+          )}
+        </div>
+      )}
+
+      {mine && read.length === 0 && delivered.length === 0 && (
         <div style={{ fontSize: 13, color: G.muted, padding: "10px 0" }}>
           No read-receipt info available for this message.
         </div>
-      )}
-      {read.length > 0 && (
-        <>
-          <div style={{ fontSize: 12, color: G.muted, marginBottom: 6, marginTop: 4 }}>
-            Read by
-          </div>
-          {read.map((person) => (
-            <div key={person.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0" }}>
-              <Av av={person.avatar_letter} color={person.color} size={30}/>
-              <div style={{ fontSize: 13.5, flex: 1 }}>{person.name}</div>
-              {I.checkDouble(G.accent, 14)}
-            </div>
-          ))}
-        </>
-      )}
-      {delivered.length > 0 && (
-        <>
-          <div style={{ fontSize: 12, color: G.muted, marginBottom: 6, marginTop: 14 }}>
-            Delivered, not yet read
-          </div>
-          {delivered.map((person) => (
-            <div key={person.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0" }}>
-              <Av av={person.avatar_letter} color={person.color} size={30}/>
-              <div style={{ fontSize: 13.5, flex: 1 }}>{person.name}</div>
-              {I.checkDouble(G.muted, 14)}
-            </div>
-          ))}
-        </>
       )}
     </Sheet>
   );
@@ -5360,7 +5520,15 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
   const [permDraft, setPermDraft] = useState([]);          // the rights selected in that editor
   const [showPermMatrix, setShowPermMatrix] = useState(false);
   const [channelStats, setChannelStats] = useState(null);
+  const [broadcastRecipients, setBroadcastRecipients] = useState(null);
+  const [showAddBroadcast, setShowAddBroadcast] = useState(false);
   const lastMemberEvent = useRef(0);
+
+  useEffect(() => {
+    if (chat.type === "broadcast") {
+      Chats.broadcastRecipients(chat.id).then(setBroadcastRecipients).catch(() => setBroadcastRecipients([]));
+    }
+  }, [chat.id, chat.type]);
 
   useEffect(() => {
     if (chat.type !== "channel") return;
@@ -5710,7 +5878,7 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
         )}
         <div>
           <div style={{ fontSize: 16, fontWeight: 700, display: "flex", alignItems: "center", gap: 5 }}>
-            {chat.name || "Direct message"} {chat.peer_blue_tick && I.blueTick(14)}
+            {chat.name || "Direct message"} {chat.peer_blue_tick ? I.blueTick(14) : null}
           </div>
           {isDm && peerProfile?.phone
             ? <div style={{ fontSize: 12.5, color: G.muted }}>{peerProfile.phone}</div>
@@ -5806,10 +5974,10 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
               <Button onClick={saveInfo} style={{ flex: 1 }}>Save</Button>
               <Button variant="ghost" onClick={() => setEditingInfo(false)} style={{ flex: 1 }}>Cancel</Button>
             </div>
-            {chat.avatar_attachment_id && (
+            {chat.avatar_attachment_id ? (
               <Button variant="ghost" onClick={removeAvatar}
                       style={{ width: "100%", marginTop: 8, color: G.red }}>Remove photo</Button>
-            )}
+            ) : null}
           </div>
         ) : (
           <div style={{ marginBottom: 14 }}>
@@ -6406,6 +6574,55 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
         </div>
       )}
 
+      {chat.type === "broadcast" && (
+        <div style={{ padding: "12px 4px" }}>
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            marginBottom: 8,
+          }}>
+            <div style={{ fontSize: 12, color: G.sub }}>
+              Recipients {broadcastRecipients ? `(${broadcastRecipients.length})` : ""}
+            </div>
+            <div onClick={() => setShowAddBroadcast(true)} style={{ cursor: "pointer" }} title="Add recipients">
+              {I.plus(G.accentText, 16)}
+            </div>
+          </div>
+          {!broadcastRecipients && <Spinner small/>}
+          {(broadcastRecipients || []).map((person) => (
+            <div key={person.id} style={{
+              display: "flex", alignItems: "center", gap: 10, padding: "7px 4px",
+              borderBottom: `1px solid ${G.border}`,
+            }}>
+              <Av av={person.avatar_letter} color={person.color} size={30} photoId={person.avatar_attachment_id}/>
+              <div style={{ flex: 1, minWidth: 0, fontSize: 13.5 }}>{person.name}</div>
+              <Button variant="danger" style={{ padding: "5px 8px", fontSize: 11 }}
+                      onClick={async () => {
+                        try {
+                          await Chats.removeBroadcastRecipient(chat.id, person.id);
+                          setBroadcastRecipients((cur) => cur.filter((r) => r.id !== person.id));
+                          toast("Recipient removed");
+                        } catch (problem) {
+                          toast(problem.message || "Could not remove recipient");
+                        }
+                      }}>Remove</Button>
+            </div>
+          ))}
+          {broadcastRecipients?.length === 0 && (
+            <div style={{ fontSize: 12.5, color: G.muted, padding: "6px 4px" }}>No recipients yet</div>
+          )}
+        </div>
+      )}
+
+      {showAddBroadcast && (
+        <AddBroadcastRecipientsSheet chatId={chat.id}
+          existingIds={(broadcastRecipients || []).map((r) => r.id)}
+          onClose={() => setShowAddBroadcast(false)}
+          onAdded={() => {
+            setShowAddBroadcast(false);
+            Chats.broadcastRecipients(chat.id).then(setBroadcastRecipients).catch(() => {});
+          }}/>
+      )}
+
       {["group", "channel", "community"].includes(chat.type) && canManage && (() => {
         const log = getAdminLog(chat.id);
         if (log.length === 0) return null;
@@ -6450,7 +6667,7 @@ function ChatInfoSheet({ chat, me, events, onClose, toast, onChanged, onLeft, on
         );
       })()}
 
-      {chat.type !== "saved" && chat.type !== "dm" && (
+      {chat.type !== "saved" && chat.type !== "dm" && chat.type !== "broadcast" && (
         <Button variant="danger" onClick={leave} disabled={busy}
                 style={{ width: "100%", marginTop: 18 }}>
           Leave {chat.type === "channel" ? "channel" : chat.type === "community" ? "community" : "group"}
@@ -7248,7 +7465,7 @@ function InviteLinkSheet({ chat, onClose, toast }) {
 
   // A full shareable URL (App.jsx auto-joins on ?invite=<code>), not just the
   // bare code — this is what the link button and the QR both point at.
-  const link = code ? `${window.location.origin}/?invite=${code}` : "";
+  const link = code ? `https://web.talkex.in/?invite=${code}` : "";
 
   function copy() {
     navigator.clipboard?.writeText(link);
@@ -7458,6 +7675,72 @@ function AddMembersSheet({ chatId, existingIds, onClose, onAdded }) {
           )}
           {query.trim() && candidates.length === 0 && (
             <div style={{ fontSize: 13, color: G.muted }}>Everyone found is already in this chat.</div>
+          )}
+          {candidates.map((person) => (
+            <label key={person.id} style={{
+              display: "flex", alignItems: "center", gap: 10, padding: "8px 4px",
+              cursor: "pointer", borderBottom: `1px solid ${G.border}`,
+            }}>
+              <input type="checkbox" checked={selected.includes(person.id)}
+                     onChange={() => toggle(person.id)}/>
+              <Av av={person.avatar_letter} color={person.color} size={30} photoId={person.avatar_attachment_id}/>
+              <div style={{ fontSize: 13.5 }}>{person.name}</div>
+            </label>
+          ))}
+        </div>
+      )}
+      <Button onClick={save} disabled={!selected.length || busy} style={{ width: "100%" }}>
+        {busy ? "Adding…" : `Add${selected.length ? ` (${selected.length})` : ""}`}
+      </Button>
+    </Sheet>
+  );
+}
+
+function AddBroadcastRecipientsSheet({ chatId, existingIds, onClose, onAdded }) {
+  const [people, setPeople] = useState([]);
+  const [query, setQuery] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [selected, setSelected] = useState([]);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (query.trim().length < 2) { setPeople([]); return; }
+    let cancelled = false;
+    setLoading(true);
+    Users.list(query).then((result) => { if (!cancelled) setPeople(result); })
+      .catch(() => {}).finally(() => !cancelled && setLoading(false));
+    return () => { cancelled = true; };
+  }, [query]);
+
+  const candidates = people.filter((person) => !existingIds.includes(person.id));
+
+  function toggle(userId) {
+    setSelected((current) =>
+      current.includes(userId) ? current.filter((id) => id !== userId) : [...current, userId]);
+  }
+
+  async function save() {
+    if (!selected.length) return;
+    setBusy(true);
+    try {
+      await Chats.addBroadcastRecipients(chatId, selected);
+      onAdded();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Sheet title="Add recipients" onClose={onClose}>
+      <Field value={query} onChange={(event) => setQuery(event.target.value)}
+             placeholder="Search by name or username…" style={{ marginBottom: 12 }} autoFocus/>
+      {loading ? <Spinner small/> : (
+        <div style={{ maxHeight: 320, overflowY: "auto", marginBottom: 14 }}>
+          {!query.trim() && (
+            <div style={{ fontSize: 13, color: G.muted }}>Search for people to add.</div>
+          )}
+          {query.trim() && candidates.length === 0 && (
+            <div style={{ fontSize: 13, color: G.muted }}>Everyone found is already a recipient.</div>
           )}
           {candidates.map((person) => (
             <label key={person.id} style={{
