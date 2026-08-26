@@ -33,6 +33,8 @@ import traceback
 
 import chatstore
 import db
+import fcm
+import push
 from realtime import hub
 
 # How often to look for due work. Five seconds is comfortably precise for
@@ -258,6 +260,7 @@ async def publish_due_stories(now: float):
             "story_id": story["id"],
             "user_id": story["user_id"],
         })
+        await _push_status_notification(story["user_id"], story["id"])
 
 
 async def expire_stories(now: float):
@@ -298,6 +301,56 @@ async def _notify_contacts(user_id: str, event: dict):
     )
     for row in rows:
         await hub.send_to_user(row["user_id"], event)
+
+
+async def _push_status_notification(author_id: str, story_id: str):
+    """Push-notify contacts who are offline about a new status update."""
+    author = db.query_one("SELECT * FROM users WHERE id = ?", (author_id,))
+    if not author:
+        return
+    name = author.get("name") or author.get("username") or "Someone"
+    contact_rows = db.query_all(
+        """
+        SELECT DISTINCT other.user_id
+        FROM chat_members AS mine
+        JOIN chat_members AS other ON other.chat_id = mine.chat_id
+        WHERE mine.user_id = ? AND other.user_id != ?
+        """,
+        (author_id, author_id),
+    )
+    offline_ids = [
+        r["user_id"] for r in contact_rows
+        if not hub.has_connection(r["user_id"])
+    ]
+    if not offline_ids:
+        return
+    title = f"{name}'s status"
+    body = "Tap to view their status update"
+    data = {"type": "status", "story_id": story_id, "user_id": author_id}
+    placeholders = ",".join("?" for _ in offline_ids)
+    subs = db.query_all(
+        f"SELECT * FROM push_subscriptions WHERE user_id IN ({placeholders})",
+        tuple(offline_ids),
+    )
+    for sub in subs:
+        subscription_info = {
+            "endpoint": sub["endpoint"],
+            "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]},
+        }
+        result = await asyncio.to_thread(push.send, subscription_info, title, body, data)
+        if result == "gone":
+            db.execute("DELETE FROM push_subscriptions WHERE id = ?", (sub["id"],))
+    if fcm.is_configured():
+        tokens = db.query_all(
+            f"SELECT token FROM device_tokens WHERE user_id IN ({placeholders})",
+            tuple(offline_ids),
+        )
+        for row in tokens:
+            result = await asyncio.to_thread(
+                fcm.send, row["token"], title, body, data,
+            )
+            if result == "gone":
+                db.execute("DELETE FROM device_tokens WHERE token = ?", (row["token"],))
 
 
 # ── Meetings ──────────────────────────────────────────────────────────────────

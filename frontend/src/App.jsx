@@ -2,10 +2,10 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import {
   ApiError, Auth, Calls, Chats, Contacts, E2EE, Me, Meetings, Messages, Scheduled, Search, Users,
   clearToken, flushEverything, getToken, rememberAccount,
-  storedRefDm, clearRefDm, storedPhoneLink, storedPhoneText, clearPhoneLink,
+  storedRefDm, clearRefDm, storedPhoneLink, storedPhoneText, clearPhoneLink, publicProfileByPhone,
 } from "./api.js";
 import { initE2EE, clearE2EEKeys } from "./e2ee.js";
-import { initNativePush, stopNativePush } from "./pushNative.js";
+import { initNativePush, stopNativePush, syncNativeCredentials } from "./pushNative.js";
 import { getAllContacts } from "./nativeContacts.js";
 import { useRealtime } from "./useRealtime.js";
 import { useCall } from "./useCall.js";
@@ -54,6 +54,48 @@ const TAB_KEYS = [
   { key: "settings", i18n: "nav.settings", icon: I.settings },
 ];
 
+function PhoneLinkLanding({ phone, onContinue }) {
+  const [profile, setProfile] = useState(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    publicProfileByPhone(phone).then((p) => { setProfile(p); setLoading(false); });
+  }, [phone]);
+  const avatarUrl = profile?.avatar
+    ? `${import.meta.env.VITE_API_URL || ""}/uploads/${profile.avatar}`
+    : null;
+  const displayName = profile?.name || "TalkEx User";
+  const downloadUrl = "https://ventures.coreaxis.cloud/downloads";
+  return (
+    <Screen style={{ justifyContent: "center", alignItems: "center", padding: 24 }}>
+      <div style={{
+        maxWidth: 420, width: "100%", textAlign: "center",
+        background: G.card, borderRadius: 20, padding: "40px 32px 32px",
+        boxShadow: "0 4px 24px rgba(0,0,0,0.10)",
+      }}>
+        <img src="/icon.png" alt="TalkEx" style={{ width: 56, height: 56, borderRadius: 14, marginBottom: 20 }}/>
+        {loading ? <Spinner/> : (<>
+          {avatarUrl
+            ? <img src={avatarUrl} alt="" style={{ width: 80, height: 80, borderRadius: "50%", objectFit: "cover", margin: "0 auto 12px", display: "block" }}/>
+            : <div style={{
+                width: 80, height: 80, borderRadius: "50%", margin: "0 auto 12px",
+                background: profile?.color || G.accent, display: "flex", alignItems: "center",
+                justifyContent: "center", fontSize: 34, fontWeight: 700, color: "#fff",
+              }}>{profile?.avatar_letter || "?"}</div>
+          }
+          <div style={{ fontSize: 22, fontWeight: 700, color: G.text, marginBottom: 4 }}>{displayName}</div>
+          <div style={{ fontSize: 13, color: G.muted, marginBottom: 28 }}>TalkEx Messenger</div>
+        </>)}
+        <Button label="Continue to TalkEx Web" accent style={{ width: "100%", marginBottom: 12 }}
+          onClick={() => { window.history.replaceState(null, "", "/"); onContinue(); }}/>
+        <a href={downloadUrl} target="_blank" rel="noopener noreferrer" style={{
+          display: "block", padding: "10px 0", borderRadius: 12, fontSize: 14,
+          color: G.text, border: `1.5px solid ${G.border}`, textDecoration: "none", fontWeight: 500,
+        }}>Don't have the app?&nbsp;&nbsp;<span style={{ color: G.accent, textDecoration: "underline" }}>Download it now</span></a>
+      </div>
+    </Screen>
+  );
+}
+
 /**
  * The shell: authentication, the tab bar, and the one WebSocket.
  *
@@ -69,6 +111,7 @@ export default function App() {
   const [me, setMe] = useState(null);
   const [reactivatePending, setReactivatePending] = useState(false);
   const [checking, setChecking] = useState(true);
+  const [phoneLinkDismissed, setPhoneLinkDismissed] = useState(false);
   const [tab, setTab] = useState("chats");
   const [chats, setChats] = useState([]);
   const [loadingChats, setLoadingChats] = useState(true);
@@ -188,6 +231,7 @@ export default function App() {
       setTab("chats");
       try { const chat = await Chats.get(chatId); if (chat) setOpenChat(chat); } catch { /* ignore */ }
     });
+    syncNativeCredentials();
   }, [me?.id]);
 
   // Request all runtime permissions upfront on native Android so the user
@@ -681,6 +725,10 @@ export default function App() {
       setBlueTickCelebrate(true);
     }
 
+    if (event.type === "story_published") {
+      window.dispatchEvent(new CustomEvent("ht:story-published", { detail: event }));
+    }
+
     // Anything that changes what Planner's badge is counting.
     if ([
       "meeting_created", "meeting_updated", "meeting_cancelled", "meeting_started",
@@ -855,6 +903,12 @@ export default function App() {
   if (checking) return <Screen style={{ justifyContent: "center" }}><Spinner/></Screen>;
 
   if (!me) {
+    const phoneLinkPhone = storedPhoneLink();
+    if (phoneLinkPhone && !phoneLinkDismissed) {
+      return <PhoneLinkLanding phone={phoneLinkPhone} onContinue={() => {
+        setPhoneLinkDismissed(true);
+      }}/>;
+    }
     return <Login onAuthenticated={(user, accountDisabled) => {
       rememberAccount(user, getToken());
       setMe(user);

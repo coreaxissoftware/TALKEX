@@ -89,7 +89,6 @@ const PHONE_TEXT_KEY = "talkex_phone_text";
     if (!phone || phone.replace(/\D/g, "").length < 6) return;
     localStorage.setItem(PHONE_LINK_KEY, phone);
     if (text) localStorage.setItem(PHONE_TEXT_KEY, text.slice(0, 1000));
-    window.history.replaceState(null, "", "/");
   } catch { /* ignore */ }
 })();
 export const storedPhoneLink = () => {
@@ -101,6 +100,10 @@ export const storedPhoneText = () => {
 export const clearPhoneLink = () => {
   try { localStorage.removeItem(PHONE_LINK_KEY); localStorage.removeItem(PHONE_TEXT_KEY); } catch { /* ignore */ }
 };
+export const publicProfileByPhone = (phone) =>
+  fetch(BASE + `/api/public/profile/${encodeURIComponent(phone)}`)
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null);
 
 // ── Saved accounts (quick account switching) ──────────────────────────────────
 // A directory of accounts this browser has signed into before, alongside
@@ -767,11 +770,11 @@ export async function flushPendingActions() {
 // failing either one queues the raw file itself, not a half-finished
 // attachment id that would be meaningless once retried later.
 export async function sendFileReliably({
-  chatId, file, kind, text = "", viewOnce = false, clientMsgId = null, signal = null,
+  chatId, file, kind, text = "", viewOnce = false, clientMsgId = null, signal = null, onProgress = null,
 }) {
   const id = clientMsgId || newClientMessageId();
   try {
-    const attachment = await Uploads.create(file, { signal });
+    const attachment = await Uploads.create(file, { signal, onProgress });
     return await Messages.send({
       chat_id: chatId, kind, text,
       payload: { attachment_id: attachment.attachment_id },
@@ -859,9 +862,41 @@ export const Uploads = {
    * while the transfer keeps running in the background — fetch() aborts
    * both the request and (per spec) the underlying TCP write.
    */
-  async create(file, { signal } = {}) {
+  async create(file, { signal, onProgress } = {}) {
     const body = new FormData();
     body.append("file", file);
+
+    if (onProgress) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", `${BASE}/uploads`);
+        if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) onProgress(e.loaded / e.total);
+        };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try { resolve(JSON.parse(xhr.responseText)); }
+            catch { reject(new ApiError(xhr.status, "Bad response")); }
+          } else {
+            let detail = "Upload failed";
+            try { detail = JSON.parse(xhr.responseText).detail || detail; } catch {}
+            reject(new ApiError(xhr.status, detail));
+          }
+        };
+        xhr.onerror = () => reject(new ApiError(0, "Network error"));
+        if (signal) {
+          signal.addEventListener("abort", () => xhr.abort());
+          if (signal.aborted) { xhr.abort(); return; }
+        }
+        xhr.onabort = () => {
+          const err = new Error("Upload cancelled");
+          err.name = "AbortError";
+          reject(err);
+        };
+        xhr.send(body);
+      });
+    }
 
     const response = await fetch(`${BASE}/uploads`, {
       method: "POST",

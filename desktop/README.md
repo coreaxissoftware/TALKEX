@@ -1,6 +1,6 @@
 # TalkEx Desktop (Windows .exe)
 
-A thin Electron wrapper around the live web app (`https://talkex.coreaxis.cloud`),
+A thin Electron wrapper around the live web app (`https://web.talkex.in`),
 so the desktop app always matches the deployed frontend — no per-release rebuild.
 
 ## Build the .exe (on Windows)

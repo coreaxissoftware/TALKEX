@@ -68,7 +68,7 @@ const FONT_SIZES = [
   { key: "40", label: "40", px: 40 },
 ];
 const FONT_PX_BY_KEY = Object.fromEntries(FONT_SIZES.map((f) => [f.key, f.px]));
-function fontPxFor(key) { return FONT_PX_BY_KEY[key] || FONT_PX_BY_KEY.medium; }
+function fontPxFor(key) { return FONT_PX_BY_KEY[key] || 14; }
 
 // One line describing a non-text status, used everywhere a row only has
 // room for a preview line rather than the actual media (queued/mine/feed).
@@ -201,6 +201,12 @@ export default function Status({ me, toast }) {
   }
 
   useEffect(reload, []);
+
+  useEffect(() => {
+    const onStory = () => reload();
+    window.addEventListener("ht:story-published", onStory);
+    return () => window.removeEventListener("ht:story-published", onStory);
+  }, []);
 
   async function open(story, author) {
     setViewing(story);

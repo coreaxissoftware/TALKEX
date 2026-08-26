@@ -1,9 +1,4 @@
-// Per-chat in-app notification tones — synthesized with Web Audio, same
-// "no binary asset to ship or license" approach CallOverlay.jsx's ring/
-// ringback tones use. Only plays while the app is actually open and running
-// (a message arriving over the live socket); it has nothing to do with the
-// OS-level sound on a backgrounded push notification, which the browser/OS
-// controls on its own.
+import { getAudioContext } from "./audioCtx.js";
 
 const PRESETS = {
   default: [{ freq: 720, duration: 0.11, delay: 0 }, { freq: 980, duration: 0.13, delay: 0.09 }],
@@ -28,13 +23,10 @@ export const TONE_OPTIONS = ["default", "chime", "pop", "marimba", "none"];
 export function playNotifyTone(tone) {
   if (tone === "none") return;
   const notes = PRESETS[tone] || PRESETS.default;
-  const Ctx = window.AudioContext || window.webkitAudioContext;
-  if (!Ctx) return;
-  const ctx = new Ctx();
-  ctx.resume?.().catch(() => {});
+  const ctx = getAudioContext();
+  if (!ctx) return;
 
   const now = ctx.currentTime;
-  let lastEnd = now;
   notes.forEach(({ freq, duration, delay }) => {
     const start = now + delay;
     const gain = ctx.createGain();
@@ -48,10 +40,5 @@ export function playNotifyTone(tone) {
     osc.connect(gain);
     osc.start(start);
     osc.stop(start + duration);
-    lastEnd = Math.max(lastEnd, start + duration);
   });
-
-  // AudioContexts are a limited browser resource — close this one once its
-  // last note has finished rather than leaving it open indefinitely.
-  setTimeout(() => ctx.close?.().catch(() => {}), (lastEnd - now) * 1000 + 100);
 }

@@ -9,7 +9,7 @@
 // online visit after a deploy "warms" the cache with whatever that build's
 // real filenames are, no build step needed to keep this file in sync.
 
-const SHELL_CACHE = "talkex-shell-v52";
+const SHELL_CACHE = "talkex-shell-v56";
 
 self.addEventListener("install", () => {
   // Take over immediately rather than waiting for every open tab to close
@@ -123,30 +123,42 @@ self.addEventListener("sync", (event) => {
 });
 
 self.addEventListener("push", (event) => {
-  if (!event.data) return;
-
+  // iOS Safari revokes push permission if a push event does NOT result in
+  // showNotification(). Never exit early without showing one.
   let payload;
   try {
-    payload = event.data.json();
+    payload = event.data ? event.data.json() : {};
   } catch {
-    payload = { title: "TalkEx", body: event.data.text() };
+    payload = { title: "TalkEx", body: (event.data && event.data.text()) || "" };
   }
 
-  const isCall = payload.data?.incoming_call === "true";
+  const title = payload.title || "TalkEx";
+  const body = payload.body || "";
+  const data = payload.data || {};
+  const isCall = data.incoming_call === "true";
 
-  event.waitUntil(
-    self.registration.showNotification(payload.title || "TalkEx", {
-      body: payload.body || "",
-      icon: "/icon-192.png",
-      badge: "/icon-192.png",
-      data: payload.data || {},
-      tag: payload.data?.chat_id || "talkex",
-      renotify: true,
-      requireInteraction: isCall,
-      vibrate: isCall ? [500, 200, 500, 200, 500, 1000] : [200, 100, 200],
-      silent: false,
-    })
-  );
+  // Options kept to the cross-platform safe subset. `vibrate`,
+  // `renotify` and `requireInteraction` are ignored or cause errors on
+  // iOS Safari — omitted so the notification always lands on every
+  // platform (Android Chrome, desktop, and iOS PWA alike).
+  const options = {
+    body,
+    icon: "/icon-192.png",
+    badge: "/icon-192.png",
+    data,
+    tag: data.chat_id || (isCall ? "talkex-call" : "talkex"),
+    silent: false,
+  };
+
+  // Android Chrome supports these; iOS ignores them harmlessly when
+  // feature-detected this way.
+  if ("vibrate" in Notification.prototype) {
+    options.vibrate = isCall ? [500, 200, 500, 200, 500, 1000] : [200, 100, 200];
+    options.renotify = true;
+  }
+  if (isCall) options.requireInteraction = true;
+
+  event.waitUntil(self.registration.showNotification(title, options));
 });
 
 self.addEventListener("notificationclick", (event) => {

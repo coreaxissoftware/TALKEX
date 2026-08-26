@@ -6,8 +6,16 @@
 // back a device token, which we send to the backend (/push/fcm-token) so it can
 // push to this device. Tapping a notification opens the right chat.
 
-import { Capacitor } from "@capacitor/core";
-import { Push } from "./api.js";
+import { Capacitor, registerPlugin } from "@capacitor/core";
+import { Push, getToken } from "./api.js";
+
+let _callState = null;
+function callStatePlugin() {
+  if (!_callState) {
+    try { _callState = registerPlugin("CallState"); } catch { _callState = null; }
+  }
+  return _callState;
+}
 
 let started = false;
 let lastToken = null;
@@ -54,6 +62,7 @@ export async function initNativePush(onOpenChat) {
     try { await Push.registerFcmToken(token.value); } catch (err) {
       console.warn("[push] Failed to send FCM token to backend:", err);
     }
+    saveCredentials();
   });
   await PushNotifications.addListener("registrationError", (err) => {
     console.error("[push] FCM registration failed:", err);
@@ -66,8 +75,22 @@ export async function initNativePush(onOpenChat) {
     if (chatId && onOpenChat) onOpenChat(chatId);
   });
 
+  window.talkexOpenChat = (chatId) => { if (chatId && onOpenChat) onOpenChat(chatId); };
+
   await PushNotifications.register();
 }
+
+function saveCredentials() {
+  const plugin = callStatePlugin();
+  if (!plugin) return;
+  const token = getToken();
+  const apiUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
+  if (token) {
+    plugin.saveCredentials({ token, apiUrl }).catch(() => {});
+  }
+}
+
+export { saveCredentials as syncNativeCredentials };
 
 /** Best-effort: stop this device receiving push (on sign-out). */
 export async function stopNativePush() {

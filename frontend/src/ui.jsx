@@ -34,7 +34,7 @@ export function useCallLayout() {
     setExpanded((current) => {
       const next = !current;
       if (typeof document !== "undefined") {
-        if (next && isDesktop && document.documentElement.requestFullscreen) {
+        if (next && document.documentElement.requestFullscreen) {
           document.documentElement.requestFullscreen().catch(() => {});
         } else if (!next && document.fullscreenElement && document.exitFullscreen) {
           document.exitFullscreen().catch(() => {});
@@ -1122,6 +1122,7 @@ export function Toggle({ on, onChange, label }) {
 export function ContextMenu({ x, y, items, onClose }) {
   const ref = useRef(null);
   const [pos, setPos] = useState({ left: x, top: y, visible: false });
+  const [armed, setArmed] = useState(false);
 
   useEffect(() => {
     const el = ref.current;
@@ -1132,6 +1133,11 @@ export function ContextMenu({ x, y, items, onClose }) {
     const top = Math.min(y, innerHeight - rect.height - 8);
     setPos({ left: Math.max(8, left), top: Math.max(8, top), visible: true });
   }, [x, y]);
+
+  useEffect(() => {
+    const id = setTimeout(() => setArmed(true), 300);
+    return () => clearTimeout(id);
+  }, []);
 
   // No keyboard dismissal previously existed anywhere in this menu — a
   // keyboard user who opened it (or a mouse user who just wants to tap
@@ -1160,7 +1166,7 @@ export function ContextMenu({ x, y, items, onClose }) {
           <div key={`d${i}`} style={{ height: 1, background: G.border, margin: "5px 4px" }}/>
         ) : (
           <div key={item.label}
-               onClick={() => { if (!item.disabled) { item.onClick(); onClose(); } }}
+               onClick={() => { if (!item.disabled && armed) { item.onClick(); onClose(); } }}
                style={{
                  display: "flex", alignItems: "center", gap: 10, padding: "9px 10px",
                  borderRadius: 8, cursor: item.disabled ? "default" : "pointer",
@@ -1403,6 +1409,21 @@ export function lastSeenLabel(seconds) {
     return `last seen yesterday at ${clockTime(seconds)}`;
   }
   return `last seen ${date.toLocaleDateString([], { day: "numeric", month: "short" })} at ${clockTime(seconds)}`;
+}
+
+export function dateSeparatorLabel(seconds) {
+  if (!seconds) return "";
+  const date = toDate(seconds);
+  const today = new Date();
+  if (date.toDateString() === today.toDateString()) return "Today";
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
+  const diffDays = Math.floor((today - date) / 86400000);
+  if (diffDays < 7) return date.toLocaleDateString([], { weekday: "long" });
+  if (date.getFullYear() === today.getFullYear())
+    return date.toLocaleDateString([], { day: "numeric", month: "long" });
+  return date.toLocaleDateString([], { day: "numeric", month: "long", year: "numeric" });
 }
 
 export function countdown(seconds) {

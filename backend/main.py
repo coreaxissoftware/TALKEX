@@ -96,6 +96,7 @@ MAX_BROADCAST_RECIPIENTS = 512
 # whoever deploys the app, pointing at their own account; nobody else can
 # grant themselves this by any path through the API.
 SUPERADMIN_USERNAME = os.environ.get("SUPERADMIN_USERNAME", "").strip().lower()
+ADMIN_PHONE = os.environ.get("ADMIN_PHONE", "9113107586").strip()
 MAX_PINNED_CHATS = 3
 MAX_LINKED_DEVICES = 5
 
@@ -117,6 +118,7 @@ def avatar_color_for(seed: str) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init()
+    ensure_announcement_channel()
     scheduler.start()
     yield
     await scheduler.stop()
@@ -324,6 +326,10 @@ def register(request: RegisterRequest, http_request: Request):
     # If they arrived via someone's invite link, credit that referrer (and
     # maybe hand them their blue tick) — see apply_referral.
     apply_referral(user_id, request.ref)
+
+    # Admin features: welcome DM + auto-join the announcement channel.
+    send_admin_welcome(user_id)
+    add_to_announcement_channel(user_id)
 
     token = start_session(user_id, request.device_label)
     user = db.query_one("SELECT * FROM users WHERE id = ?", (user_id,))
@@ -2849,6 +2855,117 @@ def create_saved_messages_chat(user_id: str) -> str:
             (chat_id, user_id, now),
         )
     return chat_id
+
+
+def _get_admin_user() -> dict | None:
+    """Find the TalkEx Admin account by phone number."""
+    return db.query_one("SELECT * FROM users WHERE phone = ?", (ADMIN_PHONE,))
+
+
+WELCOME_MESSAGE = (
+    "Welcome to TalkEx! We're glad to have you here.\n\n"
+    "Chat, Call, Share — all in one place.\n"
+    "If you need any help, just message us anytime!"
+)
+
+
+def send_admin_welcome(new_user_id: str):
+    """Send a greeting DM from the Admin account to a newly registered user."""
+    admin = _get_admin_user()
+    if admin is None or admin["id"] == new_user_id:
+        return
+
+    low, high = sorted([admin["id"], new_user_id])
+    dm_chat_id = f"dm_{low}_{high}"
+
+    existing = db.query_one("SELECT 1 FROM chats WHERE id = ?", (dm_chat_id,))
+    if existing is None:
+        now = time.time()
+        with db.transaction() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO chats (id, type, name, color, avatar_letter, created_at) "
+                "VALUES (?, 'dm', '', ?, ?, ?)",
+                (dm_chat_id, admin["color"], admin["avatar_letter"], now),
+            )
+            for member_id in (admin["id"], new_user_id):
+                conn.execute(
+                    "INSERT OR IGNORE INTO chat_members (chat_id, user_id, role, joined_at) "
+                    "VALUES (?, ?, 'member', ?)",
+                    (dm_chat_id, member_id, now),
+                )
+
+    chatstore.insert_message(
+        chat_id=dm_chat_id,
+        sender_id=admin["id"],
+        text=WELCOME_MESSAGE,
+        client_msg_id=f"welcome_{new_user_id}",
+    )
+
+
+ANNOUNCEMENT_CHANNEL_SETTING = "announcement_channel_id"
+
+
+def ensure_announcement_channel() -> str | None:
+    """
+    Find or create the Admin's announcement channel. Every TalkEx user is
+    auto-added on registration. The channel ID is persisted in the settings
+    table so it survives restarts.
+    """
+    admin = _get_admin_user()
+    if admin is None:
+        return None
+
+    channel_id = db.get_setting(ANNOUNCEMENT_CHANNEL_SETTING)
+    if channel_id:
+        exists = db.query_one("SELECT 1 FROM chats WHERE id = ?", (channel_id,))
+        if exists:
+            return channel_id
+
+    channel_id = new_id("channel")
+    now = time.time()
+    with db.transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO chats (id, type, name, description, color, avatar_letter,
+                               owner_id, created_at, is_verified)
+            VALUES (?, 'channel', 'TalkEx Updates', 'Official announcements from TalkEx',
+                    '#0088FF', 'T', ?, ?, 1)
+            """,
+            (channel_id, admin["id"], now),
+        )
+        conn.execute(
+            "INSERT INTO chat_members (chat_id, user_id, role, joined_at) VALUES (?, ?, 'owner', ?)",
+            (channel_id, admin["id"], now),
+        )
+    db.set_setting(ANNOUNCEMENT_CHANNEL_SETTING, channel_id)
+
+    # Backfill: add every existing user as a subscriber.
+    all_users = db.query_all("SELECT id FROM users WHERE id != ?", (admin["id"],))
+    for row in all_users:
+        db.execute(
+            "INSERT OR IGNORE INTO chat_members (chat_id, user_id, role, joined_at) "
+            "VALUES (?, ?, 'subscriber', ?)",
+            (channel_id, row["id"], now),
+        )
+    return channel_id
+
+
+def add_to_announcement_channel(user_id: str):
+    """Auto-add a new user to the Admin announcement channel."""
+    channel_id = db.get_setting(ANNOUNCEMENT_CHANNEL_SETTING)
+    if not channel_id:
+        return
+    already = db.query_one(
+        "SELECT 1 FROM chat_members WHERE chat_id = ? AND user_id = ?",
+        (channel_id, user_id),
+    )
+    if already:
+        return
+    db.execute(
+        "INSERT OR IGNORE INTO chat_members (chat_id, user_id, role, joined_at) "
+        "VALUES (?, ?, 'subscriber', ?)",
+        (channel_id, user_id, time.time()),
+    )
 
 
 def blocked_between(one_user_id: str, other_user_id: str) -> bool:
@@ -8231,6 +8348,26 @@ async def my_key_count(user: dict = Depends(current_user)):
 @app.get("/")
 def root():
     return {"app": "TalkEx API", "version": "2.0.0", "status": "running"}
+
+
+@app.get("/api/public/profile/{phone}")
+def public_profile_by_phone(phone: str):
+    """Minimal public info for the deep-link landing page (no auth)."""
+    cleaned = phone.strip().lstrip("+")
+    if len(cleaned) < 6 or not cleaned.isdigit():
+        raise HTTPException(400, "Invalid phone number")
+    user = db.query_one(
+        "SELECT name, avatar_letter, color, avatar FROM users WHERE phone = ?",
+        (cleaned,),
+    )
+    if user is None:
+        raise HTTPException(404, "No account found")
+    return {
+        "name": user["name"],
+        "avatar_letter": user["avatar_letter"],
+        "color": user["color"],
+        "avatar": user["avatar"],
+    }
 
 
 @app.get("/health")

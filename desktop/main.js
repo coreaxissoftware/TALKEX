@@ -1,11 +1,11 @@
 // TalkEx desktop (Electron) — a thin native window around the live web app.
-// It loads https://talkex.coreaxis.cloud so the desktop app is always in sync
+// It loads https://web.talkex.in so the desktop app is always in sync
 // with the deployed frontend (no per-release rebuild of the .exe needed).
 
 const { app, BrowserWindow, shell, Menu } = require("electron");
 const path = require("path");
 
-const APP_URL = process.env.TALKEX_URL || "https://talkex.coreaxis.cloud";
+const APP_URL = process.env.TALKEX_URL || "https://web.talkex.in";
 
 let mainWindow = null;
 

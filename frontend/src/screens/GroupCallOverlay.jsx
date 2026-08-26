@@ -470,7 +470,7 @@ export default function GroupCallOverlay({
           fontSize: 16, color: "#fff",
         }}>⌄</div>
       )}
-      {isDesktop && (
+      {(
         <div onClick={toggle} title={expanded ? "Exit full screen" : "Full screen"} style={{
           position: "absolute", top: 14, right: 14, zIndex: 1,
           width: 34, height: 34, borderRadius: "50%", cursor: "pointer",
@@ -1039,21 +1039,13 @@ function ActiveGroupCall({
       )}
       {showMore && (
         <MoreMenu onClose={() => setShowMore(false)} items={[
-          {
+          ...(navigator.mediaDevices?.getDisplayMedia ? [{
             label: call.sharingScreen ? "Stop sharing screen" : "Share screen",
-            // Deliberately not `disabled` — a host-only restriction is
-            // enforced server-side (group_call_screen_share_start) and
-            // rejection already surfaces as a toast via
-            // group_call_action_denied. A disabled row here just silently
-            // eats the tap with no explanation, which reads as "broken"
-            // rather than "not allowed" — and would have wrongly blocked a
-            // sharer from tapping "Stop sharing" if the host changed the
-            // policy mid-share, since sharingScreen isn't part of this check.
             sub: call.permissions?.screen_share === "host" && !isHost && !call.sharingScreen
               ? "Only the host allows this right now" : undefined,
             icon: I.screenShare("#fff", 18),
             onClick: onShareScreen,
-          },
+          }] : []),
           ...(call.sharingScreen ? [{
             label: `Optimize for video ${call.screenOptimizeFor === "motion" ? "●" : "○"}`,
             sub: "Smoother motion, softer detail — best for playing a video",

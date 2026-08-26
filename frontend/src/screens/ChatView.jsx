@@ -1,4 +1,4 @@
-import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Actions, Chats, Contacts, Me, Meetings, Messages, Pins, Products, Report, Scheduled, Search, Translate,
   Uploads, Users,
@@ -9,7 +9,7 @@ import { playNotifyTone, TONE_OPTIONS } from "../notifyTone.js";
 import {
   Av, Button, ChatBackdrop, ContextMenu, CoverImage, EMOJIS, EMOJI_GROUPS, Field, G, I, SRow, SocialLinks,
   Spinner, Toggle,
-  clockTime, countdown, durationLabel, lastSeenLabel, localInputToUnix, toDate, whenLabel, useEnterToSend,
+  clockTime, countdown, dateSeparatorLabel, durationLabel, lastSeenLabel, localInputToUnix, toDate, whenLabel, useEnterToSend,
   useIsDesktop, usePrompt,
 } from "../ui.jsx";
 import { useVoiceRecorder } from "../useVoiceRecorder.js";
@@ -838,6 +838,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   // lets a specific upload be found again for cancelUpload below.
   const uploadControllers = useRef(new Map()); // clientMsgId -> AbortController
   const [uploadingIds, setUploadingIds] = useState(() => new Set());
+  const [uploadProgress, setUploadProgress] = useState(() => new Map());
 
   function cancelUpload(clientMsgId) {
     uploadControllers.current.get(clientMsgId)?.abort();
@@ -889,6 +890,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
     try {
       const stored = await sendFileReliably({
         chatId: chat.id, file, kind, text, viewOnce, clientMsgId, signal: controller.signal,
+        onProgress: (pct) => setUploadProgress((prev) => new Map(prev).set(clientMsgId, pct)),
       });
       setMessages((current) =>
         stored
@@ -911,6 +913,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         next.delete(clientMsgId);
         return next;
       });
+      setUploadProgress((prev) => { const next = new Map(prev); next.delete(clientMsgId); return next; });
     }
   }
 
@@ -1341,7 +1344,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
             const x = event.clientX, y = event.clientY;
             bgLongPressTimer.current = setTimeout(() => {
               bgLongPressFired.current = true;
-              setBgMenu({ x, y });
+              setBgMenu({ x, y: y - 50 });
             }, 500);
           }}
           onPointerMove={(event) => {
@@ -1375,14 +1378,28 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
             </div>
           </div>
         )}
-        {loading ? <Spinner/> : visibleMessages.map((message) => {
+        {loading ? <Spinner/> : visibleMessages.map((message, idx) => {
+          const prevMsg = idx > 0 ? visibleMessages[idx - 1] : null;
+          const curDay = toDate(message.created_at).toDateString();
+          const prevDay = prevMsg ? toDate(prevMsg.created_at).toDateString() : null;
+          const showDatePill = !prevMsg || curDay !== prevDay;
+          const datePill = showDatePill ? (
+            <div key={`date_${curDay}`} style={{ textAlign: "center", margin: "10px 0 6px" }}>
+              <span style={{
+                display: "inline-block", padding: "4px 12px", borderRadius: 8,
+                background: G.card, color: G.sub, fontSize: 12, fontWeight: 500,
+                boxShadow: "0 1px 2px rgba(0,0,0,0.08)",
+              }}>{dateSeparatorLabel(message.created_at)}</span>
+            </div>
+          ) : null;
           const albumInfo = mediaGroupMap.get(message.id);
-          if (albumInfo && albumInfo.index > 0) return null;
+          if (albumInfo && albumInfo.index > 0) return datePill;
           if (albumInfo && albumInfo.index === 0) {
             const mine = message.sender_id === me?.id;
             const last = albumInfo.members[albumInfo.members.length - 1];
-            return (
-              <div key={message.id} style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start", marginBottom: 8 }}>
+            return (<React.Fragment key={message.id}>
+              {datePill}
+              <div style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start", marginBottom: 8 }}>
                 <div style={{ maxWidth: "min(78%, 300px)", borderRadius: 16, overflow: "hidden",
                   borderBottomRightRadius: mine ? 4 : 16, borderBottomLeftRadius: mine ? 16 : 4,
                   background: mine ? (chatAccent || G.accent) : G.card, border: mine ? "none" : `1px solid ${G.border}`, padding: 3,
@@ -1412,18 +1429,23 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
                   </div>
                 </div>
               </div>
-            );
+            </React.Fragment>);
           }
           return message.kind === "system" ? (
-            <div key={message.id} style={{ textAlign: "center", margin: "8px 0" }}>
-              <span style={{
-                display: "inline-block", padding: "5px 12px", borderRadius: 10,
-                background: `${G.accent}12`, color: G.muted, fontSize: 12, lineHeight: 1.4,
-                maxWidth: "80%",
-              }}>{message.text}</span>
-            </div>
+            <React.Fragment key={message.id}>
+              {datePill}
+              <div style={{ textAlign: "center", margin: "8px 0" }}>
+                <span style={{
+                  display: "inline-block", padding: "5px 12px", borderRadius: 10,
+                  background: `${G.accent}12`, color: G.muted, fontSize: 12, lineHeight: 1.4,
+                  maxWidth: "80%",
+                }}>{message.text}</span>
+              </div>
+            </React.Fragment>
           ) : (
-          <div key={message.id} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+          <React.Fragment key={message.id}>
+          {datePill}
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
             {selectMode && (
               <div onClick={() => setSelectedMsgIds((prev) => {
                 const next = new Set(prev);
@@ -1452,6 +1474,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
               <Bubble message={message} me={me}
                       chatAccent={chatAccent}
                       onCancelUpload={cancelUpload}
+                      uploadPct={uploadProgress.get(message.client_msg_id)}
                       translatedText={translations[message.id]}
                       replyTarget={messagesById.get(message.reply_to_id)}
                       meetingUpdates={meetingUpdates}
@@ -1499,6 +1522,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
               </ErrorBoundary>
             </div>
           </div>
+          </React.Fragment>
           );
         })}
         <div ref={bottom}/>
@@ -2320,7 +2344,7 @@ const SWIPE_INFO_TRIGGER = -56;
 const SWIPE_INFO_MAX = -74;
 
 const Bubble = memo(function Bubble({ message, me, chatAccent, translatedText, replyTarget, meetingUpdates, isPinned, isRead, isDelivered, signature,
-                  commentsOn, onComments, onDoubleTap, onLongPress, onSwipeReply, onSwipeInfo, onVote, onForward, onOpenMedia, onCallAgain, onJoinMeeting, onCancelUpload, toast }) {
+                  commentsOn, onComments, onDoubleTap, onLongPress, onSwipeReply, onSwipeInfo, onVote, onForward, onOpenMedia, onCallAgain, onJoinMeeting, onCancelUpload, uploadPct, toast }) {
   const mine = message.sender_id === me.id;
   const gone = message.deleted_at || message.expired;
   const spamSettings = getSpamSettings();
@@ -2577,7 +2601,7 @@ const Bubble = memo(function Bubble({ message, me, chatAccent, translatedText, r
               // reaches the server.
               ? <ViewOnceAttachment message={message} mine={mine}/>
               : <Attachment message={message} mine={mine} onForward={onForward} onOpenMedia={onOpenMedia}
-                             onCancelUpload={onCancelUpload} toast={toast}/>}
+                             onCancelUpload={onCancelUpload} uploadPct={uploadPct} toast={toast}/>}
             {message.text && (
               <div style={{
                 fontSize: 14, lineHeight: 1.4, whiteSpace: "pre-wrap", marginTop: 6,
@@ -3125,7 +3149,7 @@ function AlbumThumb({ message }) {
   return <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>;
 }
 
-const Attachment = memo(function Attachment({ message, mine, onForward, onOpenMedia, onCancelUpload, toast }) {
+const Attachment = memo(function Attachment({ message, mine, onForward, onOpenMedia, onCancelUpload, uploadPct, toast }) {
   const [blobUrl, setBlobUrl] = useState(null);
   const [error, setError] = useState(false);
   // Tapping a photo/video opens it full-screen, the way WhatsApp does —
@@ -3181,24 +3205,32 @@ const Attachment = memo(function Attachment({ message, mine, onForward, onOpenMe
   // down before queuing), cancelling that one is a "remove from the retry
   // queue" action this doesn't wire up.
   if (message.pending || message.queued) {
+    const pct = uploadPct != null ? Math.round(uploadPct * 100) : null;
     return (
-      <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 180, padding: "2px 0" }}>
-        <Spinner small/>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {message.queued ? "Waiting to send…" : "Uploading…"}
+      <div style={{ minWidth: 180, padding: "2px 0" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <Spinner small/>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {message.queued ? "Waiting to send…" : pct != null ? `Uploading… ${pct}%` : "Uploading…"}
+            </div>
+            <div style={{ fontSize: 11, opacity: 0.7, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {fileName}
+            </div>
           </div>
-          <div style={{ fontSize: 11, opacity: 0.7, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {fileName}
-          </div>
+          {onCancelUpload && !message.queued && (
+            <button onClick={(event) => { event.stopPropagation(); onCancelUpload(message.client_msg_id); }}
+                    title="Cancel upload" style={{
+                      width: 26, height: 26, borderRadius: "50%", flexShrink: 0, cursor: "pointer",
+                      border: "none", background: mine ? "#ffffff33" : G.dim,
+                      color: mine ? "#fff" : G.text, fontSize: 15, lineHeight: 1,
+                    }}>×</button>
+          )}
         </div>
-        {onCancelUpload && !message.queued && (
-          <button onClick={(event) => { event.stopPropagation(); onCancelUpload(message.client_msg_id); }}
-                  title="Cancel upload" style={{
-                    width: 26, height: 26, borderRadius: "50%", flexShrink: 0, cursor: "pointer",
-                    border: "none", background: mine ? "#ffffff33" : G.dim,
-                    color: mine ? "#fff" : G.text, fontSize: 15, lineHeight: 1,
-                  }}>×</button>
+        {pct != null && (
+          <div style={{ marginTop: 6, height: 3, borderRadius: 2, background: mine ? "#ffffff22" : G.dim, overflow: "hidden" }}>
+            <div style={{ height: "100%", width: `${pct}%`, background: mine ? "#ffffffaa" : G.accent, borderRadius: 2, transition: "width 0.2s ease" }}/>
+          </div>
         )}
       </div>
     );
@@ -3227,6 +3259,17 @@ const Attachment = memo(function Attachment({ message, mine, onForward, onOpenMe
   }
 
   if (!effectiveUrl) {
+    if (message.kind === "photo" || message.kind === "video") {
+      return (
+        <div style={{
+          width: "100%", maxWidth: 260, aspectRatio: "4/3", borderRadius: 13,
+          background: mine ? "#ffffff12" : G.dim,
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <Spinner small/>
+        </div>
+      );
+    }
     return (
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0" }}>
         <Spinner small/>
@@ -4005,6 +4048,8 @@ function MessageMenu({ message, me, isModerator, reactionsEnabled = true, isPinn
   const canUnsend = !message.deleted_at && mine;
   const canDeleteForEveryone = !message.deleted_at && (mine || isModerator);
   const [showAllEmojis, setShowAllEmojis] = useState(false);
+  const [armed, setArmed] = useState(false);
+  useEffect(() => { const id = setTimeout(() => setArmed(true), 300); return () => clearTimeout(id); }, []);
 
   // The six most-reached-for reactions sit inline; "+" reveals the rest.
   const quickEmojis = EMOJIS.slice(0, 6);
@@ -4038,6 +4083,7 @@ function MessageMenu({ message, me, isModerator, reactionsEnabled = true, isPinn
     }}>
       <div onClick={(e) => e.stopPropagation()} style={{
         display: "flex", flexDirection: "column", gap: 10, width: "100%", maxWidth: 300,
+        pointerEvents: armed ? "auto" : "none",
       }}>
         {/* Reaction bar — hidden entirely when an admin has turned reactions
             off for this channel/group. */}
@@ -4133,13 +4179,13 @@ function MessageInfoSheet({ message, chat, members, readState, me, onClose }) {
         {mine && (
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
             <span style={{ color: G.muted }}>Delivered</span>
-            <span>{fmtTs(deliveredAt) || (delivered.length > 0 || read.length > 0 ? "Yes" : "—")}</span>
+            <span>{fmtTs(deliveredAt) || "—"}</span>
           </div>
         )}
         {mine && (
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
             <span style={{ color: G.muted }}>Read</span>
-            <span style={{ color: readAt ? G.accent : undefined }}>{fmtTs(readAt) || (read.length > 0 ? "Yes" : "—")}</span>
+            <span style={{ color: readAt ? G.accent : undefined }}>{fmtTs(readAt) || "—"}</span>
           </div>
         )}
       </div>

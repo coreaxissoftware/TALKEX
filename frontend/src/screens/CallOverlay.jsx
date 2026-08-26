@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Contacts } from "../api.js";
 import { Av, G, I, useCallLayout } from "../ui.jsx";
 import { setCallActive, onPipModeChange } from "../nativePip.js";
+import { getAudioContext } from "../audioCtx.js";
 
 export function mmss(totalSeconds) {
   const seconds = Math.max(0, Math.round(totalSeconds || 0));
@@ -306,10 +307,8 @@ export default function CallOverlay({
     const phase = call?.phase;
     if (phase !== "outgoing" && phase !== "incoming") return undefined;
 
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    if (!Ctx) return undefined;
-    const ctx = new Ctx();
-    ctx.resume?.().catch(() => {});
+    const ctx = getAudioContext();
+    if (!ctx) return undefined;
     let stopped = false;
     const timers = [];
 
@@ -360,7 +359,6 @@ export default function CallOverlay({
       stopped = true;
       timers.forEach(clearTimeout);
       if (navigator.vibrate) navigator.vibrate(0);
-      ctx.close?.().catch(() => {});
     };
   }, [call?.phase]);
 
@@ -818,17 +816,22 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
             disabled: call.callKind !== "video" || call.sharingScreen,
             onClick: () => { setShowMore(false); setShowEffects(true); },
           },
-          {
+          ...(navigator.mediaDevices?.getDisplayMedia ? [{
             label: call.sharingScreen ? "Stop sharing screen" : "Share screen",
             sub: call.callKind !== "video" ? "Turn your camera on first" : undefined,
             icon: I.screenShare("#fff", 18),
             disabled: call.callKind !== "video",
             onClick: onShareScreen,
-          },
+          }] : []),
           {
             label: call.onHold ? "Resume call" : "Hold",
             icon: call.onHold ? I.play("#fff", 18) : I.pause("#fff", 18),
             onClick: onToggleHold,
+          },
+          {
+            label: expanded ? "Exit fullscreen" : "Fullscreen",
+            icon: expanded ? I.shrink("#fff", 18) : I.expand("#fff", 18),
+            onClick: () => { setShowMore(false); toggle(); },
           },
         ]}/>
       )}

@@ -312,7 +312,7 @@ function CallRow({ call, me, onCallBack, onDelete, onArchive, onMenu, selectMode
         longPressFired.current = true;
         dragging.current = false;
         setDragX(0);
-        onMenu(x, y);
+        onMenu(x, y - 50);
       }, LONG_PRESS_MS);
     }
   }

@@ -119,16 +119,13 @@ def send(token: str, title: str, body: str, data: dict | None = None) -> str:
             }
         }
     else:
+        str_data["title"] = title
+        str_data["body"] = body
         message = {
             "message": {
                 "token": token,
-                "notification": {"title": title, "body": body},
                 "data": str_data,
-                # High priority + default sound/channel so it wakes a sleeping device.
-                "android": {
-                    "priority": "high",
-                    "notification": {"sound": "default", "channel_id": "talkex_default"},
-                },
+                "android": {"priority": "high"},
             }
         }
     url = f"https://fcm.googleapis.com/v1/projects/{_project_id}/messages:send"

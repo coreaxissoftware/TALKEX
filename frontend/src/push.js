@@ -39,8 +39,18 @@ export async function enablePush() {
     throw new Error("Notification permission was denied");
   }
 
-  const registration = await navigator.serviceWorker.register("/service-worker.js");
-  await navigator.serviceWorker.ready;
+  // Register the service worker first, then wait for it to become active.
+  // On iOS PWA this is critical — pushManager.subscribe() only works on
+  // a fully active registration.
+  let registration = await navigator.serviceWorker.getRegistration();
+  if (!registration) {
+    registration = await navigator.serviceWorker.register("/service-worker.js");
+  }
+  // Wait until the worker is active (not just installing/waiting).
+  if (!registration.active) {
+    await navigator.serviceWorker.ready;
+    registration = await navigator.serviceWorker.getRegistration();
+  }
 
   const { key } = await Push.vapidPublicKey();
   const subscription = await registration.pushManager.subscribe({

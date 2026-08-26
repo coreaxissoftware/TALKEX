@@ -88,7 +88,7 @@ export default function Login({ onAuthenticated }) {
   return (
     <Screen style={{
       justifyContent: "center", padding: 24, position: "relative", overflow: "hidden",
-      maxWidth: isDesktop ? (wideQr ? 860 : 480) : 430, background: "transparent",
+      maxWidth: isDesktop ? (wideQr ? 920 : 480) : 430, background: "transparent",
     }}>
       <ParticleNetwork/>
 
@@ -592,9 +592,10 @@ function QrSignIn({ onAuthenticated, wide, onUsePhone }) {
       // Server-generated SVG from qrcode.make() — not user input, safe to inline.
       dangerouslySetInnerHTML={{ __html: qrSvg }}
       style={{
-        width: wide ? 200 : 180, height: wide ? 200 : 180, margin: wide ? "0 0 16px" : "0 auto 16px",
-        background: "#fff", borderRadius: 14, padding: 10, display: "flex",
+        width: wide ? 264 : 220, height: wide ? 264 : 220, margin: wide ? "0 0 16px" : "0 auto 16px",
+        background: "#fff", borderRadius: 16, padding: 12, display: "flex",
         alignItems: "center", justifyContent: "center",
+        boxShadow: "0 4px 20px rgba(0,0,0,0.12)",
       }}/>
   );
 
@@ -614,20 +615,20 @@ function QrSignIn({ onAuthenticated, wide, onUsePhone }) {
 
   if (wide) {
     return (
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 220px", gap: 32, alignItems: "start" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 36, alignItems: "center" }}>
         <div>
-          <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 18 }}>Scan to log in</div>
+          <div style={{ fontSize: 24, fontWeight: 700, marginBottom: 22 }}>Scan to log in</div>
           <Step n={1}>Open <b>TalkEx</b> on a device you're already signed into</Step>
           <Step n={2}>Go to <b>Settings → Linked devices → Link a device</b></Step>
           <Step n={3}>Scan this QR code, or type the code shown alongside it</Step>
           {onUsePhone && (
             <div onClick={onUsePhone} style={{
-              marginTop: 8, fontSize: 13.5, fontWeight: 600, color: G.accentD,
+              marginTop: 12, fontSize: 13.5, fontWeight: 600, color: G.accentD,
               cursor: "pointer", textDecoration: "underline", width: "fit-content",
             }}>Log in with phone number →</div>
           )}
         </div>
-        <div style={{ textAlign: "left" }}>
+        <div style={{ textAlign: "center" }}>
           {qrBlock}
           {codeBlock}
           {waitingBlock}

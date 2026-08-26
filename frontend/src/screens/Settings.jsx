@@ -2898,12 +2898,14 @@ function InviteFriend({ me, toast }) {
     if (selected.size === 0) { toast("Select contacts to invite"); return; }
     const phones = Array.from(selected).join(",");
     const encoded = encodeURIComponent(inviteText);
-    window.open(`sms:${phones}?&body=${encoded}`, "_self");
+    const smsUrl = `sms:${phones}?&body=${encoded}`;
+    try { window.location.href = smsUrl; } catch { window.open(smsUrl, "_self"); }
   }
 
   function sendSmsInvite(phone) {
     const encoded = encodeURIComponent(inviteText);
-    window.open(`sms:${phone}?&body=${encoded}`, "_self");
+    const smsUrl = `sms:${phone}?&body=${encoded}`;
+    try { window.location.href = smsUrl; } catch { window.open(smsUrl, "_self"); }
   }
 
   return (
@@ -2916,11 +2918,15 @@ function InviteFriend({ me, toast }) {
         </div>
         <Button style={{ width: "100%", marginBottom: 8 }} onClick={async () => {
           if (navigator.share) {
-            try { await navigator.share({ title: "TalkEx", text: inviteText }); } catch { /* cancelled */ }
-          } else {
-            navigator.clipboard?.writeText(inviteText);
-            toast("Invite link copied");
+            try {
+              await navigator.share({ title: "TalkEx", text: inviteText });
+              return;
+            } catch (err) {
+              if (err.name === "AbortError") return;
+            }
           }
+          try { await navigator.clipboard?.writeText(inviteText); } catch {}
+          toast("Invite link copied");
         }}>{I.share("#fff", 15)} Share invite link</Button>
         <Button variant="ghost" style={{ width: "100%", marginBottom: 8 }} onClick={() => {
           navigator.clipboard?.writeText(inviteUrl);

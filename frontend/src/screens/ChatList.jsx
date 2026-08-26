@@ -116,6 +116,11 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
       const needle = query.trim().toLowerCase();
       list = list.filter((chat) => displayName(chat, contactNameMap).toLowerCase().includes(needle));
     }
+    list = [...list].sort((a, b) => {
+      const ap = a.is_pinned ? 1 : 0;
+      const bp = b.is_pinned ? 1 : 0;
+      return bp - ap;
+    });
     return list;
   }, [activeChats, archivedChats, category, contactUserIds, contactNameMap, query]);
 
@@ -129,14 +134,18 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
   }
 
   async function archiveChat(chat) {
-    await Chats.settings(chat.id, { archived: !chat.archived });
-    onChanged();
+    try {
+      await Chats.settings(chat.id, { archived: !chat.archived });
+      onChanged();
+    } catch (e) { toast(e.message || "Could not archive chat"); }
   }
 
   async function clearChat(chat) {
-    await Chats.clear(chat.id);
-    toast("Chat cleared");
-    onChanged();
+    try {
+      await Chats.clear(chat.id);
+      toast("Chat cleared");
+      onChanged();
+    } catch (e) { toast(e.message || "Could not clear chat"); }
   }
 
   function deleteChat(chat) {
@@ -145,30 +154,38 @@ export default function ChatList({ chats, loading, typingBy, onOpen, onSearch, o
 
   async function confirmDeleteChat() {
     if (!confirmDelete) return;
-    await Chats.clear(confirmDelete.id);
-    await Chats.settings(confirmDelete.id, { archived: true });
+    try {
+      await Chats.clear(confirmDelete.id);
+      await Chats.settings(confirmDelete.id, { archived: true });
+      toast("Chat deleted");
+      onChanged();
+    } catch (e) { toast(e.message || "Could not delete chat"); }
     setConfirmDelete(null);
-    toast("Chat deleted");
-    onChanged();
   }
 
   async function markChatRead(chat) {
-    await Actions.markRead(chat.id, chat.last_seq);
-    onChanged();
+    try {
+      await Actions.markRead(chat.id, chat.last_seq);
+      onChanged();
+    } catch (e) { toast(e.message || "Could not mark as read"); }
   }
 
   async function toggleChatCalls(chat) {
-    const next = chat.calls_enabled === false;
-    await Chats.settings(chat.id, { calls_enabled: next });
-    toast(next ? "Calls turned on for this chat" : "Calls turned off for this chat");
-    onChanged();
+    try {
+      const next = chat.calls_enabled === false;
+      await Chats.settings(chat.id, { calls_enabled: next });
+      toast(next ? "Calls turned on for this chat" : "Calls turned off for this chat");
+      onChanged();
+    } catch (e) { toast(e.message || "Could not update calls setting"); }
   }
 
   async function toggleFavoriteChat(chat) {
-    const next = !chat.is_favorite;
-    await Chats.settings(chat.id, { is_favorite: next });
-    toast(next ? "Added to favourites" : "Removed from favourites");
-    onChanged();
+    try {
+      const next = !chat.is_favorite;
+      await Chats.settings(chat.id, { is_favorite: next });
+      toast(next ? "Added to favourites" : "Removed from favourites");
+      onChanged();
+    } catch (e) { toast(e.message || "Could not update favourite"); }
   }
 
   function menuItemsFor(chat) {
@@ -784,7 +801,7 @@ const ChatRow = memo(function ChatRow({ chat, typing, onOpen, onPin, onArchive, 
         longPressFired.current = true;
         dragging.current = false;
         setDragX(0);
-        onMenu(x, y);
+        onMenu(x, y - 50);
       }, LONG_PRESS_MS);
     }
   }

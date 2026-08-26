@@ -25,6 +25,10 @@ services:
       # a fresh deploy has no way for anyone to ever reach /admin/*.
       - key: SUPERADMIN_USERNAME
         sync: false
+      # The phone number of the TalkEx Admin account — auto-sends a
+      # welcome DM to every new user and owns the announcement channel.
+      - key: ADMIN_PHONE
+        value: "9113107586"
       # SMS/email OTP delivery is silently a no-op (console-log fallback)
       # until these are set, either here or later via the superadmin
       # Integrations panel. Declared here so a fresh deploy shows them as

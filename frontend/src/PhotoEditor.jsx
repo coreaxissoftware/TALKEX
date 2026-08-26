@@ -702,7 +702,14 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
       const drawW = displayedW * exportScaleX;
       const drawH = displayedH * exportScaleY;
 
+      if (fineAngle) {
+        ctx.save();
+        ctx.translate(canvas.width / 2, canvas.height / 2);
+        ctx.rotate((fineAngle * Math.PI) / 180);
+        ctx.translate(-canvas.width / 2, -canvas.height / 2);
+      }
       ctx.drawImage(rotatedSrc.canvas, drawX, drawY, drawW, drawH);
+      if (fineAngle) ctx.restore();
       ctx.filter = "none";
 
       // Draw marks scaled to crop

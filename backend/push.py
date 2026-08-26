@@ -72,12 +72,19 @@ def send(subscription: dict, title: str, body: str, data: dict | None = None) ->
     row), or "error" (transient — leave the row, it may work next time).
     """
     _load_vapid()
+    is_call = str((data or {}).get("incoming_call", "")).lower() == "true"
     try:
         webpush(
             subscription_info=subscription,
             data=json.dumps({"title": title, "body": body, "data": data or {}}),
             vapid_private_key=VAPID_KEY_PATH,
             vapid_claims={"sub": VAPID_CLAIMS_SUB},
+            content_encoding="aes128gcm",
+            ttl=86400 if not is_call else 60,
+            headers={
+                "Urgency": "high" if is_call else "normal",
+                "Topic": (data or {}).get("chat_id", "talkex"),
+            },
         )
         return "ok"
     except WebPushException as error:
