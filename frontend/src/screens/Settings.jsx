@@ -361,9 +361,13 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
   }
 
   async function deleteWebhook(webhookId) {
-    await Me.deleteWebhook(webhookId);
-    setWebhooks((current) => current.filter((w) => w.id !== webhookId));
-    toast("Webhook removed");
+    try {
+      await Me.deleteWebhook(webhookId);
+      setWebhooks((current) => current.filter((w) => w.id !== webhookId));
+      toast("Webhook removed");
+    } catch (problem) {
+      toast(problem.message || "Could not remove webhook");
+    }
   }
 
   async function createCannedReply() {
@@ -374,14 +378,20 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
       setNewReplyLabel("");
       setNewReplyText("");
       reloadCannedReplies();
+    } catch (problem) {
+      toast(problem.message || "Could not add reply");
     } finally {
       setCreatingReply(false);
     }
   }
 
   async function deleteCannedReply(replyId) {
-    await Me.deleteCannedReply(replyId);
-    setCannedReplies((current) => current.filter((r) => r.id !== replyId));
+    try {
+      await Me.deleteCannedReply(replyId);
+      setCannedReplies((current) => current.filter((r) => r.id !== replyId));
+    } catch (problem) {
+      toast(problem.message || "Could not remove reply");
+    }
   }
 
   async function createTemplate() {
@@ -393,14 +403,20 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
       setNewTemplateContent("");
       reloadTemplates();
       toast("Template submitted for review");
+    } catch (problem) {
+      toast(problem.message || "Could not create template");
     } finally {
       setCreatingTemplate(false);
     }
   }
 
   async function deleteTemplate(templateId) {
-    await Templates.remove(templateId);
-    setTemplates((current) => current.filter((t) => t.id !== templateId));
+    try {
+      await Templates.remove(templateId);
+      setTemplates((current) => current.filter((t) => t.id !== templateId));
+    } catch (problem) {
+      toast(problem.message || "Could not remove template");
+    }
   }
 
   async function createProduct() {
@@ -422,8 +438,12 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
   }
 
   async function deleteProduct(productId) {
-    await Products.delete(productId);
-    setProducts((current) => current.filter((p) => p.id !== productId));
+    try {
+      await Products.delete(productId);
+      setProducts((current) => current.filter((p) => p.id !== productId));
+    } catch (problem) {
+      toast(problem.message || "Could not remove product");
+    }
   }
 
   async function createAutoReplyRule() {
@@ -442,8 +462,12 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
   }
 
   async function deleteAutoReplyRule(ruleId) {
-    await Me.deleteAutoReplyRule(ruleId);
-    setAutoReplyRules((current) => current.filter((r) => r.id !== ruleId));
+    try {
+      await Me.deleteAutoReplyRule(ruleId);
+      setAutoReplyRules((current) => current.filter((r) => r.id !== ruleId));
+    } catch (problem) {
+      toast(problem.message || "Could not remove rule");
+    }
   }
 
   async function toggleAway(value) {
@@ -456,9 +480,13 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
   }
 
   async function revokeSession(sessionId) {
-    await Me.revokeSession(sessionId);
-    setSessions((current) => current.filter((s) => s.session_id !== sessionId));
-    toast("Device signed out");
+    try {
+      await Me.revokeSession(sessionId);
+      setSessions((current) => current.filter((s) => s.session_id !== sessionId));
+      toast("Device signed out");
+    } catch (problem) {
+      toast(problem.message || "Could not sign out device");
+    }
   }
 
   async function toggleSessionShortLived(sessionId, shortLived) {
@@ -478,15 +506,21 @@ export default function Settings({ me, onUpdated, onSignedOut, toast, onOpenChat
       const created = await Me.createApiKey("API key");
       setNewKey(created.key);
       reloadApiKeys();
+    } catch (problem) {
+      toast(problem.message || "Could not create API key");
     } finally {
       setCreatingKey(false);
     }
   }
 
   async function revokeApiKey(keyId) {
-    await Me.revokeApiKey(keyId);
-    setApiKeys((current) => current.filter((k) => k.id !== keyId));
-    toast("Key revoked");
+    try {
+      await Me.revokeApiKey(keyId);
+      setApiKeys((current) => current.filter((k) => k.id !== keyId));
+      toast("Key revoked");
+    } catch (problem) {
+      toast(problem.message || "Could not revoke key");
+    }
   }
 
   function removeSavedAccount(userId) {

@@ -870,6 +870,7 @@ export const Uploads = {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open("POST", `${BASE}/uploads`);
+        xhr.timeout = 5 * 60 * 1000; // 5 minutes — generous for large files
         if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
         xhr.upload.onprogress = (e) => {
           if (e.lengthComputable) onProgress(e.loaded / e.total);
@@ -885,9 +886,15 @@ export const Uploads = {
           }
         };
         xhr.onerror = () => reject(new ApiError(0, "Network error"));
+        xhr.ontimeout = () => reject(new ApiError(0, "Upload timed out — try a smaller file or check your connection"));
         if (signal) {
+          if (signal.aborted) {
+            const err = new Error("Upload cancelled");
+            err.name = "AbortError";
+            reject(err);
+            return;
+          }
           signal.addEventListener("abort", () => xhr.abort());
-          if (signal.aborted) { xhr.abort(); return; }
         }
         xhr.onabort = () => {
           const err = new Error("Upload cancelled");
@@ -898,12 +905,15 @@ export const Uploads = {
       });
     }
 
+    const controller = signal ? undefined : new AbortController();
+    const timer = controller ? setTimeout(() => controller.abort(), 5 * 60 * 1000) : undefined;
     const response = await fetch(`${BASE}/uploads`, {
       method: "POST",
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       body,
-      signal,
+      signal: signal || controller?.signal,
     });
+    if (timer) clearTimeout(timer);
 
     if (!response.ok) {
       const problem = await response.json().catch(() => ({}));
@@ -1211,7 +1221,7 @@ export class Realtime {
       // to eventually notice.
       if (Date.now() - this.lastPongAt > HEARTBEAT_MS * 2 + 5000) {
         missedPongs += 1;
-        if (missedPongs >= 1) {
+        if (missedPongs >= 2) {
           this.socket?.close();  // triggers onclose → scheduleReconnect
           return;
         }

@@ -767,7 +767,10 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
           }
         }
       }
-    })();
+    })().catch((err) => {
+      console.error("Group call event error:", err);
+      toastRef.current?.("Call error — please rejoin");
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [events, buildPeerConnection, connectOutward, addParticipant]);
 

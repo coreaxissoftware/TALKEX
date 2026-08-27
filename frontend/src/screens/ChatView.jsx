@@ -228,8 +228,12 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   const lastApplied = useRef(0);
   const lastPinEvent = useRef(0);
   const lastReadEvent = useRef(0);
+  const onChangedRef = useRef(onChanged);
+  onChangedRef.current = onChanged;
 
   const highestSeq = messages.reduce((top, message) => Math.max(top, message.seq || 0), 0);
+  const highestSeqRef = useRef(0);
+  highestSeqRef.current = highestSeq;
   // A locked or vanish-mode chat is one you've marked as sensitive — forwarding
   // its contents elsewhere defeats the point of either setting, so every
   // forward entry point (bubble button, long-press menu, multi-select,
@@ -273,7 +277,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   // Mark read whenever the newest message changes while the chat is open.
   useEffect(() => {
     if (!highestSeq) return;
-    Actions.markRead(chat.id, highestSeq).then(onChanged).catch(() => {});
+    Actions.markRead(chat.id, highestSeq).then(() => onChangedRef.current()).catch(() => {});
   }, [chat.id, highestSeq]);
 
   // @mentions only make sense where there's more than one other person to
@@ -416,12 +420,12 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
 
   // After a reconnect, ask for exactly what was missed rather than refetching.
   const catchUp = useCallback(async () => {
-    if (!highestSeq) return;
+    if (!highestSeqRef.current) return;
     try {
-      const missed = await Messages.after(chat.id, highestSeq);
+      const missed = await Messages.after(chat.id, highestSeqRef.current);
       if (missed.length) setMessages((current) => mergeBySeq(current, missed));
     } catch { /* the next event or reopen will fix it */ }
-  }, [chat.id, highestSeq]);
+  }, [chat.id]);
 
   useEffect(() => {
     window.addEventListener("online", catchUp);
@@ -497,8 +501,13 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
           : current.map((m) => (m.id === temporary.id ? { ...m, queued: true } : m)));
       onChanged();
     } catch (problem) {
-      setMessages((current) => current.filter((m) => m.id !== temporary.id));
-      toast(problem.message || "Could not send");
+      if (problem?.name === "AbortError") {
+        setMessages((current) => current.filter((m) => m.id !== temporary.id));
+      } else {
+        setMessages((current) => current.map((m) =>
+          m.id === temporary.id ? { ...m, pending: false, failed: true } : m));
+        toast(problem.message || "Could not send");
+      }
     }
   }
 
@@ -632,8 +641,12 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   }
 
   async function forwardTo(message, toChatIds) {
-    await Messages.forward(message.id, toChatIds);
-    toast(toChatIds.length === 1 ? "Forwarded" : `Forwarded to ${toChatIds.length} chats`);
+    try {
+      await Messages.forward(message.id, toChatIds);
+      toast(toChatIds.length === 1 ? "Forwarded" : `Forwarded to ${toChatIds.length} chats`);
+    } catch (problem) {
+      toast(problem.message || "Could not forward");
+    }
     setForwarding(null);
   }
 
@@ -677,10 +690,14 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
 
   async function clearThisChat() {
     if (!confirm("Clear this chat? This only clears your own copy.")) return;
-    await Chats.clear(chat.id);
-    setMessages([]);
-    toast("Chat cleared");
-    onChanged();
+    try {
+      await Chats.clear(chat.id);
+      setMessages([]);
+      toast("Chat cleared");
+      onChanged();
+    } catch (problem) {
+      toast(problem.message || "Could not clear chat");
+    }
   }
 
   // Right-click (desktop) or long-press/tap (mobile, mirroring the
@@ -757,11 +774,15 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
 
   async function deleteThisChat() {
     if (!confirm("Delete this chat? It will disappear from your chat list.")) return;
-    await Chats.clear(chat.id);
-    await Chats.settings(chat.id, { archived: true });
-    toast("Chat deleted");
-    onChanged();
-    onBack();
+    try {
+      await Chats.clear(chat.id);
+      await Chats.settings(chat.id, { archived: true });
+      toast("Chat deleted");
+      onChanged();
+      onBack();
+    } catch (problem) {
+      toast(problem.message || "Could not delete chat");
+    }
   }
 
   // The header's ⋮ button — a visible, always-discoverable way to reach
@@ -839,9 +860,44 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   const uploadControllers = useRef(new Map()); // clientMsgId -> AbortController
   const [uploadingIds, setUploadingIds] = useState(() => new Set());
   const [uploadProgress, setUploadProgress] = useState(() => new Map());
+  const failedFilesRef = useRef(new Map()); // clientMsgId -> { file, kind, text, viewOnce }
 
   function cancelUpload(clientMsgId) {
     uploadControllers.current.get(clientMsgId)?.abort();
+  }
+
+  async function retryMessage(msg) {
+    const cmid = msg.client_msg_id;
+    const saved = failedFilesRef.current.get(cmid);
+    if (saved) {
+      failedFilesRef.current.delete(cmid);
+      setMessages((current) => current.filter((m) => m.client_msg_id !== cmid));
+      if (msg.payload?._localUrl) URL.revokeObjectURL(msg.payload._localUrl);
+      sendFile(saved.file, saved.kind, saved.text || "", saved.viewOnce);
+    } else if (msg.kind === "text") {
+      setMessages((current) => current.map((m) =>
+        m.client_msg_id === cmid ? { ...m, failed: false, pending: true } : m));
+      try {
+        const stored = await sendReliably({
+          chatId: chat.id, text: msg.text, clientMsgId: cmid,
+          replyToId: msg.reply_to_id || null,
+        });
+        setMessages((current) =>
+          stored ? upsertMessage(current, stored)
+            : current.map((m) => m.client_msg_id === cmid ? { ...m, queued: true } : m));
+        if (stored) onChanged();
+      } catch {
+        setMessages((current) => current.map((m) =>
+          m.client_msg_id === cmid ? { ...m, pending: false, failed: true } : m));
+      }
+    }
+  }
+
+  function removeFailedMessage(msg) {
+    const cmid = msg.client_msg_id;
+    setMessages((current) => current.filter((m) => m.client_msg_id !== cmid));
+    failedFilesRef.current.delete(cmid);
+    if (msg.payload?._localUrl) URL.revokeObjectURL(msg.payload._localUrl);
   }
 
   function sendVoiceNote(blob, transcript) {
@@ -900,12 +956,15 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
           : current.map((m) => (m.id === temporary.id ? { ...m, queued: true } : m)));
       if (stored) onChanged();
     } catch (problem) {
-      setMessages((current) => current.filter((m) => m.id !== temporary.id));
-      if (localUrl) URL.revokeObjectURL(localUrl);
-      // A deliberate cancel isn't a failure worth a toast — the person just
-      // watches their own bubble disappear, same as WhatsApp's cancelled
-      // upload leaves nothing behind.
-      if (problem?.name !== "AbortError") toast(problem.message || "Could not send file");
+      if (problem?.name === "AbortError") {
+        setMessages((current) => current.filter((m) => m.id !== temporary.id));
+        if (localUrl) URL.revokeObjectURL(localUrl);
+      } else {
+        failedFilesRef.current.set(clientMsgId, { file, kind, text, viewOnce });
+        setMessages((current) => current.map((m) =>
+          m.id === temporary.id ? { ...m, pending: false, failed: true } : m));
+        toast(problem.message || "Could not send file");
+      }
     } finally {
       uploadControllers.current.delete(clientMsgId);
       setUploadingIds((current) => {
@@ -933,12 +992,10 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
     }
     function onQueuedFailed(event) {
       if (event.detail.chatId !== chat.id) return;
-      setMessages((current) => {
-        const match = current.find((m) => m.client_msg_id === event.detail.clientMsgId);
-        if (match?.payload?._localUrl) URL.revokeObjectURL(match.payload._localUrl);
-        return current.filter((m) => m.client_msg_id !== event.detail.clientMsgId);
-      });
-      toast("A queued file could not be sent");
+      setMessages((current) =>
+        current.map((m) => m.client_msg_id === event.detail.clientMsgId
+          ? { ...m, pending: false, queued: false, failed: true } : m));
+      toast("A queued file could not be sent — tap to retry");
     }
     window.addEventListener("ht:queued-sent", onQueuedSent);
     window.addEventListener("ht:queued-failed", onQueuedFailed);
@@ -1302,9 +1359,13 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
           )}
           <div onClick={async () => {
             if (!selectedMsgIds.size) return;
-            await Promise.all([...selectedMsgIds].map((id) => Messages.hide(id)));
-            setMessages((c) => c.filter((m) => !selectedMsgIds.has(m.id)));
-            toast(`${selectedMsgIds.size} deleted`);
+            try {
+              await Promise.all([...selectedMsgIds].map((id) => Messages.hide(id)));
+              setMessages((c) => c.filter((m) => !selectedMsgIds.has(m.id)));
+              toast(`${selectedMsgIds.size} deleted`);
+            } catch (problem) {
+              toast(problem.message || "Could not delete messages");
+            }
             setSelectMode(false);
             setSelectedMsgIds(new Set());
           }} style={{ cursor: selectedMsgIds.size ? "pointer" : "default", opacity: selectedMsgIds.size ? 1 : 0.4 }}
@@ -1474,6 +1535,8 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
               <Bubble message={message} me={me}
                       chatAccent={chatAccent}
                       onCancelUpload={cancelUpload}
+                      onRetry={() => retryMessage(message)}
+                      onRemoveFailed={() => removeFailedMessage(message)}
                       uploadPct={uploadProgress.get(message.client_msg_id)}
                       translatedText={translations[message.id]}
                       replyTarget={messagesById.get(message.reply_to_id)}
@@ -1482,15 +1545,11 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
                       isRead={readUpToSeq !== null && message.seq <= readUpToSeq}
                       isDelivered={deliveredUpToSeq !== null && message.seq <= deliveredUpToSeq}
                       onDoubleTap={() => {
-                        if (message.pending || message.queued || message.deleted_at || message.expired) return;
+                        if (message.pending || message.queued || message.failed || message.deleted_at || message.expired) return;
                         react(message, "❤️");
                       }}
                       onLongPress={() => {
-                        // Nothing sitting in the send queue has a real
-                        // server id yet ("pending_..." is a local stand-in)
-                        // — reacting, editing, pinning or selecting it would
-                        // just fail against an id the server has never seen.
-                        if (message.pending || message.queued) return;
+                        if (message.pending || message.queued || message.failed) return;
                         if (selectMode) {
                           setSelectedMsgIds((prev) => {
                             const n = new Set(prev);
@@ -1502,11 +1561,11 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
                         }
                       }}
                       onSwipeReply={() => {
-                        if (message.pending || message.queued) return;
+                        if (message.pending || message.queued || message.failed) return;
                         setReplyTo(message);
                       }}
                       onSwipeInfo={() => {
-                        if (message.pending || message.queued) return;
+                        if (message.pending || message.queued || message.failed) return;
                         setInfoFor(message);
                       }}
                       onVote={(index) => vote(message, index)}
@@ -2344,7 +2403,7 @@ const SWIPE_INFO_TRIGGER = -56;
 const SWIPE_INFO_MAX = -74;
 
 const Bubble = memo(function Bubble({ message, me, chatAccent, translatedText, replyTarget, meetingUpdates, isPinned, isRead, isDelivered, signature,
-                  commentsOn, onComments, onDoubleTap, onLongPress, onSwipeReply, onSwipeInfo, onVote, onForward, onOpenMedia, onCallAgain, onJoinMeeting, onCancelUpload, uploadPct, toast }) {
+                  commentsOn, onComments, onDoubleTap, onLongPress, onSwipeReply, onSwipeInfo, onVote, onForward, onOpenMedia, onCallAgain, onJoinMeeting, onCancelUpload, onRetry, onRemoveFailed, uploadPct, toast }) {
   const mine = message.sender_id === me.id;
   const gone = message.deleted_at || message.expired;
   const spamSettings = getSpamSettings();
@@ -2375,8 +2434,8 @@ const Bubble = memo(function Bubble({ message, me, chatAccent, translatedText, r
   // long-press timer, mirroring ChatList's ChatRow swipe-to-pin gesture.
   const swipeAxis = useRef(null);
   const [dragX, setDragX] = useState(0);
-  const canSwipeRight = Boolean(onSwipeReply) && !message.pending && !message.queued && !gone;
-  const canSwipeLeft = Boolean(onSwipeInfo) && !message.pending && !message.queued && !gone;
+  const canSwipeRight = Boolean(onSwipeReply) && !message.pending && !message.queued && !message.failed && !gone;
+  const canSwipeLeft = Boolean(onSwipeInfo) && !message.pending && !message.queued && !message.failed && !gone;
   const canSwipe = canSwipeRight || canSwipeLeft;
 
   function handlePointerDown(event) {
@@ -2601,7 +2660,7 @@ const Bubble = memo(function Bubble({ message, me, chatAccent, translatedText, r
               // reaches the server.
               ? <ViewOnceAttachment message={message} mine={mine}/>
               : <Attachment message={message} mine={mine} onForward={onForward} onOpenMedia={onOpenMedia}
-                             onCancelUpload={onCancelUpload} uploadPct={uploadPct} toast={toast}/>}
+                             onCancelUpload={onCancelUpload} onRetry={onRetry} uploadPct={uploadPct} toast={toast}/>}
             {message.text && (
               <div style={{
                 fontSize: 14, lineHeight: 1.4, whiteSpace: "pre-wrap", marginTop: 6,
@@ -2659,7 +2718,9 @@ const Bubble = memo(function Bubble({ message, me, chatAccent, translatedText, r
             {clockTime(message.created_at)}
           </span>
           {mine && (
-            message.pending || message.queued
+            message.failed
+              ? <span title="Not sent" style={{ color: "#ef4444", fontSize: 12, fontWeight: 700 }}>!</span>
+              : message.pending || message.queued
               ? I.clock("#ffffff99", 11)
               : <span style={{
                   display: "inline-flex", transition: "transform 0.3s ease",
@@ -2675,6 +2736,21 @@ const Bubble = memo(function Bubble({ message, me, chatAccent, translatedText, r
                 </span>
           )}
         </div>
+
+        {message.failed && mine && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+            <button onClick={(e) => { e.stopPropagation(); onRetry?.(); }} style={{
+              display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 10px",
+              borderRadius: 12, border: "none", cursor: "pointer", fontSize: 11, fontWeight: 600,
+              background: "#ef444420", color: "#ef4444",
+            }}>↻ Retry</button>
+            <button onClick={(e) => { e.stopPropagation(); onRemoveFailed?.(); }} style={{
+              display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 8px",
+              borderRadius: 12, border: "none", cursor: "pointer", fontSize: 11,
+              background: "transparent", color: mine ? "#ffffff99" : G.muted,
+            }}>✕</button>
+          </div>
+        )}
 
         {message.reactions?.length > 0 && (
           <ReactionPills reactions={message.reactions} messageId={message.id}/>
@@ -3149,7 +3225,7 @@ function AlbumThumb({ message }) {
   return <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>;
 }
 
-const Attachment = memo(function Attachment({ message, mine, onForward, onOpenMedia, onCancelUpload, uploadPct, toast }) {
+const Attachment = memo(function Attachment({ message, mine, onForward, onOpenMedia, onCancelUpload, onRetry, uploadPct, toast }) {
   const [blobUrl, setBlobUrl] = useState(null);
   const [error, setError] = useState(false);
   // Tapping a photo/video opens it full-screen, the way WhatsApp does —
@@ -3204,6 +3280,36 @@ const Attachment = memo(function Attachment({ message, mine, onForward, onOpenMe
   // AbortController is long gone (the attempt that failed already tore it
   // down before queuing), cancelling that one is a "remove from the retry
   // queue" action this doesn't wire up.
+  if (message.failed) {
+    return (
+      <div style={{ minWidth: 180, padding: "2px 0" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{
+            width: 32, height: 32, borderRadius: "50%", flexShrink: 0,
+            background: "#ef444420", display: "flex", alignItems: "center",
+            justifyContent: "center", color: "#ef4444", fontSize: 16, fontWeight: 700,
+          }}>!</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: "#ef4444" }}>
+              Failed to send
+            </div>
+            <div style={{ fontSize: 11, opacity: 0.7, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {fileName}
+            </div>
+          </div>
+          {onRetry && (
+            <button onClick={(event) => { event.stopPropagation(); onRetry(); }}
+                    title="Retry" style={{
+                      padding: "4px 10px", borderRadius: 12, flexShrink: 0, cursor: "pointer",
+                      border: "none", background: "#ef444420", color: "#ef4444",
+                      fontSize: 12, fontWeight: 600,
+                    }}>↻ Retry</button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   if (message.pending || message.queued) {
     const pct = uploadPct != null ? Math.round(uploadPct * 100) : null;
     return (

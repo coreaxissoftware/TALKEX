@@ -128,6 +128,7 @@ export function useCall(events, send, toast) {
   // Set when the app is opened by tapping "Accept" on a call notification:
   // { fromId } — the next matching call_invite is auto-answered.
   const autoAcceptRef = useRef(null);
+  const pendingAutoAcceptRef = useRef(false);
   const ringTimerRef = useRef(null);
   const durationTimerRef = useRef(null);
   const lastApplied = useRef(0);
@@ -677,7 +678,7 @@ export function useCall(events, send, toast) {
         // automatically instead of making the user tap Accept a second time.
         if (autoAcceptRef.current && autoAcceptRef.current.fromId === event.from) {
           autoAcceptRef.current = null;
-          setTimeout(() => { acceptIncoming(); }, 0); // callRef is set by the render this triggers
+          pendingAutoAcceptRef.current = true;
         }
         continue;
       }
@@ -765,6 +766,15 @@ export function useCall(events, send, toast) {
   }, [events, logOutcome, teardown]);
 
   useEffect(() => teardown, [teardown]);
+
+  // Auto-accept fires after React commits the "incoming" state, so callRef is
+  // guaranteed to be up to date — unlike the old setTimeout(0) approach.
+  useEffect(() => {
+    if (pendingAutoAcceptRef.current && call?.phase === "incoming") {
+      pendingAutoAcceptRef.current = false;
+      acceptIncoming();
+    }
+  }, [call, acceptIncoming]);
 
   // Bridge the native (Android) call notification's "Accept" to the web app:
   // MainActivity calls window.talkexAcceptCall(chatId, fromId) via
