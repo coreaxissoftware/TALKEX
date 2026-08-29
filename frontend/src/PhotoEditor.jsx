@@ -182,6 +182,118 @@ const TOOL_ICON_MAP = {
 };
 
 /**
+ * A placed text/sticker as a real, live DOM element instead of a fixed
+ * canvas paint — the actual iOS-Photos/Instagram gesture set: tap to
+ * select, drag the body to move, drag the bottom-right handle to resize
+ * AND rotate together in one gesture (exactly how a finger pinch-rotates a
+ * sticker on iOS — distance from center drives scale, angle from center
+ * drives rotation, both from the same drag), tap the top-left handle to
+ * delete just this one element, double-tap text to retype it. Before this
+ * existed, placing something was permanent the instant you tapped it down.
+ */
+function DraggableMark({ mark, viewportW, viewportH, selected, onSelect, onChange, onDelete, onEditText }) {
+  const rootRef = useRef(null);
+  const dragRef = useRef(null);
+  const gestureRef = useRef(null);
+
+  const scale = mark.scale || 1;
+  const rotation = mark.rotation || 0;
+
+  function onBodyPointerDown(event) {
+    event.stopPropagation();
+    onSelect();
+    dragRef.current = { startX: event.clientX, startY: event.clientY, startMarkX: mark.x, startMarkY: mark.y };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+  function onBodyPointerMove(event) {
+    if (!dragRef.current) return;
+    const dx = (event.clientX - dragRef.current.startX) / viewportW;
+    const dy = (event.clientY - dragRef.current.startY) / viewportH;
+    onChange({
+      x: Math.min(1, Math.max(0, dragRef.current.startMarkX + dx)),
+      y: Math.min(1, Math.max(0, dragRef.current.startMarkY + dy)),
+    });
+  }
+  function onBodyPointerUp() { dragRef.current = null; }
+
+  function onHandlePointerDown(event) {
+    event.stopPropagation();
+    const rect = rootRef.current.getBoundingClientRect();
+    const originX = rect.left + rect.width / 2;
+    const originY = rect.top + rect.height / 2;
+    gestureRef.current = {
+      originX, originY,
+      startDist: Math.max(1, Math.hypot(event.clientX - originX, event.clientY - originY)),
+      startAngle: Math.atan2(event.clientY - originY, event.clientX - originX),
+      startScale: scale, startRotation: rotation,
+    };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+  function onHandlePointerMove(event) {
+    if (!gestureRef.current) return;
+    const g = gestureRef.current;
+    const dist = Math.hypot(event.clientX - g.originX, event.clientY - g.originY);
+    const angle = Math.atan2(event.clientY - g.originY, event.clientX - g.originX);
+    onChange({
+      scale: Math.min(4, Math.max(0.3, g.startScale * (dist / g.startDist))),
+      rotation: g.startRotation + ((angle - g.startAngle) * 180) / Math.PI,
+    });
+  }
+  function onHandlePointerUp() { gestureRef.current = null; }
+
+  const counterTransform = `rotate(${-rotation}deg) scale(${1 / scale})`;
+
+  return (
+    <div ref={rootRef} style={{
+      position: "absolute", left: `${mark.x * 100}%`, top: `${mark.y * 100}%`,
+      transform: `translate(-50%, -50%) rotate(${rotation}deg) scale(${scale})`,
+      touchAction: "none", cursor: "move", zIndex: 4,
+    }}
+      onPointerDown={onBodyPointerDown} onPointerMove={onBodyPointerMove}
+      onPointerUp={onBodyPointerUp} onPointerLeave={onBodyPointerUp}
+      // stopPropagation on pointerdown alone isn't enough — the viewport's
+      // own onClick (which deselects on empty-space taps) is a SEPARATE
+      // synthetic event that still bubbles from a click landing on this
+      // element unless stopped here too, which without this made selecting
+      // a mark and immediately losing that selection the same gesture.
+      onClick={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => { event.stopPropagation(); mark.kind === "text" && onEditText?.(); }}
+    >
+      <div style={{
+        padding: 8, borderRadius: 8,
+        border: `1.5px dashed ${selected ? G.accent : "transparent"}`,
+      }}>
+        {mark.kind === "sticker"
+          ? <span style={{ fontSize: 44, lineHeight: 1, display: "block" }}>{mark.emoji}</span>
+          : <span style={{
+              fontSize: 20, fontWeight: 700, color: mark.color, whiteSpace: "nowrap",
+              textShadow: "0 1px 5px rgba(0,0,0,0.55)",
+            }}>{mark.text}</span>}
+      </div>
+      {selected && (
+        <>
+          <div onPointerDown={(event) => { event.stopPropagation(); onDelete(); }} style={{
+            position: "absolute", left: -13, top: -13, width: 26, height: 26, borderRadius: "50%",
+            background: "#ef4444", display: "flex", alignItems: "center", justifyContent: "center",
+            color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer",
+            boxShadow: "0 1px 5px rgba(0,0,0,0.4)", transform: counterTransform,
+          }}>×</div>
+          <div
+            onPointerDown={onHandlePointerDown} onPointerMove={onHandlePointerMove}
+            onPointerUp={onHandlePointerUp} onPointerLeave={onHandlePointerUp}
+            style={{
+              position: "absolute", right: -13, bottom: -13, width: 26, height: 26, borderRadius: "50%",
+              background: G.accent, display: "flex", alignItems: "center", justifyContent: "center",
+              color: "#fff", fontSize: 12, cursor: "nwse-resize", touchAction: "none",
+              boxShadow: "0 1px 5px rgba(0,0,0,0.4)", transform: counterTransform,
+            }}>⤡</div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
  * Modern photo editor — WhatsApp/Instagram-inspired with 4-tab UI.
  *
  * Tabs: Adjust | Filter | Draw | Add
@@ -204,6 +316,14 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
   const [aspect, setAspect] = useState(
     () => ASPECTS.find((a) => a.key === initialAspectKey) || ASPECTS[0]);
   const [filter, setFilter] = useState(FILTERS[0]);
+  // 0-100 — iOS Photos/Instagram both let a filter be scrubbed to a
+  // strength, not just switched on/off. Blended by stacking the unfiltered
+  // image under the filtered one and fading the filtered layer's opacity
+  // (see the two <img> layers in the viewport and the matching two-pass
+  // draw in done() below) — the standard technique for "how much of this
+  // preset filter" when the filter itself is an arbitrary combined CSS
+  // filter string rather than one tunable numeric parameter.
+  const [filterIntensity, setFilterIntensity] = useState(100);
   const [enhanced, setEnhanced] = useState(false);
   const [hd, setHd] = useState(false);
   const [zoom, setZoom] = useState(1);
@@ -218,6 +338,12 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
   const [saturation, setSaturation] = useState(100);
 
   const [marks, setMarks] = useState([]);
+  // Which placed text/sticker is currently selected for drag/resize/rotate/
+  // delete — the actual "flexible" gap this fixes. Before this, a placed
+  // mark was permanent the instant you tapped it down: no repositioning,
+  // no resizing, no per-element delete (only a global "undo last"). null
+  // means nothing is selected (tapping empty canvas clears it).
+  const [selectedMarkIndex, setSelectedMarkIndex] = useState(null);
   const [tool, setTool] = useState((initialTool || initialAspectKey) ? "crop" : null);
   const [activeTab, setActiveTab] = useState("adjust");
   const [drawColor, setDrawColor] = useState(DRAW_COLORS[0]);
@@ -246,6 +372,10 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
   const adjustmentCss = (brightness !== 100 || contrast !== 100 || saturation !== 100)
     ? `brightness(${brightness / 100}) contrast(${contrast / 100}) saturate(${saturation / 100})`
     : "";
+
+  // Adjustments/enhance only, never the preset — the layer the preset-filter
+  // image fades back into as its own intensity slider goes toward 0%.
+  const baseFilterCss = [enhanced ? ENHANCE_CSS : "", adjustmentCss].filter(Boolean).join(" ") || "none";
 
   const activeFilterCss = [
     filter.css !== "none" ? filter.css : "",
@@ -551,15 +681,50 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
       const point = pointFromEvent(event);
       const text = await promptFn("Text:");
       if (text && text.trim()) {
-        setMarks((current) => [...current, { kind: "text", x: point.x, y: point.y, text: text.trim(), color: drawColor }]);
+        const newIndex = marks.length;
+        setMarks((current) => [...current, {
+          kind: "text", x: point.x, y: point.y, text: text.trim(), color: drawColor,
+          scale: 1, rotation: 0,
+        }]);
+        // Selected immediately — the same "type it, then it's live under
+        // your finger to drag/resize/rotate" flow iOS Photos and Instagram
+        // both use, rather than dropping it fixed and switching you back
+        // to the text TOOL (which would just place another one on the next
+        // tap instead of letting you arrange what you just typed).
+        setSelectedMarkIndex(newIndex);
+        setTool(null);
       }
+      return;
     }
+    // Tapping empty canvas (not the text tool, not on a mark — DraggableMark
+    // stops propagation on its own pointerdown) clears whatever's selected.
+    if (selectedMarkIndex !== null) setSelectedMarkIndex(null);
   }
 
   function placeSticker(emoji) {
-    setMarks((current) => [...current, { kind: "sticker", x: 0.5, y: 0.5, emoji }]);
+    const newIndex = marks.length;
+    setMarks((current) => [...current, { kind: "sticker", x: 0.5, y: 0.5, emoji, scale: 1, rotation: 0 }]);
+    setSelectedMarkIndex(newIndex);
     setShowStickers(false);
     setTool(null);
+  }
+
+  async function editMarkText(index) {
+    const mark = marks[index];
+    if (!mark || mark.kind !== "text") return;
+    const text = await promptFn("Edit text:", mark.text);
+    if (text && text.trim()) {
+      setMarks((current) => current.map((m, i) => (i === index ? { ...m, text: text.trim() } : m)));
+    }
+  }
+
+  function updateMark(index, patch) {
+    setMarks((current) => current.map((m, i) => (i === index ? { ...m, ...patch } : m)));
+  }
+
+  function deleteMark(index) {
+    setMarks((current) => current.filter((_, i) => i !== index));
+    setSelectedMarkIndex(null);
   }
 
   function paintMark(ctx, w, h, mark) {
@@ -623,7 +788,14 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    for (const mark of marks) paintMark(ctx, canvas.width, canvas.height, mark);
+    // Text/sticker marks are rendered as real, draggable DOM elements (see
+    // DraggableMark below) while editing, not painted onto this canvas —
+    // this canvas now only ever shows strokes/shapes, which stay
+    // canvas-painted since "drag this whole freehand line" isn't a
+    // meaningful gesture the way repositioning a sticker is.
+    for (const mark of marks) {
+      if (mark.kind === "stroke" || mark.kind === "shape") paintMark(ctx, canvas.width, canvas.height, mark);
+    }
     if (strokingRef.current) {
       const isHighlight = tool === "highlighter";
       const strokeColor = tool === "eraser" ? "erase" : drawColor;
@@ -679,7 +851,7 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
       canvas.width = Math.round(outW);
       canvas.height = Math.round(outH);
       const ctx = canvas.getContext("2d");
-      ctx.filter = activeFilterCss;
+      ctx.filter = baseFilterCss;
 
       // Draw the cropped portion
       const scale = effectiveScale * (canvas.width / viewportW);
@@ -702,14 +874,30 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
       const drawW = displayedW * exportScaleX;
       const drawH = displayedH * exportScaleY;
 
-      if (fineAngle) {
-        ctx.save();
-        ctx.translate(canvas.width / 2, canvas.height / 2);
-        ctx.rotate((fineAngle * Math.PI) / 180);
-        ctx.translate(-canvas.width / 2, -canvas.height / 2);
+      function drawBaseImage() {
+        if (fineAngle) {
+          ctx.save();
+          ctx.translate(canvas.width / 2, canvas.height / 2);
+          ctx.rotate((fineAngle * Math.PI) / 180);
+          ctx.translate(-canvas.width / 2, -canvas.height / 2);
+        }
+        ctx.drawImage(rotatedSrc.canvas, drawX, drawY, drawW, drawH);
+        if (fineAngle) ctx.restore();
       }
-      ctx.drawImage(rotatedSrc.canvas, drawX, drawY, drawW, drawH);
-      if (fineAngle) ctx.restore();
+      drawBaseImage();
+      // Same two-layer blend as the live preview (see the stacked <img>s in
+      // the viewport): the base pass above is un-filtered adjustments only,
+      // and the preset (if any) is drawn a second time on top at
+      // filterIntensity% opacity — that's what makes the exported photo
+      // actually match a filter that was scrubbed to less than full
+      // strength, instead of the export always baking in 100% of the preset
+      // regardless of what the slider said.
+      if (filter.key !== "none") {
+        ctx.filter = activeFilterCss;
+        ctx.globalAlpha = filterIntensity / 100;
+        drawBaseImage();
+        ctx.globalAlpha = 1;
+      }
       ctx.filter = "none";
 
       // Draw marks scaled to crop
@@ -779,18 +967,27 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
       ctx.stroke();
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = "source-over";
-    } else if (mark.kind === "text") {
-      ctx.fillStyle = mark.color;
-      ctx.font = `bold ${Math.round(ctx.canvas.height * 0.05)}px sans-serif`;
-      ctx.textBaseline = "top";
-      ctx.fillText(mark.text, mark.x, mark.y);
-    } else if (mark.kind === "sticker") {
-      ctx.font = `${Math.round(ctx.canvas.height * 0.12)}px sans-serif`;
+    } else if (mark.kind === "text" || mark.kind === "sticker") {
+      // Centered anchor + rotate/scale around that same center — matches
+      // DraggableMark's `translate(-50%,-50%) rotate() scale()` exactly, so
+      // the exported image lands where the person actually saw it while
+      // dragging/resizing/rotating it live, not the fixed top-left/no-
+      // transform placement this used to hard-code.
+      ctx.save();
+      ctx.translate(mark.x, mark.y);
+      ctx.rotate(((mark.rotation || 0) * Math.PI) / 180);
+      ctx.scale(mark.scale || 1, mark.scale || 1);
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText(mark.emoji, mark.x, mark.y);
-      ctx.textAlign = "left";
-      ctx.textBaseline = "alphabetic";
+      if (mark.kind === "text") {
+        ctx.fillStyle = mark.color;
+        ctx.font = `bold ${Math.round(ctx.canvas.height * 0.045)}px -apple-system, sans-serif`;
+        ctx.fillText(mark.text, 0, 0);
+      } else {
+        ctx.font = `${Math.round(ctx.canvas.height * 0.1)}px sans-serif`;
+        ctx.fillText(mark.emoji, 0, 0);
+      }
+      ctx.restore();
     } else if (mark.kind === "shape") {
       ctx.strokeStyle = mark.color;
       ctx.lineWidth = mark.size || 3;
@@ -941,15 +1138,23 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
       position: "fixed", inset: 0, background: "#0a0a0a", zIndex: 90,
       display: "flex", flexDirection: "column",
       animation: "txEditorSlideIn 0.3s ease-out",
+      // The iOS system font stack — renders as actual San Francisco on an
+      // iPhone/Mac, and each platform's own closest native equivalent
+      // everywhere else, instead of the browser/WebView default serif-ish
+      // fallback the rest of this screen used to inherit silently.
+      fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif",
     }}>
-      {/* Top bar */}
+      {/* Top bar — frosted glass over the photo, iOS-sheet style, rather
+          than a flat solid bar sitting on top of it. */}
       <div style={{
-        display: "flex", alignItems: "center", padding: "12px 16px", flexShrink: 0,
-        background: "#0a0a0a",
+        display: "flex", alignItems: "center", padding: "14px 16px", flexShrink: 0,
+        background: "rgba(10,10,10,0.72)", backdropFilter: "blur(20px) saturate(1.5)",
+        WebkitBackdropFilter: "blur(20px) saturate(1.5)",
+        borderBottom: "0.5px solid rgba(255,255,255,0.08)",
       }}>
         <div onClick={onCancel} style={{
-          color: "#fff", fontSize: 14, cursor: "pointer", padding: "6px 12px",
-          borderRadius: 20, background: "#ffffff14",
+          color: "#fff", fontSize: 15, fontWeight: 500, cursor: "pointer", padding: "7px 14px",
+          borderRadius: 20, background: "rgba(255,255,255,0.1)",
         }}>Cancel</div>
         <div style={{ flex: 1 }}/>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -989,20 +1194,44 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
              onPointerUp={onPointerUp} onPointerLeave={onPointerUp}
              onClick={onViewportTap}
              onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}>
-          {rotatedUrl && (
-            <img src={rotatedUrl} alt="" draggable={false} style={{
+          {rotatedUrl && (() => {
+            const shared = {
               position: "absolute",
               left: viewportW / 2 - displayedW / 2 + pan.x,
               top: viewportH / 2 - displayedH / 2 + pan.y,
-              width: displayedW, height: displayedH,
-              filter: activeFilterCss, userSelect: "none",
+              width: displayedW, height: displayedH, userSelect: "none",
               transform: fineAngle ? `rotate(${fineAngle}deg)` : "none",
               transformOrigin: "center center",
-            }}/>
-          )}
+            };
+            return (
+              <>
+                {/* Base layer — adjustments/enhance but never the preset
+                    filter. When a preset is picked, this is what shows
+                    through as the filter layer above it fades toward 0%. */}
+                <img src={rotatedUrl} alt="" draggable={false} style={{ ...shared, filter: baseFilterCss }}/>
+                {filter.key !== "none" && (
+                  <img src={rotatedUrl} alt="" draggable={false} style={{
+                    ...shared, filter: activeFilterCss, opacity: filterIntensity / 100,
+                  }}/>
+                )}
+              </>
+            );
+          })()}
           <canvas ref={overlayCanvasRef} style={{
             position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", zIndex: 2,
           }}/>
+          {/* Live, draggable text/sticker marks — hidden during crop since
+              cropping takes over the viewport's own gestures entirely. */}
+          {!cropActive && marks.map((mark, index) => (
+            (mark.kind === "text" || mark.kind === "sticker") && (
+              <DraggableMark key={index} mark={mark} viewportW={viewportW} viewportH={viewportH}
+                             selected={selectedMarkIndex === index}
+                             onSelect={() => setSelectedMarkIndex(index)}
+                             onChange={(patch) => updateMark(index, patch)}
+                             onDelete={() => deleteMark(index)}
+                             onEditText={() => editMarkText(index)}/>
+            )
+          ))}
           {/* Crop overlay */}
           {renderCropOverlay()}
         </div>
@@ -1101,31 +1330,47 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
           </div>
         )}
 
-        {/* FILTER tab — filter thumbnails */}
+        {/* FILTER tab — filter thumbnails + intensity scrubber */}
         {activeTab === "filter" && (
-          <div style={{ display: "flex", gap: 10, padding: "8px 16px", overflowX: "auto", flexShrink: 0 }}>
-            {FILTERS.map((option) => (
-              <div key={option.key} onClick={() => setFilter(option)} style={{
-                display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
-                flexShrink: 0, cursor: "pointer",
-              }}>
-                <div style={{
-                  width: 56, height: 56, borderRadius: 10, overflow: "hidden",
-                  border: `2.5px solid ${filter.key === option.key ? G.accent : "transparent"}`,
-                  backgroundImage: rotatedUrl ? `url(${rotatedUrl})` : "none",
-                  backgroundSize: "cover", backgroundPosition: "center",
-                  filter: option.css,
-                  transition: "border-color 0.15s",
-                }}/>
-                <span style={{
-                  fontSize: 10, letterSpacing: 0.3,
-                  color: filter.key === option.key ? G.accent : "#ffffff88",
-                  fontWeight: filter.key === option.key ? 700 : 400,
+          <div style={{ padding: "8px 16px" }}>
+            <div style={{ display: "flex", gap: 10, overflowX: "auto", flexShrink: 0, marginBottom: filter.key !== "none" ? 10 : 0 }}>
+              {FILTERS.map((option) => (
+                <div key={option.key} onClick={() => { setFilter(option); setFilterIntensity(100); }} style={{
+                  display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
+                  flexShrink: 0, cursor: "pointer",
                 }}>
-                  {option.label}
-                </span>
+                  <div style={{
+                    width: 56, height: 56, borderRadius: 10, overflow: "hidden",
+                    border: `2.5px solid ${filter.key === option.key ? G.accent : "transparent"}`,
+                    backgroundImage: rotatedUrl ? `url(${rotatedUrl})` : "none",
+                    backgroundSize: "cover", backgroundPosition: "center",
+                    filter: option.css,
+                    transition: "border-color 0.15s",
+                  }}/>
+                  <span style={{
+                    fontSize: 10, letterSpacing: 0.3,
+                    color: filter.key === option.key ? G.accent : "#ffffff88",
+                    fontWeight: filter.key === option.key ? 700 : 400,
+                  }}>
+                    {option.label}
+                  </span>
+                </div>
+              ))}
+            </div>
+            {/* Strength scrubber — the flexible part a fixed on/off preset
+                never had. 0 fades all the way back to the original photo;
+                100 is the full preset, same range Instagram's own filter
+                intensity slider covers. */}
+            {filter.key !== "none" && (
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 11, color: "#ffffff88", width: 46, flexShrink: 0 }}>{filter.label}</span>
+                <input type="range" min={0} max={100} value={filterIntensity}
+                       onChange={(e) => setFilterIntensity(Number(e.target.value))}
+                       className="tx-editor-slider"
+                       style={{ flex: 1, appearance: "none", background: "transparent", height: 20 }}/>
+                <span style={{ fontSize: 11, color: "#ffffff88", width: 30, textAlign: "right" }}>{filterIntensity}%</span>
               </div>
-            ))}
+            )}
           </div>
         )}
 
@@ -1203,8 +1448,9 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
 
       {/* Bottom toolbar — 4 tabs + tool buttons */}
       <div style={{
-        padding: "6px 16px 24px", background: "#0a0a0a",
-        borderTop: "1px solid #ffffff12", flexShrink: 0,
+        padding: "6px 16px 24px", background: "rgba(10,10,10,0.72)",
+        backdropFilter: "blur(20px) saturate(1.5)", WebkitBackdropFilter: "blur(20px) saturate(1.5)",
+        borderTop: "0.5px solid rgba(255,255,255,0.08)", flexShrink: 0,
       }}>
         {/* Tool buttons for active tab */}
         {TABS.find((t) => t.key === activeTab)?.tools.length > 0 && (
@@ -1237,15 +1483,29 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
           </div>
         )}
 
-        {/* 4-tab bar */}
-        <div style={{ display: "flex", gap: 4, marginBottom: 10 }}>
+        {/* 4-tab bar — a real iOS segmented control: one pill-shaped track,
+            a single capsule that SLIDES to whichever tab is active (CSS
+            transform, not a background swapped per-cell), TalkEx's own
+            accent color underneath instead of iOS's plain grey/white so it
+            still reads as this app's control, not a copy-pasted system one. */}
+        <div style={{
+          position: "relative", display: "flex", padding: 3, borderRadius: 14,
+          background: "rgba(255,255,255,0.08)", marginBottom: 10,
+        }}>
+          <div style={{
+            position: "absolute", top: 3, bottom: 3, left: 3,
+            width: `calc((100% - 6px) / ${TABS.length})`,
+            transform: `translateX(${TABS.findIndex((t) => t.key === activeTab) * 100}%)`,
+            background: G.accent, borderRadius: 11,
+            boxShadow: `0 1px 6px ${G.accentGlow}`,
+            transition: "transform 0.25s cubic-bezier(0.34, 1.3, 0.64, 1)",
+          }}/>
           {TABS.map((tab) => (
             <div key={tab.key} onClick={() => switchTab(tab.key)} style={{
-              flex: 1, padding: "8px", borderRadius: 12, cursor: "pointer",
+              position: "relative", flex: 1, padding: "8px", borderRadius: 11, cursor: "pointer",
               textAlign: "center", fontSize: 12.5, fontWeight: 600,
-              background: activeTab === tab.key ? "#ffffff1a" : "transparent",
-              color: activeTab === tab.key ? "#fff" : "#ffffff66",
-              transition: "all 0.15s",
+              color: activeTab === tab.key ? "#fff" : "#ffffff88",
+              transition: "color 0.2s",
             }}>{tab.label}</div>
           ))}
         </div>

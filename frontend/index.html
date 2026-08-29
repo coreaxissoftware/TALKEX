@@ -37,6 +37,24 @@
   <meta name="apple-mobile-web-app-title" content="TalkEx"/>
   <style>
     *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+    /* Every button/tab/option/label in this app is a plain <div onClick>,
+       not a semantic <button> — there's no single CSS class to scope
+       "interactive chrome" to, so the only reliable fix is disabling
+       selection app-wide and re-enabling it only where it's actually
+       wanted (below). Without this, a long-press on ANY of that div-chrome
+       (a tab label, a menu option, a filter pill) triggered the OS's
+       native text-selection/callout instead of the app's own long-press
+       handler — the same conflict a long-press on a message bubble would
+       have caused too, except message bubbles never needed native
+       selection in the first place: copying a message already goes
+       through the app's own long-press → context menu → Copy action
+       (see ChatView's MessageMenu), which native selection only ever
+       fights with, never helps. */
+    *{-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;}
+    /* The one place selection has to keep working: whatever the person
+       is actually typing (composer, search boxes, every text/number
+       field, textareas). */
+    input,textarea,[contenteditable="true"]{-webkit-user-select:text;user-select:text;}
     /* Lock the document itself so the page can NEVER scroll. Without this, iOS
        Safari scrolls the whole document up when the keyboard opens to reveal a
        focused input — dragging the header off the top and the composer out of

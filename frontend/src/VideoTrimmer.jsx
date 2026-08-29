@@ -14,6 +14,7 @@ export default function VideoTrimmer({ file, onDone, onCancel }) {
   const [dragging, setDragging] = useState(null);
   const [thumbnails, setThumbnails] = useState([]);
   const url = useRef(null);
+  const dragWindowRef = useRef(null);
 
   useEffect(() => {
     url.current = URL.createObjectURL(file);
@@ -82,6 +83,15 @@ export default function VideoTrimmer({ file, onDone, onCancel }) {
     const el = timelineRef.current;
     if (!el) return;
 
+    // Only relevant for "window" (see below): the clip's own length and how
+    // far into the timeline it started, captured once at drag-start so the
+    // whole window can be shifted by a raw pixel delta without drifting —
+    // recomputing from the live x position on every move (like start/end
+    // already do) would work for resizing a single edge, but a move-drag
+    // needs the ORIGINAL length preserved exactly while both edges slide
+    // together.
+    const dragStart = { start, end, len: end - start };
+
     function move(ev) {
       const rect = el.getBoundingClientRect();
       const x = (ev.touches ? ev.touches[0].clientX : ev.clientX) - rect.left;
@@ -95,15 +105,35 @@ export default function VideoTrimmer({ file, onDone, onCancel }) {
         const clamped = Math.max(time, start + 0.5);
         setEnd(Math.min(duration, clamped));
         if (videoRef.current) videoRef.current.currentTime = Math.min(duration, clamped);
+      } else if (handle === "window") {
+        // Drag the WHOLE selected clip left/right, length untouched — the
+        // iOS Photos gesture this trimmer didn't have at all before: until
+        // now the only way to move a 5s clip from the front of a 60s video
+        // to the middle was to drag both edges independently and eyeball
+        // keeping them 5s apart.
+        const dx = ((ev.touches ? ev.touches[0].clientX : ev.clientX) - dragWindowRef.current.startX) / rect.width * duration;
+        let newStart = dragWindowRef.current.origStart + dx;
+        newStart = Math.max(0, Math.min(duration - dragStart.len, newStart));
+        setStart(newStart);
+        setEnd(newStart + dragStart.len);
+        if (videoRef.current) videoRef.current.currentTime = newStart;
       }
     }
 
     function up() {
       setDragging(null);
+      dragWindowRef.current = null;
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
       window.removeEventListener("touchmove", move);
       window.removeEventListener("touchend", up);
+    }
+
+    if (handle === "window") {
+      dragWindowRef.current = {
+        startX: e.touches ? e.touches[0].clientX : e.clientX,
+        origStart: start,
+      };
     }
 
     window.addEventListener("mousemove", move);
@@ -133,10 +163,13 @@ export default function VideoTrimmer({ file, onDone, onCancel }) {
     <div style={{
       position: "fixed", inset: 0, zIndex: 100, background: G.bg,
       display: "flex", flexDirection: "column",
+      fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif",
     }}>
       <div style={{
         display: "flex", alignItems: "center", justifyContent: "space-between",
-        padding: "12px 16px", borderBottom: `1px solid ${G.border}`,
+        padding: "14px 16px", borderBottom: `1px solid ${G.border}`,
+        background: `${G.bg}b8`, backdropFilter: "blur(20px) saturate(1.5)",
+        WebkitBackdropFilter: "blur(20px) saturate(1.5)",
       }}>
         <Button variant="ghost" onClick={onCancel} style={{ padding: "6px 12px" }}>Cancel</Button>
         <div style={{ fontSize: 15, fontWeight: 600, color: G.text }}>Trim video</div>
@@ -183,40 +216,62 @@ export default function VideoTrimmer({ file, onDone, onCancel }) {
             background: "rgba(0,0,0,0.55)",
           }}/>
 
-          <div style={{
-            position: "absolute", top: 0, height: "100%",
-            left: `${(start / duration) * 100}%`,
-            width: `${((end - start) / duration) * 100}%`,
-            border: `2px solid ${G.accent}`, borderRadius: 4,
-            boxSizing: "border-box", pointerEvents: "none",
-          }}/>
+          {/* The selected window itself, now a real drag target (was
+              pointerEvents:none — purely decorative before) — grabbing
+              anywhere inside the accent border and dragging slides the
+              whole clip earlier/later in the source video while keeping
+              its length exactly fixed, the gesture iOS Photos' own trimmer
+              uses for "move this 5s clip to a different part of the
+              video" instead of only ever being able to resize from an edge. */}
+          <div onMouseDown={(e) => onTimelinePointer(e, "window")}
+               onTouchStart={(e) => onTimelinePointer(e, "window")}
+               style={{
+                 position: "absolute", top: 0, height: "100%",
+                 left: `${(start / duration) * 100}%`,
+                 width: `${((end - start) / duration) * 100}%`,
+                 border: `2px solid ${G.accent}`, borderRadius: 4,
+                 boxSizing: "border-box", cursor: dragging === "window" ? "grabbing" : "grab",
+                 zIndex: 1,
+               }}/>
 
           <div onMouseDown={(e) => onTimelinePointer(e, "start")}
                onTouchStart={(e) => onTimelinePointer(e, "start")}
                style={{
                  position: "absolute", top: 0, height: "100%",
-                 left: `calc(${(start / duration) * 100}% - 10px)`,
-                 width: 20, cursor: "ew-resize", zIndex: 2,
+                 left: `calc(${(start / duration) * 100}% - 12px)`,
+                 width: 24, cursor: "ew-resize", zIndex: 2,
                  display: "flex", alignItems: "center", justifyContent: "center",
                }}>
+            {/* iOS-style capsule grip — wider, rounded-pill handle with
+                grip lines, replacing the old 4px hairline that was easy to
+                miss and didn't read as "grabbable" the way a real trim
+                handle should. */}
             <div style={{
-              width: 4, height: 24, borderRadius: 2,
+              width: 14, height: 40, borderRadius: 7,
               background: dragging === "start" ? G.accent : G.accentText,
-            }}/>
+              display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3,
+              boxShadow: "0 1px 4px rgba(0,0,0,0.35)",
+            }}>
+              <div style={{ width: 2, height: 12, borderRadius: 1, background: "#0004" }}/>
+            </div>
           </div>
 
           <div onMouseDown={(e) => onTimelinePointer(e, "end")}
                onTouchStart={(e) => onTimelinePointer(e, "end")}
                style={{
                  position: "absolute", top: 0, height: "100%",
-                 left: `calc(${(end / duration) * 100}% - 10px)`,
-                 width: 20, cursor: "ew-resize", zIndex: 2,
+                 left: `calc(${(end / duration) * 100}% - 12px)`,
+                 width: 24, cursor: "ew-resize", zIndex: 2,
                  display: "flex", alignItems: "center", justifyContent: "center",
                }}>
             <div style={{
-              width: 4, height: 24, borderRadius: 2,
+              width: 14, height: 40, borderRadius: 7,
               background: dragging === "end" ? G.accent : G.accentText,
-            }}/>
+              display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3,
+              boxShadow: "0 1px 4px rgba(0,0,0,0.35)",
+            }}>
+              <div style={{ width: 2, height: 12, borderRadius: 1, background: "#0004" }}/>
+            </div>
           </div>
 
           {duration > 0 && (

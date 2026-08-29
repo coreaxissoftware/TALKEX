@@ -1616,14 +1616,17 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
 
       {viewOnceText && !editing && (
         <Banner label="View once — disappears the moment it's read"
+                icon={I.eye("#a855f7", 16)} accent="#a855f7"
                 onClear={() => setViewOnceText(false)}/>
       )}
       {replyTo && (
         <Banner label={`Replying to: ${replyTo.text?.slice(0, 60) || "message"}`}
+                icon={I.reply(G.accent, 16)} accent={G.accent}
                 onClear={() => setReplyTo(null)}/>
       )}
       {editing && (
-        <Banner label={`Editing: ${editing.text?.slice(0, 60)}`}
+        <Banner label={`Editing: ${editing.text?.slice(0, 60) || "message"}`}
+                icon={I.edit("#f59e0b", 16)} accent="#f59e0b"
                 onClear={() => { setEditing(null); setInput(""); }}/>
       )}
 
@@ -1636,6 +1639,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         uploading={uploadingIds.size > 0}
         disappearSecs={chat.disappear_secs}
         editing={Boolean(editing)}
+        onCancelEdit={() => { setEditing(null); setInput(""); }}
         members={members}
         toast={toast}
         viewOnce={viewOnceText}
@@ -3728,14 +3732,31 @@ function MeetingCard({ message, mine, update, onJoin, toast }) {
   );
 }
 
-function Banner({ label, onClear }) {
+// `icon`/`accent` are optional so a caller with nothing more specific than
+// "a dismissible strip" can still just pass `label` — but reply/edit/
+// view-once each pass their own now, since three composer-context banners
+// that all looked identical (same grey bar, same generic × button) gave no
+// visual cue for which mode you were actually in beyond reading the text.
+// The left accent bar + icon match the color/glyph iOS Messages' own
+// per-context compose bar uses this same pattern for.
+function Banner({ label, onClear, icon, accent }) {
   return (
     <div style={{
-      display: "flex", alignItems: "center", gap: 10, padding: "8px 14px",
+      display: "flex", alignItems: "center", gap: 10, padding: "9px 14px",
       background: G.card, borderTop: `1px solid ${G.border}`,
+      borderLeft: accent ? `3px solid ${accent}` : "none",
+      animation: "txBannerSlideUp 0.18s ease-out",
     }}>
-      <div style={{ flex: 1, fontSize: 12.5, color: G.sub }}>{label}</div>
-      <div onClick={onClear} style={{ cursor: "pointer", color: G.muted, fontSize: 18 }}>×</div>
+      {icon && <div style={{ flexShrink: 0, display: "flex" }}>{icon}</div>}
+      <div style={{ flex: 1, fontSize: 12.5, color: G.sub, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {label}
+      </div>
+      <div onClick={onClear} style={{
+        cursor: "pointer", color: G.muted, fontSize: 15, flexShrink: 0,
+        width: 22, height: 22, borderRadius: "50%", background: G.dim,
+        display: "flex", alignItems: "center", justifyContent: "center",
+      }}>×</div>
+      <style>{"@keyframes txBannerSlideUp{from{transform:translateY(100%);opacity:0}to{transform:translateY(0);opacity:1}}"}</style>
     </div>
   );
 }
@@ -3743,7 +3764,7 @@ function Banner({ label, onClear }) {
 const MAX_ATTACHMENT_BYTES = 256 * 1024 * 1024;
 
 function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
-                    disappearSecs, editing, members, toast, viewOnce, onToggleViewOnce,
+                    disappearSecs, editing, onCancelEdit, members, toast, viewOnce, onToggleViewOnce,
                     canSilent, silent, onToggleSilent,
                     onFile, onLocation, onContact, onPoll, onSticker, onGif, onProduct,
                     onScanCaptured, onFilesPicked }) {
@@ -3755,10 +3776,24 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
   const [cannedReplies, setCannedReplies] = useState([]);
   const inputRef = useRef(null);
 
+  // Dropping into edit mode selects the pre-filled text instead of just
+  // parking the cursor at the end — the iOS/desktop-app convention for
+  // "you're now editing this," where retyping the whole thing (the common
+  // case: fixing a typo means most people select-all and redo it) is one
+  // keystroke instead of a manual select-all first.
+  useEffect(() => {
+    if (editing) { inputRef.current?.focus(); inputRef.current?.select(); }
+  }, [editing]);
+
   // Enter behaviour depends on the per-device "Press Enter to send" setting.
   // ON  → Enter sends, Shift+Enter makes a newline.
   // OFF → Enter makes a newline, only the send button sends.
   function onInputKeyDown(event) {
+    if (event.key === "Escape" && editing) {
+      event.preventDefault();
+      onCancelEdit?.();
+      return;
+    }
     if (event.key !== "Enter") return;
     if (enterToSend && !event.shiftKey) {
       event.preventDefault();
