@@ -1217,11 +1217,10 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
 
   return (
     // --app-height (kept live by useViewportHeightVar) is the height ABOVE the
-    // on-screen keyboard on mobile; 100vh is the fallback. Using a plain 100vh
-    // here was the typing bug: the container stayed full-height when the iOS
-    // keyboard opened, so the composer sat underneath it and Safari scrolled
-    // the whole view to try to reveal it, breaking the layout.
-    <div style={{ display: "flex", flexDirection: "column", height: "var(--app-height, 100vh)", position: "relative" }}
+    // on-screen keyboard on mobile. Fallback is 100dvh (not 100vh): on iOS
+    // standalone PWA a plain 100vh mis-sizes the shell and could stack the
+    // composer near the top; 100dvh tracks the true visible viewport.
+    <div style={{ display: "flex", flexDirection: "column", height: "var(--app-height, 100dvh)", position: "relative" }}
       onDragEnter={(event) => {
         if (!event.dataTransfer?.types?.includes("Files")) return;
         event.preventDefault();

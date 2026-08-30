@@ -1285,9 +1285,13 @@ export function Screen({ children, style }) {
       // pane to be the only thing that scrolls.
       //
       // --app-height (kept live by useViewportHeightVar) is the visible
-      // height above any open keyboard; 100vh is the fallback before the
-      // variable is first set or where visualViewport isn't available.
-      height: "var(--app-height, 100vh)", overflow: "hidden", background: G.bg,
+      // height above any open keyboard. The fallback is 100dvh (dynamic
+      // viewport height), NOT 100vh: on iOS standalone PWA, 100vh reports a
+      // stale/missized value that could squeeze the flex:1 message pane to
+      // near-zero and stack the composer up near the top ("composer upar
+      // render ho jata hai"). 100dvh tracks the real visible area and is
+      // the correct pre-JS fallback on iOS 16+/modern Android.
+      height: "var(--app-height, 100dvh)", overflow: "hidden", background: G.bg,
       fontFamily: "'SF Pro Text',-apple-system,sans-serif", color: G.text,
       maxWidth: 430, margin: "0 auto", display: "flex", flexDirection: "column",
       ...style,
