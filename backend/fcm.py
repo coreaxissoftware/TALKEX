@@ -121,11 +121,31 @@ def send(token: str, title: str, body: str, data: dict | None = None) -> str:
     else:
         str_data["title"] = title
         str_data["body"] = body
+        # A `notification` block (not just data) is what makes this actually
+        # arrive when the app is backgrounded OR force-killed: FCM's own
+        # system-tray handler displays a notification message without any app
+        # code running, whereas a DATA-ONLY message depends on
+        # onMessageReceived firing — which aggressive-battery Android OEMs
+        # (Xiaomi/Oppo/Vivo/Realme/Samsung, i.e. most Indian devices) simply
+        # don't deliver to a swiped-away app. That was the "app band rahne par
+        # push nahi aata" bug. In the FOREGROUND, Android calls
+        # onMessageReceived instead of showing the block itself, so our
+        # CallMessagingService still renders the custom notification (with the
+        # inline Reply action) there — no double. The data block rides along
+        # so a tap still carries chat_id for deep-linking.
         message = {
             "message": {
                 "token": token,
                 "data": str_data,
-                "android": {"priority": "high"},
+                "notification": {"title": title, "body": body},
+                "android": {
+                    "priority": "high",
+                    "notification": {
+                        "sound": "default",
+                        "channel_id": "talkex_default",
+                        "click_action": "TALKEX_OPEN_CHAT",
+                    },
+                },
             }
         }
     url = f"https://fcm.googleapis.com/v1/projects/{_project_id}/messages:send"
