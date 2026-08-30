@@ -69,7 +69,7 @@ from models import (
     CreateCannedReplyRequest, CreateChannelRequest, CreateCommunityRequest, CreateGroupRequest,
     CreateLabelRequest, CreateMeetingRequest, CreateProductRequest, CreateSubChannelRequest,
     CreateTemplateRequest, CreateTopicRequest, CreateWebhookRequest,
-    CreateBreakoutRoomsRequest, DisappearingRequest, InstantMeetingRequest,
+    CreateBreakoutRoomsRequest, DisappearingRequest, InstantMeetingRequest, QuickMeetingRequest,
     EditMessageRequest, FeedbackRequest, ForwardRequest, ForwardStoryRequest, HighlightStoryRequest,
     LiveLocationUpdateRequest, LoginRequest,
     MatchContactsRequest,
@@ -6459,6 +6459,63 @@ async def start_instant_meeting(request: InstantMeetingRequest, user: dict = Dep
         time.time(), 60, "", 0, [], "live",
         waiting_room=request.waiting_room, password=request.password,
     )
+
+
+@app.post("/meetings/quick-start")
+async def quick_start_meeting(request: QuickMeetingRequest, user: dict = Depends(current_user)):
+    """
+    Zoom/Meet-style 'New Meeting' with NO pre-existing group required — the
+    limitation the plain /meetings/instant endpoint has (it needs a group,
+    channel or community chat_id). This spins up a fresh ad-hoc group room on
+    the fly, generates a shareable invite code for it, starts a live meeting
+    in it immediately, and hands all of that back so the client can drop the
+    user straight into the call and let them share the link. Anyone who opens
+    the link (?invite=<code>) joins the room and can jump into the live call.
+
+    A real group (not `ephemeral`) on purpose: the meeting room stays in the
+    participants' chat list with its history and its own chat, the way a Meet
+    space persists, rather than vanishing the moment the call ends.
+    """
+    member_ids = set(request.member_ids) - {user["id"]}
+    if len(member_ids) + 1 > MAX_GROUP_MEMBERS:
+        raise HTTPException(400, f"A meeting can have at most {MAX_GROUP_MEMBERS} people")
+
+    title = request.title.strip() or "Instant meeting"
+    chat_id = new_id("group")
+    now = time.time()
+    invite_code = secrets.token_urlsafe(8)
+
+    with db.transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO chats (id, type, name, color, avatar_letter, owner_id, created_at, invite_code)
+            VALUES (?, 'group', ?, '#6366f1', ?, ?, ?, ?)
+            """,
+            (chat_id, title, title[0].upper(), user["id"], now, invite_code),
+        )
+        conn.execute(
+            "INSERT INTO chat_members (chat_id, user_id, role, joined_at) VALUES (?, ?, 'owner', ?)",
+            (chat_id, user["id"], now),
+        )
+        for member_id in member_ids:
+            conn.execute(
+                "INSERT OR IGNORE INTO chat_members (chat_id, user_id, role, joined_at) "
+                "VALUES (?, ?, 'member', ?)",
+                (chat_id, member_id, now),
+            )
+
+    await post_system_message(chat_id, user["id"], f"{user['name']} started a meeting")
+
+    meeting = await _create_meeting_row(
+        chat_id, user["id"], title, "",
+        now, 60, "", 0, [], "live",
+        waiting_room=request.waiting_room, password=request.password,
+    )
+    return {
+        "meeting": meeting,
+        "chat": get_chat(chat_id, user),
+        "invite_code": invite_code,
+    }
 
 
 @app.post("/meetings/{meeting_id}/start")

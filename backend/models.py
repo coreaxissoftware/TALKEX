@@ -582,6 +582,17 @@ class InstantMeetingRequest(BaseModel):
     password: str = Field(default="", max_length=64)
 
 
+class QuickMeetingRequest(BaseModel):
+    """Zoom/Meet-style 'New Meeting' with NO chat_id at all — the server spins
+    up a fresh ad-hoc meeting room on the fly, so the user doesn't have to
+    pick or already have a group first. Optionally seed it with people to
+    ring immediately; anyone else joins via the returned shareable link."""
+    title: str = Field(default="Instant meeting", max_length=120)
+    member_ids: list[str] = Field(default_factory=list, max_length=200)
+    waiting_room: bool = False
+    password: str = Field(default="", max_length=64)
+
+
 class CreateBreakoutRoomsRequest(BaseModel):
     """assignments maps user_id -> which room (0-based) they land in — the
     caller decides the grouping (manually or by spreading people evenly

@@ -85,6 +85,33 @@ export default function Planner({ toast, onOpenChat, chats, onJoinCall, me }) {
     }
   }
 
+  // Zoom/Meet-style "New Meeting" — ONE tap, no group to pick first. The
+  // server spins up a fresh room, we copy its shareable invite link to the
+  // clipboard (so the host can paste it to whoever should join), and drop
+  // straight into the video call. onJoinCall falls back to a group join for
+  // an id it doesn't recognise, which is exactly this brand-new room.
+  const [startingQuick, setStartingQuick] = useState(false);
+  async function newInstantMeeting() {
+    if (startingQuick) return;
+    setStartingQuick(true);
+    try {
+      const { chat, invite_code } = await Meetings.quickStart({ title: "Instant meeting" });
+      const link = `https://web.talkex.in/?invite=${invite_code}`;
+      try {
+        await navigator.clipboard.writeText(link);
+        toast("Meeting started — invite link copied to share");
+      } catch {
+        toast("Meeting started");
+      }
+      onJoinCall(chat.id, "video");
+      reload();
+    } catch (problem) {
+      toast(problem.message || "Could not start the meeting");
+    } finally {
+      setStartingQuick(false);
+    }
+  }
+
   function pickChatToSchedule(chat) {
     setPickingChat(false);
     setSchedulingChat(chat);
@@ -119,11 +146,21 @@ export default function Planner({ toast, onOpenChat, chats, onJoinCall, me }) {
   return (
     <div style={{ flex: 1, overflowY: "auto" }}>
       <div style={{ padding: "16px 16px 0", display: "flex", gap: 8 }}>
-        <Button onClick={() => setPickingChat("instant")} style={{ flex: 1 }}>
-          🎥 Start instant meeting
+        {/* One-tap Zoom/Meet-style "New Meeting" — no group needed. */}
+        <Button onClick={newInstantMeeting} disabled={startingQuick} style={{ flex: 1 }}>
+          {startingQuick ? "Starting…" : "🎥 New Meeting"}
         </Button>
         <Button onClick={() => setPickingChat("schedule")} variant="ghost" style={{ flex: 1 }}>
-          📅 Schedule meeting
+          📅 Schedule
+        </Button>
+      </div>
+      {/* Secondary: start a meeting inside a group you already have (rings
+          its members), for when the meeting belongs to an existing team
+          rather than an ad-hoc room. */}
+      <div style={{ padding: "8px 16px 0" }}>
+        <Button onClick={() => setPickingChat("instant")} variant="ghost"
+                style={{ width: "100%", fontSize: 13 }}>
+          👥 Meet in an existing group
         </Button>
       </div>
 

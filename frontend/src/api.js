@@ -1061,6 +1061,13 @@ export const Meetings = {
   // No scheduling step — live immediately, in-app join only (no join_url).
   startInstant: (chatId, title, waitingRoom = false, password = "") =>
     post("/meetings/instant", { chat_id: chatId, title, waiting_room: waitingRoom, password }),
+
+  // Zoom/Meet-style "New Meeting" with NO group needed — the server creates
+  // a fresh ad-hoc room, starts a live meeting in it, and returns
+  // { meeting, chat, invite_code } so the client can jump straight into the
+  // call and share the link.
+  quickStart: ({ title = "Instant meeting", memberIds = [], waitingRoom = false, password = "" } = {}) =>
+    post("/meetings/quick-start", { title, member_ids: memberIds, waiting_room: waitingRoom, password }),
   // Whoever taps Join first moves a scheduled meeting to 'live' for everyone.
   start: (meetingId) => post(`/meetings/${meetingId}/start`),
   end: (meetingId) => post(`/meetings/${meetingId}/end`),
