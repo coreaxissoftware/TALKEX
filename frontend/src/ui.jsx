@@ -543,6 +543,37 @@ const ENTER_TO_SEND_EVENT = "ht-enter-to-send-changed";
 // everywhere at once.
 export const G = { ...THEMES.light, ...accentFields(DEFAULT_ACCENT, "light") };
 
+// Elevation scale — one consistent shadow vocabulary instead of every
+// component inventing its own `0 2px 8px #0002`. Soft, layered, iOS-like
+// (a tight contact shadow + a wider ambient one). Referenced as SHADOW.sm
+// etc. so a design tweak happens in one place.
+export const SHADOW = {
+  sm: "0 1px 2px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.10)",
+  md: "0 2px 4px rgba(0,0,0,0.06), 0 4px 12px rgba(0,0,0,0.12)",
+  lg: "0 4px 8px rgba(0,0,0,0.08), 0 12px 32px rgba(0,0,0,0.16)",
+  xl: "0 8px 16px rgba(0,0,0,0.10), 0 24px 56px rgba(0,0,0,0.22)",
+};
+
+// One-line haptic feedback. navigator.vibrate is Android-Chrome/PWA only
+// (iOS Safari ignores it silently, desktop has no vibrator) — feature-
+// detected once so call sites can fire haptic() freely without guarding.
+// The tiny durations are deliberate: a 8-12ms tick reads as a crisp tap,
+// not a buzz. Wrapped in try/catch because some embedded WebViews throw
+// on vibrate rather than no-op'ing.
+const _canVibrate = typeof navigator !== "undefined" && typeof navigator.vibrate === "function";
+export function haptic(kind = "light") {
+  if (!_canVibrate) return;
+  try {
+    navigator.vibrate(
+      kind === "heavy" ? 18
+      : kind === "medium" ? 12
+      : kind === "success" ? [10, 40, 10]
+      : kind === "warn" ? [8, 30, 8, 30, 8]
+      : 8, // "light" — the default single crisp tick
+    );
+  } catch { /* WebView with a throwing vibrate — ignore */ }
+}
+
 function accentFields(accentKey, mode) {
   const accent = ACCENTS[accentKey] || ACCENTS[DEFAULT_ACCENT];
   return {

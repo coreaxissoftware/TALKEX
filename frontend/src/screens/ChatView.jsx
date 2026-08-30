@@ -7,8 +7,8 @@ import {
 import * as offlineDb from "../offlineDb.js";
 import { playNotifyTone, TONE_OPTIONS } from "../notifyTone.js";
 import {
-  Av, Button, ChatBackdrop, ContextMenu, CoverImage, EMOJIS, EMOJI_GROUPS, Field, G, I, SRow, SocialLinks,
-  Spinner, Toggle,
+  Av, Button, ChatBackdrop, ContextMenu, CoverImage, EMOJIS, EMOJI_GROUPS, Field, G, I, SHADOW, SRow, SocialLinks,
+  Spinner, Toggle, haptic,
   clockTime, countdown, dateSeparatorLabel, durationLabel, lastSeenLabel, localInputToUnix, toDate, whenLabel, useEnterToSend,
   useIsDesktop, usePrompt,
 } from "../ui.jsx";
@@ -219,6 +219,13 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   const [reportSheetOpen, setReportSheetOpen] = useState(false);
   const inputRef = useRef(chat.draft || "");
   const bottom = useRef(null);
+  // Timestamp captured when this chat view mounted (or switched chats).
+  // Only messages created AFTER this get the entry animation — so opening a
+  // chat shows its history instantly (no cascade of 100 bubbles animating
+  // at once), while a message that actually arrives or is sent while you're
+  // looking springs in. Reset on chat.id change below.
+  const mountedAtRef = useRef(Date.now());
+  useEffect(() => { mountedAtRef.current = Date.now(); }, [chat.id]);
   const scrollContainerRef = useRef(null);
   const [showScrollDown, setShowScrollDown] = useState(false);
   const bgLongPressTimer = useRef(null);
@@ -445,6 +452,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   async function send() {
     const text = input.trim();
     if (!text) return;
+    haptic("light"); // crisp tick the instant a message leaves the composer
 
     if (editing) {
       const editingId = editing.id;
@@ -523,6 +531,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
 
   async function react(message, emoji) {
     const mine = message.reactions?.find((r) => r.emoji === emoji && r.mine);
+    haptic("medium");
     try {
       const updated = mine
         ? await Actions.unreact(message.id, emoji)
@@ -1534,6 +1543,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
               <ErrorBoundary key={message.id} compact>
               <Bubble message={message} me={me}
                       chatAccent={chatAccent}
+                      animateIn={(message.created_at || 0) * 1000 > mountedAtRef.current}
                       onCancelUpload={cancelUpload}
                       onRetry={() => retryMessage(message)}
                       onRemoveFailed={() => removeFailedMessage(message)}
@@ -1550,6 +1560,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
                       }}
                       onLongPress={() => {
                         if (message.pending || message.queued || message.failed) return;
+                        haptic("medium"); // the tactile "grabbed it" cue when the menu/selection opens
                         if (selectMode) {
                           setSelectedMsgIds((prev) => {
                             const n = new Set(prev);
@@ -1562,6 +1573,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
                       }}
                       onSwipeReply={() => {
                         if (message.pending || message.queued || message.failed) return;
+                        haptic("light");
                         setReplyTo(message);
                       }}
                       onSwipeInfo={() => {
@@ -2406,7 +2418,7 @@ const SWIPE_REPLY_MAX = 74;
 const SWIPE_INFO_TRIGGER = -56;
 const SWIPE_INFO_MAX = -74;
 
-const Bubble = memo(function Bubble({ message, me, chatAccent, translatedText, replyTarget, meetingUpdates, isPinned, isRead, isDelivered, signature,
+const Bubble = memo(function Bubble({ message, me, chatAccent, animateIn, translatedText, replyTarget, meetingUpdates, isPinned, isRead, isDelivered, signature,
                   commentsOn, onComments, onDoubleTap, onLongPress, onSwipeReply, onSwipeInfo, onVote, onForward, onOpenMedia, onCallAgain, onJoinMeeting, onCancelUpload, onRetry, onRemoveFailed, uploadPct, toast }) {
   const mine = message.sender_id === me.id;
   const gone = message.deleted_at || message.expired;
@@ -2575,13 +2587,35 @@ const Bubble = memo(function Bubble({ message, me, chatAccent, translatedText, r
         onMouseEnter={showChevron} onMouseLeave={hideChevron}
         style={{
           position: "relative", maxWidth: mediaFlush ? "min(78%, 300px)" : "78%",
-          padding: mediaFlush ? 3 : "9px 13px", borderRadius: 16,
-          borderBottomRightRadius: mine ? 4 : 16,
-          borderBottomLeftRadius: mine ? 16 : 4,
-          background: mine ? (chatAccent || G.accent) : G.card,
+          padding: mediaFlush ? 3 : "9px 13px", borderRadius: 18,
+          borderBottomRightRadius: mine ? 5 : 18,
+          borderBottomLeftRadius: mine ? 18 : 5,
+          // Own bubbles get a subtle top-left→bottom-right accent gradient
+          // (accent → accentD) for depth instead of a flat fill — the single
+          // biggest "premium vs. web" tell on the chat screen. A per-chat
+          // custom accent (chatAccent) has no paired dark shade, so it stays
+          // solid. Received bubbles stay a clean card.
+          background: mine
+            ? (chatAccent || `linear-gradient(135deg, ${G.accent}, ${G.accentD})`)
+            : G.card,
+          // Own bubbles carry white text by default so every plain-text
+          // descendant (the message body, timestamps) inherits legible
+          // contrast on the accent gradient — descendants that need a
+          // specific color (links, translated-label) still set their own.
+          // Received bubbles inherit the normal text color.
+          color: mine ? "#fff" : G.text,
           border: mine ? "none" : `1px solid ${G.border}`,
+          // A soft contact shadow lifts every bubble off the wallpaper —
+          // tinted with the accent glow on own bubbles so the color reads as
+          // "emitting," neutral on received ones.
+          boxShadow: mine ? `0 1px 2px rgba(0,0,0,0.08), 0 2px 8px ${G.accentGlow}` : SHADOW.sm,
           cursor: "pointer",
           touchAction: "pan-y",
+          // Genuinely-new messages (created after this chat opened) spring in;
+          // history renders instantly. Keyed elements never remount, so this
+          // plays exactly once per message and never re-fires on re-render.
+          animation: animateIn ? `${mine ? "msgInRight" : "msgInLeft"} 0.28s cubic-bezier(0.22, 1, 0.36, 1)` : undefined,
+          transformOrigin: mine ? "bottom right" : "bottom left",
           ...swipeStyle,
         }}>
         {swipeReplyIcon}
@@ -2793,10 +2827,16 @@ function ReactionPills({ reactions, messageId }) {
       <div style={{ display: "flex", gap: 4, marginTop: 5, flexWrap: "wrap" }}>
         {reactions.map((reaction) => (
           <div key={reaction.emoji} onClick={(e) => { e.stopPropagation(); showDetail(); }} style={{
-            padding: "2px 7px", borderRadius: 12, fontSize: 11, cursor: "pointer",
+            padding: "2px 8px", borderRadius: 12, fontSize: 11, cursor: "pointer",
             background: reaction.mine ? G.accentSoft : G.dim,
             border: `1px solid ${reaction.mine ? G.accent : G.border}`,
-            color: G.text,
+            color: G.text, boxShadow: SHADOW.sm,
+            // Each reaction pill pops in with the spring overshoot — the
+            // tactile "boop" a reaction landing should have. Plays once on
+            // mount (a given emoji pill only mounts when that reaction first
+            // appears), so existing reactions don't re-pop on every render.
+            animation: "popIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)",
+            display: "inline-flex", alignItems: "center", gap: 3,
           }}>{reaction.emoji} {reaction.count}</div>
         ))}
       </div>

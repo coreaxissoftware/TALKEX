@@ -731,6 +731,7 @@ function displayName(chat, contactNames) {
 const ChatRow = memo(function ChatRow({ chat, typing, onOpen, onPin, onArchive, onClear, onDelete, onMenu,
                    selectMode, selected, onToggleSelect, contactNames }) {
   const typingNames = Object.values(typing || {});
+  const hasUnread = chat.unread > 0;
   const [dragX, setDragX] = useState(0);
   const dragging = useRef(false);
   const startX = useRef(0);
@@ -979,8 +980,12 @@ const ChatRow = memo(function ChatRow({ chat, typing, onOpen, onPin, onArchive, 
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <div style={{
-              fontSize: 14, fontWeight: 600, whiteSpace: "nowrap",
-              overflow: "hidden", textOverflow: "ellipsis",
+              // An unread chat's name goes heavier and full-strength text —
+              // the WhatsApp cue that says "there's something new here" before
+              // you've even read the badge. A read chat sits at the calmer
+              // 600/normal weight.
+              fontSize: 14.5, fontWeight: hasUnread ? 700 : 600, whiteSpace: "nowrap",
+              overflow: "hidden", textOverflow: "ellipsis", color: G.text,
             }}>{displayName(chat, contactNames)}</div>
             {chat.peer_blue_tick ? <span style={{ flexShrink: 0, lineHeight: 0 }}>{I.blueTick(14)}</span> : null}
             {chat.is_verified ? I.verified() : null}
@@ -988,25 +993,34 @@ const ChatRow = memo(function ChatRow({ chat, typing, onOpen, onPin, onArchive, 
             {chat.disappear_secs ? I.timer(G.yellow, 13) : null}
           </div>
           <div style={{
-            fontSize: 12.5, color: typing ? G.accentText : G.muted, marginTop: 1,
+            // Unread preview is brighter + slightly bolder than a read one's
+            // muted grey, so a chat you haven't opened reads as "louder" at a
+            // glance. Typing overrides both with the accent italic.
+            fontSize: 13, marginTop: 2,
+            color: typing ? G.accentText : hasUnread ? G.sub : G.muted,
+            fontWeight: hasUnread && !typing ? 500 : 400,
             whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
             fontStyle: typing ? "italic" : "normal",
           }}>{preview()}</div>
         </div>
 
-        <div style={{ textAlign: "right", flexShrink: 0 }}>
-          <div style={{ fontSize: 10.5, color: G.muted }}>
+        <div style={{ textAlign: "right", flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
+          <div style={{
+            fontSize: 11, fontWeight: hasUnread ? 700 : 400,
+            color: hasUnread ? G.accentText : G.muted,
+          }}>
             {chat.last_message ? whenLabel(chat.last_message.created_at) : ""}
           </div>
           {chat.unread > 0 && (
             <div style={{
-              marginTop: 3, minWidth: 18, height: 18, borderRadius: 9,
-              background: G.accent, color: "#fff", fontSize: 10.5, fontWeight: 700,
+              minWidth: 19, height: 19, borderRadius: 10,
+              background: `linear-gradient(135deg, ${G.accent}, ${G.accentD})`,
+              color: "#fff", fontSize: 10.5, fontWeight: 700,
               display: "inline-flex", alignItems: "center", justifyContent: "center",
-              padding: "0 5px",
+              padding: "0 6px", boxShadow: `0 1px 4px ${G.accentGlow}`,
             }}>{chat.unread > 99 ? "99+" : chat.unread}</div>
           )}
-          {chat.is_pinned ? <div style={{ marginTop: 3 }}>{I.pin(G.muted, 11)}</div> : null}
+          {chat.is_pinned ? I.pin(G.muted, 12) : null}
         </div>
       </div>
     </div>
