@@ -464,7 +464,8 @@ export default function GroupCallOverlay({
     }}>
       {call.phase === "active" && (
         <div onClick={() => setMinimized(true)} title="Minimize" style={{
-          position: "absolute", top: 14, left: 14, zIndex: 1,
+          position: "absolute", top: "calc(14px + env(safe-area-inset-top))",
+          left: "calc(14px + env(safe-area-inset-left))", zIndex: 1,
           width: 34, height: 34, borderRadius: "50%", cursor: "pointer",
           background: "#ffffff1a", display: "flex", alignItems: "center", justifyContent: "center",
           fontSize: 16, color: "#fff",
@@ -472,7 +473,8 @@ export default function GroupCallOverlay({
       )}
       {(
         <div onClick={toggle} title={expanded ? "Exit full screen" : "Full screen"} style={{
-          position: "absolute", top: 14, right: 14, zIndex: 1,
+          position: "absolute", top: "calc(14px + env(safe-area-inset-top))",
+          right: "calc(14px + env(safe-area-inset-right))", zIndex: 1,
           width: 34, height: 34, borderRadius: "50%", cursor: "pointer",
           background: "#ffffff1a", display: "flex", alignItems: "center", justifyContent: "center",
         }}>
@@ -512,7 +514,7 @@ function WaitingForHost({ call, onLeave }) {
         <div style={{ fontSize: 17, fontWeight: 600 }}>Waiting for the host to let you in…</div>
         <div style={{ fontSize: 13, color: "#ffffffaa" }}>This meeting has a waiting room turned on.</div>
       </div>
-      <div style={{ display: "flex", justifyContent: "center", padding: "0 40px 60px" }}>
+      <div style={{ display: "flex", justifyContent: "center", padding: "0 40px max(24px, env(safe-area-inset-bottom))" }}>
         <CallButton onClick={onLeave} background="#ef4444" icon={I.callEnd("#fff", 24)} label="Cancel"/>
       </div>
     </>
@@ -529,7 +531,7 @@ function IncomingGroupCall({ call, onAccept, onDecline }) {
           Incoming group {call.callKind === "video" ? "video" : "voice"} call…
         </div>
       </div>
-      <div style={{ display: "flex", justifyContent: "space-around", padding: "0 40px 60px" }}>
+      <div style={{ display: "flex", justifyContent: "space-around", padding: "0 40px max(24px, env(safe-area-inset-bottom))" }}>
         <CallButton onClick={onDecline} background="#ef4444" icon={I.callEnd("#fff", 24)} label="Decline"/>
         <CallButton onClick={onAccept} background="#22c55e" icon={I.phone("#fff", 24)} label="Join"/>
       </div>
@@ -976,10 +978,12 @@ function ActiveGroupCall({
       <div style={{
         display: "flex", justifyContent: "center",
         gap: isLandscape ? 10 : 16,
-        // Landscape: compact padding so the buttons don't eat the already-
-        // short vertical space. Portrait: 60px bottom absorbs the phone's
-        // home-indicator/safe-area bar.
-        padding: isLandscape ? "6px 16px 10px" : "16px 20px 60px",
+        // Real device safe-area inset instead of a hardcoded 60px guess, so
+        // the control row never clips behind the home indicator on a
+        // full-screen group call (same fix as the 1:1 CallOverlay).
+        padding: isLandscape
+          ? "6px max(16px, env(safe-area-inset-left)) max(10px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-right))"
+          : "16px 20px max(24px, env(safe-area-inset-bottom))",
         flexWrap: "wrap",
       }}>
         <CallButton onClick={onToggleMute} background={call.muted ? "#fff" : "#ffffff26"}

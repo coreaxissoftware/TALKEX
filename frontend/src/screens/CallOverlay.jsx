@@ -415,7 +415,10 @@ export default function CallOverlay({
           the top-left "collapse" affordance from the WhatsApp call screen. */}
       {call.phase !== "incoming" && (
         <div onClick={() => setMinimized(true)} title="Minimize" style={{
-          position: "absolute", top: 14, left: 14, zIndex: 2,
+          // top/left include the device safe-area insets so the button never
+          // hides under the notch/status bar on a full-screen call.
+          position: "absolute", top: "calc(14px + env(safe-area-inset-top))",
+          left: "calc(14px + env(safe-area-inset-left))", zIndex: 2,
           width: 34, height: 34, borderRadius: "50%", cursor: "pointer",
           background: "#ffffff1a", display: "flex", alignItems: "center", justifyContent: "center",
         }}>
@@ -424,7 +427,8 @@ export default function CallOverlay({
       )}
       {isDesktop && (
         <div onClick={toggle} title={expanded ? "Exit full screen" : "Full screen"} style={{
-          position: "absolute", top: 14, right: 14, zIndex: 1,
+          position: "absolute", top: "calc(14px + env(safe-area-inset-top))",
+          right: "calc(14px + env(safe-area-inset-right))", zIndex: 1,
           width: 34, height: 34, borderRadius: "50%", cursor: "pointer",
           background: "#ffffff1a", display: "flex", alignItems: "center", justifyContent: "center",
         }}>
@@ -696,7 +700,8 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
 
         {showMainVideo && controlsVisible && (
           <div style={{
-            position: "absolute", top: isLandscape ? 8 : 16, left: 0, right: 0,
+            position: "absolute", top: `calc(${isLandscape ? 8 : 16}px + env(safe-area-inset-top))`,
+            left: 0, right: 0,
             textAlign: "center", fontSize: 13, color: "#ffffffcc",
             transition: "opacity 0.25s ease",
           }}>
@@ -708,7 +713,8 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
             screen, shown whenever they've turned their mic off. */}
         {call.remoteMuted && (
           <div style={{
-            position: "absolute", top: isLandscape ? 30 : 44, left: 0, right: 0,
+            position: "absolute", top: `calc(${isLandscape ? 30 : 44}px + env(safe-area-inset-top))`,
+            left: 0, right: 0,
             display: "flex", justifyContent: "center",
           }}>
             <div style={{
@@ -769,7 +775,16 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
 
       <div style={{
         display: "flex", justifyContent: "center", gap: isLandscape ? 12 : 16,
-        padding: isLandscape ? "8px 20px 12px" : "0 20px 60px",
+        // The bottom padding was a hardcoded 60px guess meant to clear the
+        // iPhone home indicator — but a fixed overlay (position:fixed;
+        // inset:0) fills edge-to-edge, so on devices whose real
+        // safe-area-inset-bottom differs (or in landscape) the End/Mute
+        // row got clipped behind the home indicator / off-screen ("screen
+        // kat jata hai"). max(...) with env(safe-area-inset-bottom) keeps a
+        // sensible minimum AND respects the device's actual inset.
+        padding: isLandscape
+          ? "8px max(20px, env(safe-area-inset-left)) max(12px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-right))"
+          : "0 20px max(28px, env(safe-area-inset-bottom))",
         flexWrap: "wrap",
         opacity: controlsVisible ? 1 : 0, pointerEvents: controlsVisible ? "auto" : "none",
         transition: "opacity 0.25s ease",
