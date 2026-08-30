@@ -74,6 +74,12 @@ export const clearRefDm = () => {
 
 const PHONE_LINK_KEY = "talkex_phone_link";
 const PHONE_TEXT_KEY = "talkex_phone_text";
+// True only when THIS page load arrived via an actual phone-link URL
+// (web.talkex.in/<number> or ?phone=). A phone number persisted by a *previous*
+// visit stays in localStorage so it can still be consumed after login — but it
+// must NOT hijack the root screen on every future reload, so callers gate the
+// phone-link landing on this flag, not on the stored value alone.
+let _phoneLinkFresh = false;
 (function capturePhoneLink() {
   try {
     const params = new URLSearchParams(window.location.search);
@@ -89,8 +95,10 @@ const PHONE_TEXT_KEY = "talkex_phone_text";
     if (!phone || phone.replace(/\D/g, "").length < 6) return;
     localStorage.setItem(PHONE_LINK_KEY, phone);
     if (text) localStorage.setItem(PHONE_TEXT_KEY, text.slice(0, 1000));
+    _phoneLinkFresh = true;
   } catch { /* ignore */ }
 })();
+export const phoneLinkFresh = () => _phoneLinkFresh;
 export const storedPhoneLink = () => {
   try { return localStorage.getItem(PHONE_LINK_KEY) || undefined; } catch { return undefined; }
 };

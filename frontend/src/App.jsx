@@ -2,7 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import {
   ApiError, Auth, Calls, Chats, Contacts, E2EE, Me, Meetings, Messages, Scheduled, Search, Users,
   clearToken, flushEverything, getToken, rememberAccount,
-  storedRefDm, clearRefDm, storedPhoneLink, storedPhoneText, clearPhoneLink, publicProfileByPhone,
+  storedRefDm, clearRefDm, storedPhoneLink, storedPhoneText, clearPhoneLink, phoneLinkFresh, publicProfileByPhone,
 } from "./api.js";
 import { initE2EE, clearE2EEKeys } from "./e2ee.js";
 import { initNativePush, stopNativePush, syncNativeCredentials } from "./pushNative.js";
@@ -85,8 +85,8 @@ function PhoneLinkLanding({ phone, onContinue }) {
           <div style={{ fontSize: 22, fontWeight: 700, color: G.text, marginBottom: 4 }}>{displayName}</div>
           <div style={{ fontSize: 13, color: G.muted, marginBottom: 28 }}>TalkEx Messenger</div>
         </>)}
-        <Button label="Continue to TalkEx Web" accent style={{ width: "100%", marginBottom: 12 }}
-          onClick={() => { window.history.replaceState(null, "", "/"); onContinue(); }}/>
+        <Button style={{ width: "100%", marginBottom: 12 }}
+          onClick={() => { window.history.replaceState(null, "", "/"); onContinue(); }}>Continue to TalkEx Web</Button>
         <a href={downloadUrl} target="_blank" rel="noopener noreferrer" style={{
           display: "block", padding: "10px 0", borderRadius: 12, fontSize: 14,
           color: G.text, border: `1.5px solid ${G.border}`, textDecoration: "none", fontWeight: 500,
@@ -434,6 +434,14 @@ export default function App() {
     window.history.replaceState(null, "", window.location.pathname);
     Chats.get(chatId).then(setOpenChat).catch(() => {});
   }, [me]);
+
+  // A phone number left in localStorage by a PREVIOUS visit (not captured from
+  // the current URL) must not linger: it would otherwise silently auto-open a
+  // chat after an unrelated later login. Fresh captures (this page load) are
+  // kept so the effect below can consume them once the user signs in.
+  useEffect(() => {
+    if (storedPhoneLink() && !phoneLinkFresh()) clearPhoneLink();
+  }, []);
 
   useEffect(() => {
     if (!me) return;
@@ -903,8 +911,13 @@ export default function App() {
   if (checking) return <Screen style={{ justifyContent: "center" }}><Spinner/></Screen>;
 
   if (!me) {
+    // Only show the phone-link landing when THIS visit actually arrived via a
+    // phone-link URL. A number left in localStorage by a previous visit must
+    // not hijack the root screen on every reload (that stranded returning
+    // users on a "Continue to TalkEx Web" screen). A stale value is cleared on
+    // mount below; a fresh one is still consumed after login to open the chat.
     const phoneLinkPhone = storedPhoneLink();
-    if (phoneLinkPhone && !phoneLinkDismissed) {
+    if (phoneLinkPhone && phoneLinkFresh() && !phoneLinkDismissed) {
       return <PhoneLinkLanding phone={phoneLinkPhone} onContinue={() => {
         setPhoneLinkDismissed(true);
       }}/>;
