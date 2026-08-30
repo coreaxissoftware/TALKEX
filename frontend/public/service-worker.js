@@ -9,7 +9,7 @@
 // online visit after a deploy "warms" the cache with whatever that build's
 // real filenames are, no build step needed to keep this file in sync.
 
-const SHELL_CACHE = "talkex-shell-v61";
+const SHELL_CACHE = "talkex-shell-v62";
 
 self.addEventListener("install", () => {
   // Take over immediately rather than waiting for every open tab to close
