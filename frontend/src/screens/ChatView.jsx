@@ -4026,7 +4026,12 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
           finished. `uploading` now only drives a small badge, not the
           button's own clickability. */}
       <IconButton onClick={toggleAttach} label={attachOpen ? "Keyboard" : "Attach"} style={{ position: "relative" }}>
-        {attachOpen ? I.keyboard(G.sub, 20) : I.paperclip(G.sub, 20)}
+        {/* A + glyph (bigger, 24px) instead of the paperclip — the WhatsApp/
+            Telegram convention for "attach anything" and a clearer, bigger
+            tap target. Rotates to an × cue when the panel is open. */}
+        {attachOpen
+          ? I.keyboard(G.sub, 20)
+          : <span style={{ display: "inline-flex", transition: "transform 0.15s ease" }}>{I.plus(G.sub, 24)}</span>}
         {uploading && (
           <div style={{
             position: "absolute", top: -2, right: -2, width: 9, height: 9, borderRadius: "50%",

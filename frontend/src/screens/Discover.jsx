@@ -87,6 +87,16 @@ export default function Discover({ onOpenChat, onChanged, toast }) {
   }
 
   async function importFromDevice() {
+    // The button is always shown now (rather than hidden when unsupported),
+    // so users don't think the feature is silently missing/broken. When the
+    // platform genuinely can't do it — iOS Safari/PWA never exposes the
+    // Contact Picker API at all, and non-Chromium browsers don't either —
+    // explain that and point at the manual "New contact" path instead of
+    // failing with a cryptic error.
+    if (!contactsAvailable()) {
+      toast("Your browser can't open the contact picker here — use “New contact”, or open TalkEx in Chrome / the Android app.");
+      return;
+    }
     // pickContacts() is a one-shot, user-gesture-triggered picker — there is
     // no such thing as a background "sync," by design (a website/native app
     // is never given standing address-book access). On native Android it's
@@ -305,11 +315,12 @@ export default function Discover({ onOpenChat, onChanged, toast }) {
           <Button variant="ghost" style={{ flex: 1 }} onClick={() => setAddingContact(true)}>
             + New contact
           </Button>
-          {contactsAvailable() && (
-            <Button variant="ghost" style={{ flex: 1 }} onClick={importFromDevice}>
-              📱 Import from device
-            </Button>
-          )}
+          {/* Always shown — importFromDevice explains the limitation itself
+              on platforms that can't open the picker, rather than the button
+              vanishing and looking broken. */}
+          <Button variant="ghost" style={{ flex: 1 }} onClick={importFromDevice}>
+            📱 Import from device
+          </Button>
         </div>
       )}
 
