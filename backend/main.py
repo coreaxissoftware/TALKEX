@@ -65,7 +65,7 @@ from chatstore import new_id
 from models import (
     AddContactRequest, AddMembersRequest, BroadcastRecipientsRequest, BulkSendRequest,
     CreateAutoReplyRuleRequest, UpdateAutoReplyRuleRequest,
-    ChatSettingsRequest, CommentRequest, ConfirmEmailRequest, CreateApiKeyRequest, CreateBroadcastRequest,
+    ChatSettingsRequest, CommentRequest, ConfirmEmailRequest, ContactRequest, CreateApiKeyRequest, CreateBroadcastRequest,
     CreateCannedReplyRequest, CreateChannelRequest, CreateCommunityRequest, CreateGroupRequest,
     CreateLabelRequest, CreateMeetingRequest, CreateProductRequest, CreateSubChannelRequest,
     CreateTemplateRequest, CreateTopicRequest, CreateWebhookRequest,
@@ -2137,6 +2137,70 @@ def submit_feedback(request: FeedbackRequest, user: dict = Depends(current_user)
         (new_id("fb"), user["id"], json.dumps(request.answers), request.comment.strip(), time.time()),
     )
     return {"submitted": True}
+
+
+# Public marketing-site contact form — no account involved, so keyed by IP.
+# 5/hour per IP is plenty for a real enquiry and blunts a script hammering it.
+contact_rate_limiter = RateLimiter(max_events=5, window_seconds=3600)
+
+
+@app.post("/contact")
+def submit_contact(request: ContactRequest, http_request: Request):
+    """
+    Accept one submission from the public marketing site's contact form
+    (talkex.in). Unauthenticated and rate-limited per IP. Every submission is
+    stored in contact_messages — so a lead is never lost even if email fails —
+    and a copy is emailed to the site owner (email_delivery.send_contact_message),
+    with Reply-To set to the sender so a reply goes straight back to them.
+    Superadmins read submissions back via GET /admin/contact-messages.
+    """
+    # Honeypot: real users never see or fill `company`. A bot that fills it
+    # gets a silent 200 so it can't tell the submission was dropped.
+    if request.company.strip():
+        return {"ok": True}
+    ip = client_ip(http_request)
+    contact_rate_limiter.check(ip)
+    name = request.name.strip()
+    email = request.email.strip()
+    message = request.message.strip()
+    if not name or not message:
+        raise HTTPException(400, "Name and message are required")
+    db.execute(
+        "INSERT INTO contact_messages (id, name, email, message, ip, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (new_id("contact"), name, email, message, ip, time.time()),
+    )
+    email_delivery.send_contact_message(name, email, message)
+    return {"ok": True}
+
+
+@app.get("/admin/contact-messages")
+def admin_list_contact_messages(limit: int = Query(default=100, ge=1, le=500),
+                                offset: int = Query(default=0, ge=0),
+                                admin: dict = Depends(require_superadmin)):
+    """Every marketing-site contact submission, newest first — the superadmin's
+    durable record, alongside the email notification each one also sends."""
+    rows = db.query_all(
+        """
+        SELECT id, name, email, message, ip, handled, created_at
+        FROM contact_messages
+        ORDER BY created_at DESC
+        LIMIT ? OFFSET ?
+        """,
+        (limit, offset),
+    )
+    return [
+        {
+            "id": row["id"],
+            "name": row["name"],
+            "email": row["email"],
+            "message": row["message"],
+            "ip": row["ip"],
+            "handled": bool(row["handled"]),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
 
 
 @app.get("/me/blue-tick-progress")

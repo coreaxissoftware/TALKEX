@@ -1011,6 +1011,24 @@ CREATE TABLE IF NOT EXISTS e2ee_one_time_keys (
     key_data TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_e2ee_otk_user ON e2ee_one_time_keys (user_id);
+
+
+-- Contact-form submissions from the public marketing site (talkex.in). No
+-- account is involved — anyone can send one — so there's no user_id and the
+-- endpoint is unauthenticated. Every submission is stored here (so a lead is
+-- never lost even if the email notification fails) and a copy is emailed to
+-- the site owner. `handled` lets the superadmin panel mark ones already dealt
+-- with; `ip` is kept only for light abuse triage.
+CREATE TABLE IF NOT EXISTS contact_messages (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    email      TEXT NOT NULL,
+    message    TEXT NOT NULL,
+    ip         TEXT NOT NULL DEFAULT '',
+    handled    INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_contact_messages_created ON contact_messages (created_at);
 """
 
 

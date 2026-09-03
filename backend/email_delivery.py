@@ -76,3 +76,54 @@ def send_otp(email: str, code: str, expires_in_seconds: int = 300) -> str:
     except urllib.error.URLError:
         logger.exception("Mailgun request failed for %s", email)
         return "error"
+
+
+def contact_recipient() -> str:
+    """Where public contact-form submissions are emailed. Settings row first
+    (editable from the superadmin panel, no redeploy), then env, then the
+    public support address as a last-resort default."""
+    return (
+        db.get_setting("contact_to")
+        or os.environ.get("CONTACT_TO", "")
+        or "softcoreaxis@gmail.com"
+    )
+
+
+def send_contact_message(name: str, from_email: str, message: str) -> str:
+    """
+    Email one marketing-site contact-form submission to the site owner.
+    Returns 'sent' or 'error'. Reply-To is set to the visitor's address so the
+    owner can just hit reply. Like send_otp, this falls back to logging the
+    submission to the server console when Mailgun isn't configured, so a lead
+    is still visible in the logs (and it's always stored in the DB regardless).
+    """
+    api_key, domain, base_url, sender = _config()
+    to = contact_recipient()
+    if not (api_key and domain):
+        logger.warning("[DEV EMAIL — Mailgun not configured] Contact from %s <%s>: %s",
+                       name, from_email, message)
+        print(f"[DEV EMAIL — Mailgun not configured] Contact from {name} <{from_email}>: {message}")
+        return "sent"
+
+    fields = {
+        "from": sender,
+        "to": to,
+        "subject": f"TalkEx enquiry from {name}",
+        "text": f"{message}\n\n— {name} ({from_email})",
+    }
+    # Only set Reply-To when the visitor gave a plausible address, so the owner
+    # can reply straight to them; Mailgun rejects a malformed h:Reply-To.
+    if from_email and "@" in from_email:
+        fields["h:Reply-To"] = from_email
+    body = urllib.parse.urlencode(fields).encode()
+
+    url = f"{base_url.rstrip('/')}/v3/{domain}/messages"
+    auth = base64.b64encode(f"api:{api_key}".encode()).decode()
+    request = urllib.request.Request(
+        url, data=body, method="POST", headers={"Authorization": f"Basic {auth}"})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return "sent" if response.status < 300 else "error"
+    except urllib.error.URLError:
+        logger.exception("Mailgun request failed for contact message from %s", from_email)
+        return "error"

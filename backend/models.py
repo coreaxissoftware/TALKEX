@@ -603,3 +603,15 @@ class CreateBreakoutRoomsRequest(BaseModel):
 
 class RsvpRequest(BaseModel):
     response: Literal["going", "maybe", "declined"]
+
+
+class ContactRequest(BaseModel):
+    """A submission from the public marketing-site contact form (talkex.in).
+    Unauthenticated — anyone can send one — so everything is length-bounded to
+    keep the table and the notification email sane. `company` is a honeypot: it
+    is not shown to real users, so a filled value marks an automated bot and
+    the submission is silently dropped."""
+    name: str = Field(min_length=1, max_length=100)
+    email: str = Field(min_length=3, max_length=200)
+    message: str = Field(min_length=1, max_length=4000)
+    company: str = Field(default="", max_length=200)  # honeypot — must stay empty
