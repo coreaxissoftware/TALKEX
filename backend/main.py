@@ -2112,6 +2112,94 @@ async def bulk_send_message(request: BulkSendRequest, sender: dict = Depends(req
     return {"message_id": message["id"], "chat_id": chat_id, "seq": message["seq"]}
 
 
+bulk_inbound_rate_limiter = RateLimiter(max_events=120, window_seconds=60)
+
+
+@app.get("/api/v1/inbound")
+async def bulk_inbound_messages(
+    since: float = 0.0,
+    limit: int = 100,
+    sender: dict = Depends(require_api_key),
+):
+    """
+    Return DM messages this business account has RECEIVED since a timestamp.
+
+    Companion to POST /api/v1/messages so an external CRM (TalkEx Business,
+    Zapier bridge, etc.) can pull replies into its own inbox — the WhatsApp
+    Business "webhook receive" pattern, but pull-based so the CRM doesn't
+    need a public URL for us to reach.
+
+    Deliberately narrow, like the send endpoint:
+      - Only DMs (chats.type = 'dm'); bulk keys can never see a group.
+      - Only inbound (m.sender_id != sender.id); the business's own outbox
+        stays in the interactive session-token path.
+      - Only substantive kinds — poll/system frames excluded so a status
+        change doesn't spam the CRM.
+      - Honours all three delete modes TalkEx supports, exactly as every
+        other message-read endpoint here does:
+          * unsent_at IS NULL          — sender retracted their own
+                                         (invisible to everyone)
+          * deleted_at IS NULL         — owner/admin removed someone else's
+                                         (tombstoned; still excluded from
+                                         the CRM feed so the merchant
+                                         doesn't see empty rows)
+          * NOT IN message_hidden_for  — merchant hid it from their own view
+                                         with POST /messages/{id}/hide;
+                                         nothing broadcast, per-user only
+      - Capped at 500 rows/call; 120 pulls/min per key.
+
+    The `next_since` cursor is tied to the newest row's created_at, not the
+    wall clock, so a poller that stops for an hour and resumes doesn't miss
+    messages.
+    """
+    bulk_inbound_rate_limiter.check(sender["id"])
+
+    if limit < 1:
+        limit = 1
+    if limit > 500:
+        limit = 500
+
+    rows = db.query_all(
+        """
+        SELECT m.id, m.chat_id, m.sender_id, m.text, m.kind,
+               m.created_at, m.seq,
+               u.username AS from_username
+        FROM messages m
+        JOIN chats c        ON c.id = m.chat_id
+        JOIN chat_members cm ON cm.chat_id = m.chat_id
+        JOIN users u        ON u.id = m.sender_id
+        WHERE cm.user_id = ?
+          AND c.type = 'dm'
+          AND m.sender_id != ?
+          AND m.created_at > ?
+          AND m.deleted_at IS NULL
+          AND m.unsent_at IS NULL
+          AND m.id NOT IN (SELECT message_id FROM message_hidden_for WHERE user_id = ?)
+          AND m.kind IN ('text','photo','voice','document','location','contact')
+        ORDER BY m.created_at ASC
+        LIMIT ?
+        """,
+        (sender["id"], sender["id"], since, sender["id"], limit),
+    )
+
+    messages = []
+    newest = since
+    for r in rows:
+        messages.append({
+            "message_id":    r["id"],
+            "chat_id":       r["chat_id"],
+            "from_username": r["from_username"],
+            "text":          r["text"] or "",
+            "kind":          r["kind"],
+            "created_at":    r["created_at"],
+            "seq":           r["seq"],
+        })
+        if r["created_at"] > newest:
+            newest = r["created_at"]
+
+    return {"messages": messages, "next_since": newest, "count": len(messages)}
+
+
 # ── Profile ───────────────────────────────────────────────────────────────────
 
 @app.get("/me")
