@@ -289,7 +289,7 @@ export function MoreMenu({ items, onClose }) {
  * property of the chat screen, it can interrupt anything.
  */
 export default function CallOverlay({
-  call, onAccept, onReject, onEnd, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen, onEffect,
+  call, onAccept, onReject, onEnd, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen, onStopSharingScreen, onEffect,
   onAddParticipant, onToggleHold,
 }) {
   const [sinkId, setSinkId] = useState(undefined);
@@ -444,10 +444,11 @@ export default function CallOverlay({
       {(call.phase === "outgoing" || call.phase === "active") && (
         <ActiveCall call={call} onEnd={onEnd} onToggleMute={onToggleMute} onToggleCamera={onToggleCamera}
                     onSwitchCamera={onSwitchCamera} onMinimize={() => setMinimized(true)}
-                    onShareScreen={onShareScreen} onEffect={onEffect} onAddParticipant={onAddParticipant}
+                    onShareScreen={onShareScreen} onStopSharingScreen={onStopSharingScreen} onEffect={onEffect} onAddParticipant={onAddParticipant}
                     onToggleHold={onToggleHold}
                     sinkId={sinkId} onSinkId={setSinkId}
-                    isLandscape={isLandscape}/>
+                    isLandscape={isLandscape}
+                    expanded={expanded} toggle={toggle}/>
       )}
     </div>
   );
@@ -591,7 +592,7 @@ const VIDEO_EFFECTS = [
   { key: "vivid", label: "Vivid", filter: "saturate(1.8) contrast(1.1)" },
 ];
 
-function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen, onEffect, onAddParticipant, onToggleHold, onMinimize, sinkId, onSinkId, isLandscape }) {
+function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen, onStopSharingScreen, onEffect, onAddParticipant, onToggleHold, onMinimize, sinkId, onSinkId, isLandscape, expanded, toggle }) {
   const [showSpeakerPicker, setShowSpeakerPicker] = useState(false);
   const [showMore, setShowMore] = useState(false);
   const [showEffects, setShowEffects] = useState(false);
@@ -836,7 +837,7 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
             sub: call.callKind !== "video" ? "Turn your camera on first" : undefined,
             icon: I.screenShare("#fff", 18),
             disabled: call.callKind !== "video",
-            onClick: onShareScreen,
+            onClick: () => { setShowMore(false); call.sharingScreen ? onStopSharingScreen?.() : onShareScreen?.(); },
           }] : []),
           {
             label: call.onHold ? "Resume call" : "Hold",

@@ -424,6 +424,14 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
     };
   }, []);
 
+  // Stop sharing programmatically — mirrors useCall.js's stopSharingScreen.
+  // Stopping the screen track fires the onended handler wired in shareScreen
+  // above, which does the actual camera-swap-back and state cleanup.
+  const stopSharingScreen = useCallback(() => {
+    const track = screenTrackRef.current;
+    if (track) track.stop();
+  }, []);
+
   // Mirrors Teams' "optimize for video/text" screen-share toggle via the real
   // MediaStreamTrack.contentHint API — a hint the encoder is free to use, not
   // a guarantee, but it's the actual platform mechanism for this trade-off.
@@ -775,7 +783,7 @@ export function useGroupCall(events, send, toast, reconnectedAt) {
   }, [events, buildPeerConnection, connectOutward, addParticipant]);
 
   return {
-    call, join, declineIncoming, leave, toggleMute, toggleCamera, switchCamera, shareScreen, setScreenOptimization,
+    call, join, declineIncoming, leave, toggleMute, toggleCamera, switchCamera, shareScreen, stopSharingScreen, setScreenOptimization,
     forceMuteAll, kickParticipant, addPeople, toggleWhiteboard, sendReaction, toggleRaiseHand,
     toggleCaptions, sendCaption, joinBreakoutRoom, returnToMainCall,
     admitParticipant, denyParticipant,

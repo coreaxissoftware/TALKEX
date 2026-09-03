@@ -395,7 +395,7 @@ function ChatPanel({ chatId, myUserId, participants, events }) {
  * reason about for no real benefit.
  */
 export default function GroupCallOverlay({
-  call, myUserId, onAccept, onDecline, onLeave, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen,
+  call, myUserId, onAccept, onDecline, onLeave, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen, onStopSharingScreen,
   onSetScreenOptimization,
   onForceMuteAll, onKickParticipant, onAddPeople, onToggleWhiteboard, events, send,
   onSendReaction, onToggleRaiseHand, onToggleCaptions, onCaptionText,
@@ -486,7 +486,7 @@ export default function GroupCallOverlay({
         : call.phase === "waiting"
         ? <WaitingForHost call={call} onLeave={onLeave}/>
         : <ActiveGroupCall call={call} myUserId={myUserId} onLeave={onLeave} onToggleMute={onToggleMute}
-                           onToggleCamera={onToggleCamera} onSwitchCamera={onSwitchCamera} onShareScreen={onShareScreen}
+                           onToggleCamera={onToggleCamera} onSwitchCamera={onSwitchCamera} onShareScreen={onShareScreen} onStopSharingScreen={onStopSharingScreen}
                            onSetScreenOptimization={onSetScreenOptimization}
                            onForceMuteAll={onForceMuteAll} onKickParticipant={onKickParticipant}
                            onAddPeople={onAddPeople} onToggleWhiteboard={onToggleWhiteboard}
@@ -803,7 +803,7 @@ function ConnectionQuality({ quality }) {
 }
 
 function ActiveGroupCall({
-  call, myUserId, onLeave, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen,
+  call, myUserId, onLeave, onToggleMute, onToggleCamera, onSwitchCamera, onShareScreen, onStopSharingScreen,
   onSetScreenOptimization,
   onForceMuteAll, onKickParticipant, onAddPeople, onToggleWhiteboard,
   onSendReaction, onToggleRaiseHand, onToggleCaptions, onCaptionText,
@@ -1048,7 +1048,7 @@ function ActiveGroupCall({
             sub: call.permissions?.screen_share === "host" && !isHost && !call.sharingScreen
               ? "Only the host allows this right now" : undefined,
             icon: I.screenShare("#fff", 18),
-            onClick: onShareScreen,
+            onClick: () => { setShowMore(false); call.sharingScreen ? onStopSharingScreen?.() : onShareScreen?.(); },
           }] : []),
           ...(call.sharingScreen ? [{
             label: `Optimize for video ${call.screenOptimizeFor === "motion" ? "●" : "○"}`,

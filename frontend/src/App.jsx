@@ -1021,13 +1021,13 @@ export default function App() {
           <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
                        onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
                        onSwitchCamera={call.switchCamera} onEffect={call.setVideoEffect} onAddParticipant={addParticipantToCall}
-                       onShareScreen={call.shareScreen} onToggleHold={call.toggleHold}/>
+                       onShareScreen={call.shareScreen} onStopSharingScreen={call.stopSharingScreen} onToggleHold={call.toggleHold}/>
           <GroupCallOverlay call={groupCall.call} myUserId={me?.id}
                             onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
                             onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
                             onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
                             onSwitchCamera={groupCall.switchCamera}
-                            onShareScreen={groupCall.shareScreen} onSetScreenOptimization={groupCall.setScreenOptimization} onForceMuteAll={groupCall.forceMuteAll}
+                            onShareScreen={groupCall.shareScreen} onStopSharingScreen={groupCall.stopSharingScreen} onSetScreenOptimization={groupCall.setScreenOptimization} onForceMuteAll={groupCall.forceMuteAll}
                             onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}
                             onToggleWhiteboard={groupCall.toggleWhiteboard} events={events} send={realtime.send}
                             onSendReaction={groupCall.sendReaction} onToggleRaiseHand={groupCall.toggleRaiseHand}
@@ -1112,13 +1112,13 @@ export default function App() {
         <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
                      onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
                        onSwitchCamera={call.switchCamera} onEffect={call.setVideoEffect} onAddParticipant={addParticipantToCall}
-                     onShareScreen={call.shareScreen} onToggleHold={call.toggleHold}/>
+                     onShareScreen={call.shareScreen} onStopSharingScreen={call.stopSharingScreen} onToggleHold={call.toggleHold}/>
         <GroupCallOverlay call={groupCall.call} myUserId={me?.id}
                           onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
                           onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
                           onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
                             onSwitchCamera={groupCall.switchCamera}
-                          onShareScreen={groupCall.shareScreen} onSetScreenOptimization={groupCall.setScreenOptimization} onForceMuteAll={groupCall.forceMuteAll}
+                          onShareScreen={groupCall.shareScreen} onStopSharingScreen={groupCall.stopSharingScreen} onSetScreenOptimization={groupCall.setScreenOptimization} onForceMuteAll={groupCall.forceMuteAll}
                           onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}
                           onToggleWhiteboard={groupCall.toggleWhiteboard} events={events} send={realtime.send}
                             onSendReaction={groupCall.sendReaction} onToggleRaiseHand={groupCall.toggleRaiseHand}
@@ -1632,13 +1632,13 @@ function DesktopShell({
         <CallOverlay call={call.call} onAccept={call.acceptIncoming} onReject={call.rejectIncoming}
                      onEnd={call.endCall} onToggleMute={call.toggleMute} onToggleCamera={call.toggleCamera}
                        onSwitchCamera={call.switchCamera} onEffect={call.setVideoEffect} onAddParticipant={addParticipantToCall}
-                     onShareScreen={call.shareScreen} onToggleHold={call.toggleHold}/>
+                     onShareScreen={call.shareScreen} onStopSharingScreen={call.stopSharingScreen} onToggleHold={call.toggleHold}/>
         <GroupCallOverlay call={groupCall.call} myUserId={me?.id}
                           onAccept={() => groupCall.join(groupCall.call.chatId, groupCall.call.callKind)}
                           onDecline={groupCall.declineIncoming} onLeave={groupCall.leave}
                           onToggleMute={groupCall.toggleMute} onToggleCamera={groupCall.toggleCamera}
                             onSwitchCamera={groupCall.switchCamera}
-                          onShareScreen={groupCall.shareScreen} onSetScreenOptimization={groupCall.setScreenOptimization} onForceMuteAll={groupCall.forceMuteAll}
+                          onShareScreen={groupCall.shareScreen} onStopSharingScreen={groupCall.stopSharingScreen} onSetScreenOptimization={groupCall.setScreenOptimization} onForceMuteAll={groupCall.forceMuteAll}
                           onKickParticipant={groupCall.kickParticipant} onAddPeople={groupCall.addPeople}
                           onToggleWhiteboard={groupCall.toggleWhiteboard} events={events} send={realtime.send}
                             onSendReaction={groupCall.sendReaction} onToggleRaiseHand={groupCall.toggleRaiseHand}
