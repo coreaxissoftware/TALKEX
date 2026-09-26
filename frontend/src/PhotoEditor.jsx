@@ -19,6 +19,8 @@ const ASPECTS = [
   { key: "free", label: "Free", ratio: null },
   { key: "square", label: "1:1", ratio: 1 },
   { key: "portrait", label: "4:5", ratio: 4 / 5 },
+  { key: "photo_p", label: "2:3", ratio: 2 / 3 },
+  { key: "photo_l", label: "3:2", ratio: 3 / 2 },
   { key: "wide", label: "16:9", ratio: 16 / 9 },
   { key: "story", label: "9:16", ratio: 9 / 16 },
   // A wide banner ratio for profile cover photos.
@@ -468,22 +470,16 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
     return () => el.removeEventListener("wheel", handleWheel);
   }, []);
 
-  // Reset crop when aspect changes
+  // The viewport box itself already carries the chosen aspect ratio (viewportH
+  // is derived from aspect.ratio, see above), so the crop is simply the WHOLE
+  // frame. For a FIXED ratio you frame the shot by panning/zooming the image
+  // behind the fixed frame (Instagram-style — the ratio can never drift); for
+  // FREE crop the frame equals the image and you drag the handles to sub-crop.
+  // The old code computed a shrunken rect from the image aspect while the
+  // viewport was ALSO already the target aspect, double-applying the ratio and
+  // producing an off, distorted crop.
   useEffect(() => {
-    if (aspect.ratio && rotatedSrc) {
-      // Calculate crop rect to match aspect ratio within the viewport
-      const imgAspect = rotatedSrc.w / rotatedSrc.h;
-      const targetAspect = aspect.ratio;
-      if (targetAspect > imgAspect) {
-        const h = imgAspect / targetAspect;
-        setCropRect({ x: 0, y: (1 - h) / 2, w: 1, h });
-      } else {
-        const w = targetAspect / imgAspect;
-        setCropRect({ x: (1 - w) / 2, y: 0, w, h: 1 });
-      }
-    } else {
-      setCropRect({ x: 0, y: 0, w: 1, h: 1 });
-    }
+    setCropRect({ x: 0, y: 0, w: 1, h: 1 });
   }, [aspect, rotatedSrc]);
 
   function pointFromEvent(event) {
@@ -548,7 +544,10 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
     const rect = viewportRef.current.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
-    const handle = getCropHandle(px, py);
+    // Only FREE crop has draggable resize handles. For a fixed ratio the frame
+    // is locked to that ratio, so a pointer-down there pans/zooms the image
+    // behind it instead of resizing (which would break the ratio).
+    const handle = aspect.ratio ? null : getCropHandle(px, py);
     if (handle) {
       cropDragRef.current = {
         type: handle === "move" ? "move" : handle,
@@ -831,59 +830,59 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
     try {
       const longEdge = hd ? OUTPUT_LONG_EDGE_HD : OUTPUT_LONG_EDGE;
 
-      // Apply crop rect
-      const srcW = rotatedSrc.w * cropRect.w;
-      const srcH = rotatedSrc.h * cropRect.h;
-      const srcX = rotatedSrc.w * cropRect.x;
-      const srcY = rotatedSrc.h * cropRect.y;
+      // WYSIWYG export. The viewport shows the image at a known position and
+      // size (imgLeft/imgTop, displayedW×displayedH — cover-fit + pan/zoom)
+      // with an optional fine-rotation about its centre (see the <img> in the
+      // viewport). We reproduce EXACTLY that composition into the output
+      // canvas: scale the context so the crop region hits the target long
+      // edge, translate the crop's top-left to the origin, then draw the image
+      // in viewport coordinates. The previous code drew the whole image with
+      // SEPARATE x/y scales (exportScaleX ≠ exportScaleY whenever the photo's
+      // aspect didn't match the viewport's), which stretched the result — the
+      // "cropped output is wrong" bug.
+      const cropLeftPx = cropRect.x * viewportW;
+      const cropTopPx = cropRect.y * viewportH;
+      const cropWpx = Math.max(1, cropRect.w * viewportW);
+      const cropHpx = Math.max(1, cropRect.h * viewportH);
 
-      const outAspect = srcW / srcH;
-      let outW, outH;
-      if (srcW > srcH) {
-        outW = Math.min(longEdge, srcW);
-        outH = outW / outAspect;
-      } else {
-        outH = Math.min(longEdge, srcH);
-        outW = outH * outAspect;
-      }
+      // Don't upscale past the real resolution of the cropped source region —
+      // enlarging a small crop to longEdge would just add blur.
+      const srcCropLong = Math.max(
+        (cropWpx / displayedW) * rotatedSrc.w,
+        (cropHpx / displayedH) * rotatedSrc.h,
+      );
+      const outLong = Math.min(longEdge, Math.max(1, srcCropLong));
+      const exportScale = outLong / Math.max(cropWpx, cropHpx);
 
       const canvas = document.createElement("canvas");
-      canvas.width = Math.round(outW);
-      canvas.height = Math.round(outH);
+      canvas.width = Math.max(1, Math.round(cropWpx * exportScale));
+      canvas.height = Math.max(1, Math.round(cropHpx * exportScale));
       const ctx = canvas.getContext("2d");
-      ctx.filter = baseFilterCss;
 
-      // Draw the cropped portion
-      const scale = effectiveScale * (canvas.width / viewportW);
-      // Map crop rect from normalized to viewport, then to export
-      const cropViewLeft = cropRect.x * viewportW;
-      const cropViewTop = cropRect.y * viewportH;
-      const cropViewW = cropRect.w * viewportW;
-      const cropViewH = cropRect.h * viewportH;
+      const imgLeft = viewportW / 2 - displayedW / 2 + pan.x;
+      const imgTop = viewportH / 2 - displayedH / 2 + pan.y;
+      const centreX = imgLeft + displayedW / 2;
+      const centreY = imgTop + displayedH / 2;
 
-      const exportScaleX = canvas.width / cropViewW;
-      const exportScaleY = canvas.height / cropViewH;
-
-      // Image position in viewport
-      const imgViewX = viewportW / 2 - displayedW / 2 + pan.x;
-      const imgViewY = viewportH / 2 - displayedH / 2 + pan.y;
-
-      // Map to export canvas
-      const drawX = (imgViewX - cropViewLeft) * exportScaleX;
-      const drawY = (imgViewY - cropViewTop) * exportScaleY;
-      const drawW = displayedW * exportScaleX;
-      const drawH = displayedH * exportScaleY;
-
+      // One pass of the image drawn in VIEWPORT coordinates; the transform maps
+      // viewport space → output pixels (scale, then shift the crop's top-left
+      // to 0,0). save/restore because filter and alpha differ between passes.
       function drawBaseImage() {
+        ctx.save();
+        ctx.setTransform(
+          exportScale, 0, 0, exportScale,
+          -cropLeftPx * exportScale, -cropTopPx * exportScale,
+        );
         if (fineAngle) {
-          ctx.save();
-          ctx.translate(canvas.width / 2, canvas.height / 2);
+          ctx.translate(centreX, centreY);
           ctx.rotate((fineAngle * Math.PI) / 180);
-          ctx.translate(-canvas.width / 2, -canvas.height / 2);
+          ctx.translate(-centreX, -centreY);
         }
-        ctx.drawImage(rotatedSrc.canvas, drawX, drawY, drawW, drawH);
-        if (fineAngle) ctx.restore();
+        ctx.drawImage(rotatedSrc.canvas, imgLeft, imgTop, displayedW, displayedH);
+        ctx.restore();
       }
+
+      ctx.filter = baseFilterCss;
       drawBaseImage();
       // Same two-layer blend as the live preview (see the stacked <img>s in
       // the viewport): the base pass above is un-filtered adjustments only,
@@ -899,6 +898,7 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
         ctx.globalAlpha = 1;
       }
       ctx.filter = "none";
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
 
       // Draw marks scaled to crop
       for (const mark of marks) {
@@ -1070,6 +1070,9 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
           <div style={{ position: "absolute", top: "66.66%", left: 0, height: 1, width: "100%", background: "rgba(255,255,255,0.3)" }}/>
         </div>
 
+        {/* Resize handles only for FREE crop — a fixed ratio shows just the
+            locked frame (you pan/zoom the image behind it). */}
+        {!aspect.ratio && (<>
         {/* Corner handles — L-shaped like WhatsApp */}
         {/* Top-left */}
         <div style={{
@@ -1129,6 +1132,7 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
           position: "absolute", right: viewportW - left - w - 2, top: top + h / 2 - 12,
           width: 4, height: 24, background: "#fff", borderRadius: 2,
         }}/>
+        </>)}
       </div>
     );
   }

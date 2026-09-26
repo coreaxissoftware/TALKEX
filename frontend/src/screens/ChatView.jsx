@@ -102,6 +102,46 @@ const DISAPPEAR_CHOICES = [
  * carries a client_msg_id the server de-duplicates on — if the request is
  * retried, the same message comes back rather than a second copy.
  */
+
+// Auto-shrink oversized photos before upload. A modern phone JPEG is 8-12 MP
+// (~4-8 MB) and pointlessly large for a chat image — capping the long edge and
+// re-encoding as JPEG typically cuts the payload 5-10x with no visible loss at
+// the size a photo is ever actually viewed in a chat. Deliberately conservative
+// so it never fights the photo editor: an already-reasonable JPEG (within the
+// edge cap, e.g. the editor's own output, including its HD mode at 2400px) is
+// left completely untouched. GIFs (often animated) and SVGs are skipped, and
+// ANY failure returns the original file, so a send can never break over
+// compression.
+const PHOTO_MAX_EDGE = 2560;
+
+async function compressImageFile(file) {
+  if (!file || !file.type?.startsWith("image/")) return file;
+  if (file.type === "image/gif" || file.type === "image/svg+xml") return file;
+  try {
+    const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+    const longEdge = Math.max(bitmap.width, bitmap.height);
+    const needsDownscale = longEdge > PHOTO_MAX_EDGE;
+    // A JPEG that's already within the edge cap is left alone — re-encoding it
+    // would only trade a little quality for a little size and would undo the
+    // photo editor / HD toggle's intent.
+    if (!needsDownscale && file.type === "image/jpeg") { bitmap.close?.(); return file; }
+    const scale = Math.min(1, PHOTO_MAX_EDGE / longEdge);
+    const w = Math.max(1, Math.round(bitmap.width * scale));
+    const h = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, w, h);
+    bitmap.close?.();
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.85));
+    if (!blob || blob.size >= file.size) return file; // never send a LARGER file
+    const base = (file.name || "photo").replace(/\.[^.]+$/, "");
+    return new File([blob], `${base}.jpg`, { type: "image/jpeg", lastModified: Date.now() });
+  } catch {
+    return file;
+  }
+}
+
 export default function ChatView({ chat, me, events, typingBy, reconnectedAt, onBack, onChanged,
                                    onOpenChat, onChatLocked, onStartCall, onStartGroupCall, toast }) {
   const [promptFn, promptModal] = usePrompt();
@@ -674,8 +714,21 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
           await navigator.share({ files: [file], text: message.text || undefined });
           return;
         }
+        // No OS share sheet (desktop web / Electron / older WebView) — fall
+        // back to a download so the file still lands somewhere the user can
+        // share it from, instead of the option silently doing nothing.
+        downloadMessageFile(message);
+        toast("Saved — share it from your files");
+        return;
       }
-      if (message.text) await navigator.share({ text: message.text });
+      if (message.text) {
+        if (navigator.share) {
+          await navigator.share({ text: message.text });
+        } else {
+          await navigator.clipboard?.writeText(message.text);
+          toast("Copied to clipboard");
+        }
+      }
     } catch (problem) {
       if (problem?.name !== "AbortError") toast("Could not share");
     }
@@ -931,6 +984,15 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
       || (file.type.startsWith("image/") ? "photo"
         : file.type.startsWith("video/") ? "video"
         : "document");
+
+    // Shrink oversized photos before anything else, so the optimistic preview,
+    // the stored size, and the upload all use the same compressed file. Only
+    // the "photo" kind is touched; video/voice pass through, and an image the
+    // user deliberately sent via the "Document" option has kind "document"
+    // (not "photo"), so its exact original bytes are preserved.
+    if (kind === "photo") {
+      file = await compressImageFile(file);
+    }
 
     const clientMsgId = newClientMessageId();
     // Drawn immediately from the file itself — same reason the text send
@@ -1247,17 +1309,15 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         event.preventDefault();
         dragEnterCount.current = 0;
         setIsDraggingFile(false);
-        // Kind auto-picked from mime type per file — matches how the
-        // Attach sheet's file picker works (photos go as photo, videos as
-        // video, everything else as document).
+        // Route dropped files through the same MediaPreviewSheet the picker
+        // and paste use, so a dropped image gets the caption + crop/edit step
+        // instead of sending the instant it lands. If every dropped file is an
+        // image (the crop-able case) we let the sheet auto-detect (null);
+        // anything else goes as a document.
         const files = Array.from(event.dataTransfer.files);
-        for (const file of files) {
-          const kind = file.type.startsWith("image/") ? "photo"
-            : file.type.startsWith("video/") ? "video"
-            : file.type.startsWith("audio/") ? "voice"
-            : "document";
-          sendFile(file, kind);
-        }
+        const allImages = files.every((f) => f.type.startsWith("image/"));
+        setMediaPreview({ files, kindOverride: allImages ? null : "document" });
+        setSheet("mediaPreview");
       }}>
       {isDraggingFile && (
         <div style={{
@@ -3841,6 +3901,33 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
     // else: let the newline through (textarea default).
   }
 
+  // Paste-to-attach: an image or file copied to the clipboard (a screenshot,
+  // a PDF from the file manager, an image from another app) pastes straight
+  // into the composer, WhatsApp-Web/Slack style. We route it through the same
+  // MediaPreviewSheet the picker uses, so a pasted image still gets the
+  // caption + crop/edit step instead of firing off immediately. Plain-text
+  // pastes have no files on the clipboard, so those fall through untouched to
+  // the textarea's default behaviour.
+  function onPaste(event) {
+    const dt = event.clipboardData;
+    if (!dt) return;
+    const files = [];
+    if (dt.files && dt.files.length) {
+      files.push(...Array.from(dt.files));
+    } else if (dt.items) {
+      for (const item of dt.items) {
+        if (item.kind === "file") {
+          const f = item.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+    }
+    if (files.length === 0) return; // no attachment on the clipboard — let text paste normally
+    event.preventDefault();
+    const allImages = files.every((f) => f.type.startsWith("image/"));
+    onFilesPicked?.(files, allImages ? null : "document");
+  }
+
   // The attach button and the emoji button each double as a keyboard switch,
   // WhatsApp-style: opening a panel blurs the field (so the on-screen keyboard
   // drops and the panel has room); tapping the button again — now showing a
@@ -4053,6 +4140,7 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
           rows={1}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={onInputKeyDown}
+          onPaste={onPaste}
           onFocus={() => {
             const kill = () => {
               window.scrollTo(0, 0);
@@ -4223,7 +4311,12 @@ function MessageMenu({ message, me, isModerator, reactionsEnabled = true, isPinn
                       onCopy, onSelect, onDownload, onInfo, onTranslate, onRemind }) {
   const mine = message.sender_id === me.id;
   const hasAttachment = Boolean(message.payload?.attachment_id);
-  const canShare = typeof navigator !== "undefined" && navigator.share && !message.deleted_at;
+  // Share stays visible whenever there's actually something to share (text or
+  // a file), NOT only when the OS Web Share API exists — on desktop/Electron
+  // navigator.share is absent, so gating on it hid Share entirely and left
+  // only Forward. shareMessage() handles the no-share-sheet case by falling
+  // back to download / copy.
+  const canShare = !message.deleted_at && (Boolean(message.text) || hasAttachment);
   // Two genuinely different removals, not two labels on one action:
   //   Unsend — only the sender, on their own message, no trace left at all.
   //   Delete for everyone — sender OR a moderator; always leaves a visible
@@ -4937,10 +5030,15 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
   );
 }
 
+// A scan's file size is dominated by its pixel resolution, not the JPEG
+// quality factor — a 12 MP phone photo stays multi-megabyte at every quality.
+// So each level ALSO caps the long edge (maxDim): "Low" downscales hard for a
+// small, email-able file, "High" keeps it close to full res. Without the
+// downscale, Low/Medium barely shrank anything and the setting felt broken.
 const COMPRESSION_LEVELS = [
-  { label: "Low", quality: 0.4 },
-  { label: "Medium", quality: 0.7 },
-  { label: "High", quality: 0.92 },
+  { label: "Low", quality: 0.5, maxDim: 1240 },
+  { label: "Medium", quality: 0.72, maxDim: 1754 },
+  { label: "High", quality: 0.92, maxDim: 2600 },
 ];
 
 // Document-scan cleanup filters, applied per pixel over a rendered page.
@@ -5002,7 +5100,9 @@ function ScanEditSheet({ file, onClose, onSend, toast }) {
   // Each entry is { file, rotation, filter } — all per-page.
   const [pages, setPages] = useState([{ file, rotation: 0, filter: "original" }]);
   const [current, setCurrent] = useState(0);
-  const [quality, setQuality] = useState(COMPRESSION_LEVELS[1].quality);
+  const [level, setLevel] = useState(COMPRESSION_LEVELS[1]);
+  const quality = level.quality;
+  const maxDim = level.maxDim;
   const [previewBytes, setPreviewBytes] = useState(null);
   const [sending, setSending] = useState(false);
 
@@ -5025,17 +5125,26 @@ function ScanEditSheet({ file, onClose, onSend, toast }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentFile]);
 
-  useEffect(() => { redraw(bitmapRef.current, rotation, filter); }, [rotation, quality, filter]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { redraw(bitmapRef.current, rotation, filter); }, [rotation, quality, maxDim, filter]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  function drawTo(canvas, bitmap, deg, filterName) {
+  // Draw the page at the chosen level's resolution cap. The scale is the ratio
+  // that brings the bitmap's long edge down to `cap` (never upscales — scale
+  // is clamped at 1), and every dimension the canvas and drawImage use is
+  // scaled by it, so the embedded JPEG really is smaller, not just lower
+  // quality at full size.
+  function drawTo(canvas, bitmap, deg, filterName, cap) {
+    const longEdge = Math.max(bitmap.width, bitmap.height);
+    const scale = cap ? Math.min(1, cap / longEdge) : 1;
+    const bw = Math.round(bitmap.width * scale);
+    const bh = Math.round(bitmap.height * scale);
     const swapped = deg === 90 || deg === 270;
-    canvas.width = swapped ? bitmap.height : bitmap.width;
-    canvas.height = swapped ? bitmap.width : bitmap.height;
+    canvas.width = swapped ? bh : bw;
+    canvas.height = swapped ? bw : bh;
     const ctx = canvas.getContext("2d");
     ctx.save();
     ctx.translate(canvas.width / 2, canvas.height / 2);
     ctx.rotate((deg * Math.PI) / 180);
-    ctx.drawImage(bitmap, -bitmap.width / 2, -bitmap.height / 2);
+    ctx.drawImage(bitmap, -bw / 2, -bh / 2, bw, bh);
     ctx.restore();
     applyScanFilter(ctx, canvas.width, canvas.height, filterName);
   }
@@ -5043,7 +5152,7 @@ function ScanEditSheet({ file, onClose, onSend, toast }) {
   function redraw(bitmap, deg, filterName) {
     const canvas = canvasRef.current;
     if (!bitmap || !canvas) return;
-    drawTo(canvas, bitmap, deg, filterName);
+    drawTo(canvas, bitmap, deg, filterName, maxDim);
     canvas.toBlob((blob) => blob && setPreviewBytes(blob.size), "image/jpeg", quality);
   }
 
@@ -5077,7 +5186,7 @@ function ScanEditSheet({ file, onClose, onSend, toast }) {
       for (const page of pages) {
         const bitmap = await createImageBitmap(page.file);
         const offscreen = document.createElement("canvas");
-        drawTo(offscreen, bitmap, page.rotation, page.filter || "original");
+        drawTo(offscreen, bitmap, page.rotation, page.filter || "original", maxDim);
         canvases.push(offscreen);
       }
       const pdfBlob = await canvasesToPdfBlob(canvases, quality);
@@ -5159,17 +5268,20 @@ function ScanEditSheet({ file, onClose, onSend, toast }) {
 
       <div style={{ fontSize: 12, color: G.sub, marginBottom: 8 }}>Compression</div>
       <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-        {COMPRESSION_LEVELS.map((level) => (
-          <div key={level.label} onClick={() => setQuality(level.quality)}
-               style={{
-                 flex: 1, textAlign: "center", padding: "8px 0", borderRadius: 10, cursor: "pointer",
-                 background: quality === level.quality ? G.accentSoft : G.dim,
-                 border: `1px solid ${quality === level.quality ? G.accent : G.border}`,
-                 fontSize: 13, fontWeight: quality === level.quality ? 600 : 400,
-               }}>
-            {level.label}
-          </div>
-        ))}
+        {COMPRESSION_LEVELS.map((lvl) => {
+          const active = lvl.label === level.label;
+          return (
+            <div key={lvl.label} onClick={() => setLevel(lvl)}
+                 style={{
+                   flex: 1, textAlign: "center", padding: "8px 0", borderRadius: 10, cursor: "pointer",
+                   background: active ? G.accentSoft : G.dim,
+                   border: `1px solid ${active ? G.accent : G.border}`,
+                   fontSize: 13, fontWeight: active ? 600 : 400,
+                 }}>
+              {lvl.label}
+            </div>
+          );
+        })}
       </div>
 
       {previewBytes != null && (

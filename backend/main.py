@@ -5420,13 +5420,29 @@ def download_file(attachment_id: str, user: dict = Depends(current_user)):
     inline = attachment["content_type"] in uploads.INLINE_TYPES
     disposition = "inline" if inline else "attachment"
 
+    # A filename with non-ASCII characters (e.g. Hindi/Devanagari) cannot go
+    # raw into an HTTP header: Starlette/Uvicorn encode header values as
+    # latin-1, so a code point > U+00FF raises UnicodeEncodeError and the whole
+    # response 500s — the file uploads and stores fine but can never be
+    # fetched, shown inline, or downloaded. RFC 6266/5987 is the fix: a plain
+    # ASCII `filename="..."` fallback for old clients, plus `filename*=UTF-8''`
+    # with the real name percent-encoded for everyone else.
+    raw_name = attachment["file_name"] or "file"
+    ascii_name = raw_name.encode("ascii", "ignore").decode("ascii").strip() or "file"
+    ascii_name = ascii_name.replace('"', "").replace("\\", "")
+    utf8_name = urllib.parse.quote(raw_name, safe="")
+    content_disposition = (
+        f'{disposition}; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_name}'
+    )
+
     return FileResponse(
         path,
         media_type=attachment["content_type"],
         headers={
-            # The filename is quoted and already stripped of quotes and
-            # separators, so it cannot break out of the header.
-            "Content-Disposition": f'{disposition}; filename="{attachment["file_name"]}"',
+            # RFC 6266 filename with a UTF-8 filename* for non-ASCII names
+            # (built above). The name is already stripped of quotes and path
+            # separators upstream, so it cannot break out of the header.
+            "Content-Disposition": content_disposition,
             # Without this a browser may sniff the bytes, decide a file we
             # labelled as an image is really HTML, and run it.
             "X-Content-Type-Options": "nosniff",
