@@ -1108,9 +1108,12 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   // Sent one at a time rather than in parallel, so a burst of picked photos
   // lands in the chat in the same order they were picked, and one failure
   // partway through doesn't leave the upload endpoint fighting itself.
-  async function sendFiles(files, kindOverride, text = "", viewOnce = false) {
+  async function sendFiles(files, kindOverride, text = "", viewOnce = false, captions = null) {
     for (let i = 0; i < files.length; i++) {
-      await sendFile(files[i], kindOverride, i === files.length - 1 ? text : "", viewOnce);
+      // Per-image captions when the preview provides them (captions[i]);
+      // otherwise the old behaviour — a single caption on the last file.
+      const cap = captions ? (captions[i] || "") : (i === files.length - 1 ? text : "");
+      await sendFile(files[i], kindOverride, cap, viewOnce);
     }
   }
 
@@ -2035,15 +2038,41 @@ function getCustomEmoji() {
 }
 function saveCustomEmoji(list) { localStorage.setItem("talkex_custom_emoji", JSON.stringify(list)); }
 
-function EmojiPicker({ onPick, onClose }) {
-  const [tab, setTab] = useState(0);
+// Recently-used emoji — the single most-reached-for row in any modern emoji
+// keyboard. Stored newest-first, de-duplicated, capped so it stays a quick
+// row and not a second full grid. Wrapped in try/catch because localStorage
+// can throw (private mode / blocked storage) and a picker must still open.
+const RECENT_EMOJI_MAX = 24;
+function getRecentEmoji() {
+  try { return JSON.parse(localStorage.getItem("talkex_recent_emoji") || "[]"); } catch { return []; }
+}
+function pushRecentEmoji(emoji) {
+  try {
+    const next = [emoji, ...getRecentEmoji().filter((e) => e !== emoji)].slice(0, RECENT_EMOJI_MAX);
+    localStorage.setItem("talkex_recent_emoji", JSON.stringify(next));
+    return next;
+  } catch { return getRecentEmoji(); }
+}
+
+function EmojiPicker({ onPick, onClose, onGif, onSticker }) {
+  const [recent, setRecent] = useState(getRecentEmoji);
+  const recentTab = "recent";
+  const customTab = EMOJI_GROUPS.length;
+  // Start on the recents tab when there's anything there — that's what people
+  // reach for first — otherwise the first category.
+  const [tab, setTab] = useState(() => (recent.length ? recentTab : 0));
   const [query, setQuery] = useState("");
   const [customEmoji, setCustomEmoji] = useState(getCustomEmoji);
-  const customTab = EMOJI_GROUPS.length;
   const fileRef = useRef(null);
+
+  function pick(emoji) {
+    setRecent(pushRecentEmoji(emoji));
+    onPick(emoji);
+  }
 
   const filtered = query.trim()
     ? EMOJI_GROUPS.flatMap((g) => g.items).filter(([, name]) => name.includes(query.trim().toLowerCase()))
+    : tab === recentTab ? recent.map((e) => [e, e])
     : tab === customTab ? [] : EMOJI_GROUPS[tab].items;
 
   function handleUpload(e) {
@@ -2082,6 +2111,20 @@ function EmojiPicker({ onPick, onClose }) {
                  flex: 1, border: "none", outline: "none", background: G.dim,
                  borderRadius: 8, padding: "6px 10px", fontSize: 12.5, color: G.text,
                }}/>
+        {/* Jump straight to GIFs or stickers from the same panel — one
+            "expression" surface instead of hunting through the +/Attach grid. */}
+        {onGif && (
+          <button type="button" onClick={onGif} title="GIFs" style={{
+            cursor: "pointer", fontSize: 11, fontWeight: 800, letterSpacing: 0.3, color: G.sub,
+            background: G.dim, border: `1px solid ${G.border}`, borderRadius: 8, padding: "5px 8px", lineHeight: 1,
+          }}>GIF</button>
+        )}
+        {onSticker && (
+          <button type="button" onClick={onSticker} title="Stickers" style={{
+            cursor: "pointer", fontSize: 15, color: G.sub,
+            background: G.dim, border: `1px solid ${G.border}`, borderRadius: 8, padding: "3px 7px", lineHeight: 1,
+          }}>🩷</button>
+        )}
         <button type="button" onClick={onClose} style={{
           cursor: "pointer", fontSize: 18, color: G.muted, background: "none", border: "none",
           padding: 4, lineHeight: 1,
@@ -2090,6 +2133,13 @@ function EmojiPicker({ onPick, onClose }) {
 
       {!query.trim() && (
         <div style={{ display: "flex", overflowX: "auto", borderBottom: `1px solid ${G.border}` }}>
+          {recent.length > 0 && (
+            <button type="button" onClick={() => setTab(recentTab)} title="Recently used" style={{
+              padding: "6px 10px", fontSize: 16, cursor: "pointer", flexShrink: 0,
+              background: tab === recentTab ? G.accentSoft : "transparent", border: "none",
+              borderBottom: tab === recentTab ? `2px solid ${G.accent}` : "2px solid transparent",
+            }}>🕘</button>
+          )}
           {EMOJI_GROUPS.map((g, i) => (
             <button key={g.label} type="button" onClick={() => setTab(i)} style={{
               padding: "6px 10px", fontSize: 16, cursor: "pointer", flexShrink: 0,
@@ -2136,15 +2186,15 @@ function EmojiPicker({ onPick, onClose }) {
           </>
         ) : (
           <>
-            {filtered.map(([emoji, name]) => (
-              <button key={emoji} type="button" onClick={() => onPick(emoji)} title={name} style={{
+            {filtered.map(([emoji, name], i) => (
+              <button key={`${emoji}_${i}`} type="button" onClick={() => pick(emoji)} title={name} style={{
                 fontSize: 22, textAlign: "center", padding: "6px 0", cursor: "pointer", borderRadius: 8,
                 background: "none", border: "none", lineHeight: 1.3,
               }}>{emoji}</button>
             ))}
             {filtered.length === 0 && (
               <div style={{ gridColumn: "1 / -1", fontSize: 12.5, color: G.muted, textAlign: "center", padding: 16 }}>
-                No emoji found
+                {tab === recentTab ? "Emoji you use will show up here" : "No emoji found"}
               </div>
             )}
           </>
@@ -4080,7 +4130,9 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
       <ComposerLinkPreview text={value}/>
 
       {emojiOpen && (
-        <EmojiPicker onPick={(emoji) => onChange(value + emoji)} onClose={() => setEmojiOpen(false)}/>
+        <EmojiPicker onPick={(emoji) => onChange(value + emoji)} onClose={() => setEmojiOpen(false)}
+                     onGif={onGif ? () => { setEmojiOpen(false); onGif(); } : undefined}
+                     onSticker={onSticker ? () => { setEmojiOpen(false); onSticker(); } : undefined}/>
       )}
 
       {quickReplyOpen && (
@@ -4858,7 +4910,18 @@ function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker
       borderTopLeftRadius: 16, borderTopRightRadius: 16,
       boxShadow: `0 -4px 16px ${G.border}`, overflow: "hidden",
       maxHeight: "min(340px, 55vh)", overflowY: "auto", zIndex: 20,
+      animation: "txAttachUp 0.18s ease-out",
     }}>
+      <style>{
+        "@keyframes txAttachUp{from{transform:translateY(10px);opacity:0}to{transform:none;opacity:1}}"
+        + ".tx-attach-tile{transition:transform .12s ease}"
+        + ".tx-attach-tile:active{transform:scale(0.9)}"
+      }</style>
+      {/* Grab handle — the standard bottom-sheet affordance. */}
+      <div style={{ display: "flex", justifyContent: "center", paddingTop: 8 }}>
+        <div style={{ width: 36, height: 4, borderRadius: 2, background: G.border }}/>
+      </div>
+
       <input ref={galleryInput} type="file" accept="image/*,video/*" multiple
              onChange={pickToPreview(null)} style={{ display: "none" }}/>
       <input ref={docInput} type="file" multiple
@@ -4869,7 +4932,7 @@ function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, padding: 16 }}>
         {options.map((option) => (
-          <div key={option.label} onClick={option.action}
+          <div key={option.label} onClick={option.action} className="tx-attach-tile"
                style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, cursor: "pointer" }}>
             <div style={{
               width: 58, height: 58, borderRadius: "50%", background: `${option.color}22`,
@@ -4893,104 +4956,132 @@ function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker
  * UI makes either.
  */
 function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
-  const [caption, setCaption] = useState("");
-  const [previewUrl, setPreviewUrl] = useState(null);
-  const [viewOnce, setViewOnce] = useState(false);
-  const [editing, setEditing] = useState(false);
-  const [trimming, setTrimming] = useState(false);
   // Editing replaces this sheet's own working copy of the file(s) — the
   // caller's original array is left alone, so cancelling an edit can't
   // ever lose or mutate what was actually picked.
   const [workingFiles, setWorkingFiles] = useState(files);
+  // One caption PER file (WhatsApp-style), index-aligned to workingFiles.
+  const [captions, setCaptions] = useState(() => files.map(() => ""));
+  const [index, setIndex] = useState(0);
+  const [viewOnce, setViewOnce] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [trimming, setTrimming] = useState(false);
+  const [urls, setUrls] = useState([]);
+  const addMoreRef = useRef(null);
 
-  const firstFile = workingFiles[0];
-  const isImage = firstFile?.type.startsWith("image/");
-  const isVideo = firstFile?.type.startsWith("video/");
-  const canViewOnce = workingFiles.length === 1 && (isImage || isVideo);
-  // Editing a whole multi-photo batch at once isn't offered — one photo at
-  // a time keeps the crop/filter tool's scope to what it can actually do
-  // well, rather than a half-built "apply to all" mode.
-  const canEdit = workingFiles.length === 1 && isImage;
-  const canTrim = workingFiles.length === 1 && isVideo;
+  const current = workingFiles[index];
+  const isImage = current?.type.startsWith("image/");
+  const isVideo = current?.type.startsWith("video/");
+  const multi = workingFiles.length > 1;
+  // View-once is a single-item concept; hidden for a batch.
+  const canViewOnce = !multi && (isImage || isVideo);
+  const canEdit = isImage; // any selected image can be cropped/filtered
+  const canTrim = isVideo;
+  // "Add more" only makes sense for a gallery batch, not a document send.
+  const canAddMore = kindOverride !== "document";
 
+  // Build (and revoke) object URLs for every image/video in the batch, so the
+  // thumbnail strip and the main preview both have something to show.
   useEffect(() => {
-    if (!isImage && !isVideo) return;
-    const url = URL.createObjectURL(firstFile);
-    setPreviewUrl(url);
-    return () => URL.revokeObjectURL(url);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [firstFile]);
+    const made = workingFiles.map((f) =>
+      (f.type.startsWith("image/") || f.type.startsWith("video/")) ? URL.createObjectURL(f) : null);
+    setUrls(made);
+    return () => made.forEach((u) => u && URL.revokeObjectURL(u));
+  }, [workingFiles]);
+
+  // Keep the selected index in range as files are added/removed.
+  useEffect(() => {
+    if (index > workingFiles.length - 1) setIndex(Math.max(0, workingFiles.length - 1));
+  }, [workingFiles.length, index]);
+
+  const previewUrl = urls[index];
+
+  function setCaptionAt(i, value) {
+    setCaptions((prev) => prev.map((c, j) => (j === i ? value : c)));
+  }
+
+  function removeAt(i) {
+    if (workingFiles.length === 1) { onClose(); return; } // removing the last one = cancel
+    setWorkingFiles((prev) => prev.filter((_, j) => j !== i));
+    setCaptions((prev) => prev.filter((_, j) => j !== i));
+    setIndex((cur) => (cur > i ? cur - 1 : Math.min(cur, workingFiles.length - 2)));
+  }
+
+  function move(i, delta) {
+    const j = i + delta;
+    if (j < 0 || j >= workingFiles.length) return;
+    setWorkingFiles((prev) => { const a = [...prev]; [a[i], a[j]] = [a[j], a[i]]; return a; });
+    setCaptions((prev) => { const a = [...prev]; [a[i], a[j]] = [a[j], a[i]]; return a; });
+    setIndex(j);
+  }
+
+  function onAddMore(event) {
+    const picked = Array.from(event.target.files || []);
+    event.target.value = "";
+    if (!picked.length) return;
+    setWorkingFiles((prev) => [...prev, ...picked]);
+    setCaptions((prev) => [...prev, ...picked.map(() => "")]);
+  }
+
+  function replaceCurrent(newFile) {
+    setWorkingFiles((prev) => prev.map((f, j) => (j === index ? newFile : f)));
+  }
 
   function send() {
-    // Fire-and-forget, not awaited: onSend (ChatView's sendFile/sendFiles)
-    // already does the actual WhatsApp thing on its own — an optimistic
-    // local-preview bubble appears in the chat immediately, then the real
-    // upload runs in the background with its own progress/cancel UI (see
-    // Attachment's pending branch). Awaiting the whole upload here before
-    // closing was the freeze this replaces: "Sending…" sat on screen,
-    // blocking the composer, for as long as the upload took, instead of
-    // landing straight back in the conversation — which is where WhatsApp
-    // actually puts you the instant you tap send.
-    onSend(workingFiles, kindOverride, caption.trim(), viewOnce);
+    // Fire-and-forget, not awaited: onSend (ChatView's sendFiles) already does
+    // the optimistic-bubble + background-upload dance itself, so awaiting here
+    // would just freeze the sheet on screen for the whole upload.
+    onSend(workingFiles, kindOverride, "", viewOnce, captions.map((c) => c.trim()));
     onClose();
   }
 
-  if (editing) {
+  if (editing && current) {
     return (
       <Suspense fallback={null}>
-        <PhotoEditor file={firstFile} onCancel={() => setEditing(false)}
-                     onDone={(edited) => { setWorkingFiles([edited]); setEditing(false); }}/>
+        <PhotoEditor file={current} onCancel={() => setEditing(false)}
+                     onDone={(edited) => { replaceCurrent(edited); setEditing(false); }}/>
       </Suspense>
     );
   }
 
-  if (trimming) {
+  if (trimming && current) {
     return (
       <Suspense fallback={null}>
-        <VideoTrimmer file={firstFile} onCancel={() => setTrimming(false)}
-                      onDone={(trimmed) => { setWorkingFiles([trimmed]); setTrimming(false); }}/>
+        <VideoTrimmer file={current} onCancel={() => setTrimming(false)}
+                      onDone={(trimmed) => { replaceCurrent(trimmed); setTrimming(false); }}/>
       </Suspense>
     );
   }
+
+  const editBtn = (onClick, title) => (
+    <div onClick={onClick} title={title} style={{
+      position: "absolute", top: 6, right: 6, width: 32, height: 32, borderRadius: "50%",
+      background: "#00000099", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
+    }}>{I.edit("#fff", 16)}</div>
+  );
 
   return (
-    <Sheet title={workingFiles.length > 1 ? `${workingFiles.length} files` : (firstFile?.name || "Send file")}
-           onClose={onClose}>
-      <div style={{ display: "flex", justifyContent: "center", marginBottom: 14, position: "relative" }}>
+    <Sheet title={multi ? `${workingFiles.length} items` : (current?.name || "Send file")} onClose={onClose}>
+      {/* Main preview of the selected item */}
+      <div style={{ display: "flex", justifyContent: "center", marginBottom: 12, position: "relative" }}>
         {isImage && previewUrl ? (
           <>
-            <img src={previewUrl} alt={firstFile?.name ? `Preview of ${firstFile.name}` : "Selected photo preview"} style={{
-              maxWidth: "100%", maxHeight: 220, borderRadius: 10,
-              filter: viewOnce ? "blur(14px)" : "none",
+            <img src={previewUrl} alt={current?.name ? `Preview of ${current.name}` : "Selected photo preview"} style={{
+              maxWidth: "100%", maxHeight: 260, borderRadius: 10, filter: viewOnce ? "blur(14px)" : "none",
             }}/>
-            {canEdit && (
-              <div onClick={() => setEditing(true)} title="Edit photo" style={{
-                position: "absolute", top: 6, right: 6, width: 32, height: 32, borderRadius: "50%",
-                background: "#00000099", display: "flex", alignItems: "center", justifyContent: "center",
-                cursor: "pointer",
-              }}>{I.edit("#fff", 16)}</div>
-            )}
+            {canEdit && editBtn(() => setEditing(true), "Edit photo")}
           </>
         ) : isVideo && previewUrl ? (
           <>
             <video src={previewUrl} controls style={{
-              maxWidth: "100%", maxHeight: 220, borderRadius: 10,
-              filter: viewOnce ? "blur(14px)" : "none",
+              maxWidth: "100%", maxHeight: 260, borderRadius: 10, filter: viewOnce ? "blur(14px)" : "none",
             }}/>
-            {canTrim && (
-              <div onClick={() => setTrimming(true)} title="Trim video" style={{
-                position: "absolute", top: 6, right: 6, width: 32, height: 32, borderRadius: "50%",
-                background: "#00000099", display: "flex", alignItems: "center", justifyContent: "center",
-                cursor: "pointer",
-              }}>{I.edit("#fff", 16)}</div>
-            )}
+            {canTrim && editBtn(() => setTrimming(true), "Trim video")}
           </>
         ) : (
           <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0" }}>
             {I.doc(G.accent, 28)}
-            <div style={{ fontSize: 13.5 }}>
-              {workingFiles.length > 1 ? `${workingFiles.length} files selected` : firstFile?.name}
-            </div>
+            <div style={{ fontSize: 13.5 }}>{current?.name}</div>
           </div>
         )}
         {canViewOnce && viewOnce && (
@@ -5000,6 +5091,61 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
           }}>1</div>
         )}
       </div>
+
+      {/* Thumbnail strip — select / remove / reorder, plus an "add more" tile */}
+      {(multi || canAddMore) && (
+        <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 8, marginBottom: 12 }}>
+          {workingFiles.map((file, i) => {
+            const active = i === index;
+            const thumb = urls[i];
+            const img = file.type.startsWith("image/");
+            const vid = file.type.startsWith("video/");
+            return (
+              <div key={i} onClick={() => setIndex(i)} style={{
+                position: "relative", flexShrink: 0, width: 56, height: 56, borderRadius: 8, cursor: "pointer",
+                border: `2px solid ${active ? G.accent : "transparent"}`, overflow: "hidden", background: G.dim,
+              }}>
+                {img && thumb ? (
+                  <img src={thumb} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
+                ) : vid && thumb ? (
+                  <video src={thumb} style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
+                ) : (
+                  <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    {I.doc(G.accent, 20)}
+                  </div>
+                )}
+                <div onClick={(e) => { e.stopPropagation(); removeAt(i); }} title="Remove" style={{
+                  position: "absolute", top: 2, right: 2, width: 18, height: 18, borderRadius: "50%",
+                  background: "#000000bb", color: "#fff", fontSize: 12, lineHeight: "18px", textAlign: "center",
+                }}>✕</div>
+              </div>
+            );
+          })}
+          {canAddMore && (
+            <div onClick={() => addMoreRef.current?.click()} title="Add more" style={{
+              flexShrink: 0, width: 56, height: 56, borderRadius: 8, cursor: "pointer",
+              border: `1px dashed ${G.border}`, background: G.dim,
+              display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, color: G.sub,
+            }}>+</div>
+          )}
+          <input ref={addMoreRef} type="file" accept="image/*,video/*" multiple hidden onChange={onAddMore}/>
+        </div>
+      )}
+
+      {/* Reorder controls for the selected item */}
+      {multi && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <span style={{ fontSize: 12, color: G.muted, flex: 1 }}>Item {index + 1} of {workingFiles.length}</span>
+          <div onClick={() => move(index, -1)} title="Move left" style={{
+            padding: "4px 10px", borderRadius: 8, cursor: "pointer", fontSize: 13,
+            background: G.dim, border: `1px solid ${G.border}`, opacity: index === 0 ? 0.4 : 1,
+          }}>←</div>
+          <div onClick={() => move(index, 1)} title="Move right" style={{
+            padding: "4px 10px", borderRadius: 8, cursor: "pointer", fontSize: 13,
+            background: G.dim, border: `1px solid ${G.border}`, opacity: index === workingFiles.length - 1 ? 0.4 : 1,
+          }}>→</div>
+        </div>
+      )}
 
       {canViewOnce && (
         <div onClick={() => setViewOnce((v) => !v)} style={{
@@ -5019,12 +5165,13 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
         </div>
       )}
 
-      <Field label="Caption (optional)" value={caption}
-             onChange={(event) => setCaption(event.target.value)}
+      <Field label={multi ? `Caption for item ${index + 1} (optional)` : "Caption (optional)"}
+             value={captions[index] || ""}
+             onChange={(event) => setCaptionAt(index, event.target.value)}
              placeholder="Add a caption…"/>
 
       <Button onClick={send} style={{ width: "100%" }}>
-        {workingFiles.length > 1 ? `Send ${workingFiles.length}` : "Send"}
+        {multi ? `Send ${workingFiles.length}` : "Send"}
       </Button>
     </Sheet>
   );
