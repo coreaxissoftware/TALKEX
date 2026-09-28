@@ -1126,7 +1126,12 @@ export const Meetings = {
 
 // ── Realtime ─────────────────────────────────────────────────────────────────
 
-const HEARTBEAT_MS = 20000;
+// 10s (was 20s): only affects how fast a SILENTLY-dead socket is noticed and
+// reconnected — live delivery over a healthy socket is instant regardless.
+// Tighter so realtime recovers ~2x faster after a network blip; the ping only
+// runs while the app is foreground (backgrounded delivery uses FCM push), so
+// the battery/data cost is negligible.
+const HEARTBEAT_MS = 10000;
 const MAX_BACKOFF_MS = 30000;
 
 export class Realtime {
