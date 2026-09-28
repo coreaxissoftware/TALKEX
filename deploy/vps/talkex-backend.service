@@ -1,0 +1,38 @@
+# TalkEx backend — FastAPI/uvicorn under systemd (isolated unit).
+# DRAFT. Install to /etc/systemd/system/talkex-backend.service then:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now talkex-backend
+# Manage ONLY this unit — never touch other projects' services.
+
+[Unit]
+Description=TalkEx Messenger backend (FastAPI/uvicorn)
+After=network.target
+
+[Service]
+Type=simple
+
+# A dedicated, unprivileged user for TalkEx keeps it isolated from other apps.
+# Create once: sudo useradd --system --home <APP_DIR> --shell /usr/sbin/nologin talkex
+# (or reuse the box's convention if one exists — confirm with CoreAxis ePOS).
+User=<SERVICE_USER>          # e.g. talkex
+Group=<SERVICE_GROUP>        # e.g. talkex
+
+WorkingDirectory=<APP_DIR>/backend          # e.g. /opt/talkex/app/backend
+EnvironmentFile=<ENV_FILE>                  # e.g. /etc/talkex/talkex.env  (chmod 600)
+
+# Bind to localhost only; nginx (talkex-api.conf) is the public entry point.
+ExecStart=<VENV_DIR>/bin/uvicorn main:app --host 127.0.0.1 --port <BACKEND_PORT>
+#          e.g. /opt/talkex/venv/bin/uvicorn ... --port 8100
+
+Restart=always
+RestartSec=3
+
+# Hardening — also helps guarantee TalkEx can't disturb other projects' files.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=<DATA_DIR>                    # e.g. /var/lib/talkex  (DB + uploads)
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
