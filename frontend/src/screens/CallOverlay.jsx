@@ -649,6 +649,7 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
   // pointer-drag pattern MinimizedCall (below) already uses for the
   // floating call bubble, just clamped to this tile's own size.
   const [pipPos, setPipPos] = useState({ x: null, y: null }); // null → default bottom-right via CSS
+  const [pipHidden, setPipHidden] = useState(false); // swiped off-edge → tucked behind a pull-tab
   const pipMoved = useRef(false);
   const pipDrag = useRef(null);
   function onPipPointerDown(event) {
@@ -662,11 +663,29 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
     const dx = event.clientX - pipDrag.current.startX;
     const dy = event.clientY - pipDrag.current.startY;
     if (Math.abs(dx) > 4 || Math.abs(dy) > 4) pipMoved.current = true;
-    const nx = Math.max(6, Math.min(window.innerWidth - pipW - 6, pipDrag.current.baseX + dx));
+    // Allow dragging partly past the side edges so a firm swipe can tuck the
+    // tile away; the vertical axis stays fully on-screen.
+    const nx = Math.max(-pipW * 0.6, Math.min(window.innerWidth - pipW * 0.4, pipDrag.current.baseX + dx));
     const ny = Math.max(6, Math.min(window.innerHeight - pipH - 6, pipDrag.current.baseY + dy));
+    pipDrag.current.lastX = nx;
+    pipDrag.current.lastY = ny;
     setPipPos({ x: nx, y: ny });
   }
-  function onPipPointerUp() { pipDrag.current = null; }
+  function onPipPointerUp() {
+    const drag = pipDrag.current;
+    pipDrag.current = null;
+    if (!drag || !pipMoved.current || drag.lastX == null) return;
+    // Swiped mostly past a side edge → hide behind a pull-tab (WhatsApp-style).
+    if (drag.lastX > window.innerWidth - pipW * 0.5 || drag.lastX < -pipW * 0.1) {
+      setPipHidden(true);
+      return;
+    }
+    // Otherwise snap fully back on-screen (the tile's CSS transition eases it).
+    setPipPos({
+      x: Math.max(6, Math.min(window.innerWidth - pipW - 6, drag.lastX)),
+      y: Math.max(6, Math.min(window.innerHeight - pipH - 6, drag.lastY)),
+    });
+  }
 
   return (
     <>
@@ -729,11 +748,24 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
             anywhere on screen (WhatsApp/Zoom-style); a tap that didn't move
             still swaps main/self, same as before — pipDragRef.moved is what
             tells the two apart. Camera-flip lives here when it's the self feed. */}
-        {(hasLocalVideo || (mainIsLocal && hasRemoteVideo)) && (
+        {(hasLocalVideo || (mainIsLocal && hasRemoteVideo)) && (pipHidden ? (
+          <div onClick={() => { setPipHidden(false); setPipPos({ x: null, y: null }); }}
+               title="Show self view" style={{
+                 position: "absolute", right: 0, bottom: isLandscape ? 20 : 90,
+                 width: 24, height: 54, background: "#000000aa", zIndex: 3,
+                 borderTopLeftRadius: 12, borderBottomLeftRadius: 12,
+                 display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
+               }}>
+            {I.chevronLeft ? I.chevronLeft("#fff", 18) : <span style={{ color: "#fff", fontSize: 18 }}>‹</span>}
+          </div>
+        ) : (
           <div onPointerDown={onPipPointerDown} onPointerMove={onPipPointerMove}
                onPointerUp={onPipPointerUp} onPointerCancel={onPipPointerUp}
                style={{
                  position: "absolute", touchAction: "none", cursor: "grab",
+                 // Smoothly eases to its resting spot on release (drag itself is
+                 // 1:1, no transition, so it tracks the finger exactly).
+                 transition: pipDrag.current ? "none" : "left 0.22s ease, top 0.22s ease, bottom 0.22s ease, right 0.22s ease",
                  ...(pipPos.x == null
                    ? { bottom: isLandscape ? 8 : 16, right: isLandscape ? 8 : 16 }
                    : { left: pipPos.x, top: pipPos.y }),
@@ -762,7 +794,7 @@ function ActiveCall({ call, onEnd, onToggleMute, onToggleCamera, onSwitchCamera,
               </div>
             )}
           </div>
-        )}
+        ))}
 
         {call.sharingScreen && (
           <div style={{
