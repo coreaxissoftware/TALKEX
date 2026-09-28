@@ -8605,6 +8605,26 @@ def health():
     return {"status": "ok", "time": time.time()}
 
 
+# --- TEMPORARY one-time data export for the VPS migration. REMOVE after use. ---
+# Superadmin-only — reuses require_superadmin, the exact same auth gate as every
+# other /admin route, so it is no weaker than the existing admin panel. Streams
+# the whole DATA_DIR (SQLite DB + WAL + uploads + VAPID keys) as a gzip tar,
+# subprocess-piped so the archive is never buffered in memory (Render free-tier
+# RAM). Deleted immediately after the one-time pull onto the new server.
+@app.get("/admin/migrate-export")
+def admin_migrate_export(admin: dict = Depends(require_superadmin)):
+    import subprocess
+    from fastapi.responses import StreamingResponse
+    data_dir = os.environ.get("DATA_DIR", "/data")
+    proc = subprocess.Popen(["tar", "czf", "-", "-C", data_dir, "."], stdout=subprocess.PIPE)
+    return StreamingResponse(
+        proc.stdout,
+        media_type="application/gzip",
+        headers={"Content-Disposition": 'attachment; filename="talkex-data.tar.gz"'},
+    )
+# --- end temporary export ---
+
+
 @app.get("/ready")
 def ready():
     """Readiness: this one does check the database, because that is the point."""
