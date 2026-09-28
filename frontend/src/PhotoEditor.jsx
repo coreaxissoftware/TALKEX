@@ -37,7 +37,7 @@ const VIEWPORT_MAX_WIDTH = 380;
 // shown WHOLE and never grows past the editing area into the tools below it.
 // Without this the viewport was sized by width alone, so a portrait photo
 // overflowed and the crop tools overlapped the image.
-const VIEWPORT_MAX_HEIGHT = 420;
+const VIEWPORT_MAX_HEIGHT = 520;
 const PREVIEW_MAX_DIM = 800;
 const OUTPUT_LONG_EDGE = 1600;
 const OUTPUT_LONG_EDGE_HD = 2400;
@@ -1169,17 +1169,38 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
       {/* Top bar — frosted glass over the photo, iOS-sheet style, rather
           than a flat solid bar sitting on top of it. */}
       <div style={{
-        display: "flex", alignItems: "center", padding: "14px 16px", flexShrink: 0,
+        display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: "10px 12px", flexShrink: 0,
         background: "rgba(10,10,10,0.72)", backdropFilter: "blur(20px) saturate(1.5)",
         WebkitBackdropFilter: "blur(20px) saturate(1.5)",
         borderBottom: "0.5px solid rgba(255,255,255,0.08)",
       }}>
         <div onClick={onCancel} style={{
-          color: "#fff", fontSize: 15, fontWeight: 500, cursor: "pointer", padding: "7px 14px",
-          borderRadius: 20, background: "rgba(255,255,255,0.1)",
+          color: "#fff", fontSize: 14, fontWeight: 500, cursor: "pointer", padding: "6px 12px",
+          borderRadius: 20, background: "rgba(255,255,255,0.1)", flexShrink: 0,
         }}>Cancel</div>
-        <div style={{ flex: 1 }}/>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        {/* Adjust/Filter/Draw/Add moved into the header so the bottom is free
+            for a much bigger editing area (only the tool options + tool row
+            sit below now). */}
+        <div style={{
+          flex: 1, minWidth: 210, position: "relative", display: "flex", padding: 3, borderRadius: 12,
+          background: "rgba(255,255,255,0.08)",
+        }}>
+          <div style={{
+            position: "absolute", top: 3, bottom: 3, left: 3,
+            width: `calc((100% - 6px) / ${TABS.length})`,
+            transform: `translateX(${TABS.findIndex((t) => t.key === activeTab) * 100}%)`,
+            background: G.accent, borderRadius: 10,
+            transition: "transform 0.25s cubic-bezier(0.34, 1.3, 0.64, 1)",
+          }}/>
+          {TABS.map((tab) => (
+            <div key={tab.key} onClick={() => switchTab(tab.key)} style={{
+              position: "relative", flex: 1, padding: "6px", borderRadius: 10, cursor: "pointer",
+              textAlign: "center", fontSize: 12, fontWeight: 600,
+              color: activeTab === tab.key ? "#fff" : "#ffffff88", transition: "color 0.2s",
+            }}>{tab.label}</div>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
           {marks.length > 0 && (
             <div onClick={undoLast} title="Undo" style={{
               cursor: "pointer", padding: "6px 10px", borderRadius: 16,
@@ -1198,6 +1219,11 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
             color: hd ? G.accent : "#ffffffcc",
             border: hd ? `1px solid ${G.accent}55` : "1px solid transparent",
           }}>HD</div>
+          <button onClick={done} disabled={!rotatedSrc || processing} title="Done" style={{
+            padding: "7px 16px", borderRadius: 20, border: "none", cursor: "pointer",
+            background: G.accent, color: "#fff", fontSize: 14, fontWeight: 700,
+            opacity: !rotatedSrc || processing ? 0.5 : 1, flexShrink: 0,
+          }}>{processing ? "…" : "Done ✓"}</button>
         </div>
       </div>
 
@@ -1505,42 +1531,8 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
           </div>
         )}
 
-        {/* 4-tab bar — a real iOS segmented control: one pill-shaped track,
-            a single capsule that SLIDES to whichever tab is active (CSS
-            transform, not a background swapped per-cell), TalkEx's own
-            accent color underneath instead of iOS's plain grey/white so it
-            still reads as this app's control, not a copy-pasted system one. */}
-        <div style={{
-          position: "relative", display: "flex", padding: 3, borderRadius: 14,
-          background: "rgba(255,255,255,0.08)", marginBottom: 10,
-        }}>
-          <div style={{
-            position: "absolute", top: 3, bottom: 3, left: 3,
-            width: `calc((100% - 6px) / ${TABS.length})`,
-            transform: `translateX(${TABS.findIndex((t) => t.key === activeTab) * 100}%)`,
-            background: G.accent, borderRadius: 11,
-            boxShadow: `0 1px 6px ${G.accentGlow}`,
-            transition: "transform 0.25s cubic-bezier(0.34, 1.3, 0.64, 1)",
-          }}/>
-          {TABS.map((tab) => (
-            <div key={tab.key} onClick={() => switchTab(tab.key)} style={{
-              position: "relative", flex: 1, padding: "8px", borderRadius: 11, cursor: "pointer",
-              textAlign: "center", fontSize: 12.5, fontWeight: 600,
-              color: activeTab === tab.key ? "#fff" : "#ffffff88",
-              transition: "color 0.2s",
-            }}>{tab.label}</div>
-          ))}
-        </div>
-
-        {/* Done button */}
-        <button onClick={done} disabled={!rotatedSrc || processing} style={{
-          width: "100%", padding: "14px", borderRadius: 14, border: "none", cursor: "pointer",
-          background: G.accent, color: "#fff", fontSize: 15, fontWeight: 700,
-          opacity: !rotatedSrc || processing ? 0.5 : 1,
-          boxShadow: `0 2px 16px ${G.accentGlow}`,
-        }}>
-          {processing ? "Processing…" : "Done ✓"}
-        </button>
+        {/* Tabs + Done now live in the header (see top bar) — nothing here, so
+            the editing area above gets that vertical space back. */}
       </div>
       {promptModal}
     </div>
