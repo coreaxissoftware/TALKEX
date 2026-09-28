@@ -33,6 +33,11 @@ const STICKER_EMOJIS = ["😀", "😂", "😍", "🔥", "❤️", "👍", "🎉"
                         "🥳", "💪", "🤩", "🥺", "😴", "🤯", "🫡", "🚀", "💯", "🎊", "🦋", "🌈"];
 
 const VIEWPORT_MAX_WIDTH = 380;
+// Cap the viewport height too, so a tall/portrait image (or a 9:16 crop) is
+// shown WHOLE and never grows past the editing area into the tools below it.
+// Without this the viewport was sized by width alone, so a portrait photo
+// overflowed and the crop tools overlapped the image.
+const VIEWPORT_MAX_HEIGHT = 420;
 const PREVIEW_MAX_DIM = 800;
 const OUTPUT_LONG_EDGE = 1600;
 const OUTPUT_LONG_EDGE_HD = 2400;
@@ -428,8 +433,17 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
     setCropRect({ x: 0, y: 0, w: 1, h: 1 });
   }, [sourceImg, rotation, flipped]);
 
-  const viewportW = VIEWPORT_MAX_WIDTH;
-  const viewportH = aspect.ratio ? viewportW / aspect.ratio : (rotatedSrc ? (viewportW * rotatedSrc.h) / rotatedSrc.w : viewportW);
+  // Fit the viewport inside BOTH the max width and max height, preserving the
+  // target aspect (the fixed crop ratio, or the image's own aspect for free
+  // crop). This is what makes a portrait photo / 9:16 crop show whole and stay
+  // clear of the tools below, instead of overflowing off the editing area.
+  const _targetAspect = aspect.ratio || (rotatedSrc ? rotatedSrc.w / rotatedSrc.h : 1);
+  let viewportW = VIEWPORT_MAX_WIDTH;
+  let viewportH = viewportW / _targetAspect;
+  if (viewportH > VIEWPORT_MAX_HEIGHT) {
+    viewportH = VIEWPORT_MAX_HEIGHT;
+    viewportW = viewportH * _targetAspect;
+  }
 
   const coverScale = rotatedSrc ? Math.max(viewportW / rotatedSrc.w, viewportH / rotatedSrc.h) : 1;
   const effectiveScale = coverScale * zoom;
