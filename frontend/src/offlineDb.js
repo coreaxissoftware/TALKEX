@@ -16,7 +16,12 @@
 
 const DB_NAME = "talkex-offline";
 const DB_VERSION = 2;
-const MAX_BLOB_BYTES = 60 * 1024 * 1024; // ~60MB of cached media before old entries are evicted
+const MAX_BLOB_BYTES = 500 * 1024 * 1024; // ~500MB of cached media before old entries are evicted
+// 60MB was far too small — a media-heavy chat filled it in one sitting, so
+// older photos/videos were evicted and had to re-download every time the chat
+// was reopened ("loads every time"). 500MB keeps a lot more locally so seen
+// media stays instant and available offline, WhatsApp-style. Eviction is still
+// LRU, and a browser quota cap (if lower) just fails the save silently.
 
 let dbPromise = null;
 

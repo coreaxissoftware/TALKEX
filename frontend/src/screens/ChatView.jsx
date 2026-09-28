@@ -3394,7 +3394,12 @@ const Attachment = memo(function Attachment({ message, mine, onForward, onOpenMe
   // Starts closed when the setting says not to fetch automatically; tapping
   // the placeholder below flips this to fetch on demand, same one-time
   // manual download WhatsApp offers when auto-download is off.
-  const [wantsDownload, setWantsDownload] = useState(shouldAutoDownload);
+  // Documents never auto-download — a PDF/sheet shows its card (name + size)
+  // instantly and only fetches the bytes when you tap View/Download, WhatsApp-
+  // style. Auto-downloading them just to render a card is what left documents
+  // stuck on a spinner while a big file streamed through the app server.
+  const [wantsDownload, setWantsDownload] = useState(
+    () => shouldAutoDownload() && message.kind !== "document");
   const attachmentId = message.payload?.attachment_id;
   // Set only on a message still sitting in the local send queue (pending or
   // queued-while-offline) — the file itself, held client-side, with no
@@ -3508,14 +3513,24 @@ const Attachment = memo(function Attachment({ message, mine, onForward, onOpenMe
   }
 
   if (!localUrl && !wantsDownload) {
+    const isDoc = message.kind === "document";
+    const isPdfName = /\.pdf$/i.test(fileName) || message.payload?.mime === "application/pdf";
     return (
       <div onClick={() => setWantsDownload(true)} style={{
-        display: "flex", alignItems: "center", gap: 8, padding: "4px 0", cursor: "pointer",
+        display: "flex", alignItems: "center", gap: 10, cursor: "pointer",
+        padding: isDoc ? "6px 2px" : "4px 0", minWidth: isDoc ? 210 : undefined,
       }}>
-        {I.image ? I.image(mine ? "#fff" : G.accent, 18) : null}
-        <div>
-          <div style={{ fontSize: 13, fontWeight: 600 }}>Tap to download</div>
-          <div style={{ fontSize: 11, opacity: 0.7 }}>{fileName} · {formatBytes(sizeBytes)}</div>
+        {isDoc
+          ? (I.doc ? I.doc(mine ? "#fff" : G.accent, 26) : <span style={{ fontSize: 22 }}>📄</span>)
+          : (I.image ? I.image(mine ? "#fff" : G.accent, 18) : null)}
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {isDoc ? fileName : "Tap to download"}
+          </div>
+          <div style={{ fontSize: 11, opacity: 0.7 }}>
+            {isDoc ? `${isPdfName ? "PDF · " : ""}${formatBytes(sizeBytes)} · Tap to open`
+                   : `${fileName} · ${formatBytes(sizeBytes)}`}
+          </div>
         </div>
       </div>
     );
