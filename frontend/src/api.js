@@ -870,7 +870,33 @@ export const Uploads = {
    * while the transfer keeps running in the background — fetch() aborts
    * both the request and (per spec) the underlying TCP write.
    */
-  async create(file, { signal, onProgress } = {}) {
+  async create(file, { signal, onProgress, retries = 2 } = {}) {
+    // Retry transient failures (dropped/slow network, timeouts, 5xx) in place
+    // before giving up to the offline queue — a brief connectivity dip mid-
+    // upload should recover on its own, not make the media vanish. Deliberate
+    // cancels (AbortError) and client errors (4xx) are never retried.
+    let attempt = 0;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      try {
+        return await this._createOnce(file, { signal, onProgress });
+      } catch (error) {
+        if (error?.name === "AbortError") throw error;
+        if (error instanceof ApiError && error.status >= 400 && error.status < 500) throw error;
+        if (attempt >= retries) throw error;
+        attempt += 1;
+        // Backoff 1s, 2s — enough to ride out a short blip without stalling.
+        await new Promise((r) => setTimeout(r, 1000 * attempt));
+        if (signal?.aborted) {
+          const err = new Error("Upload cancelled");
+          err.name = "AbortError";
+          throw err;
+        }
+      }
+    }
+  },
+
+  async _createOnce(file, { signal, onProgress } = {}) {
     const body = new FormData();
     body.append("file", file);
 
