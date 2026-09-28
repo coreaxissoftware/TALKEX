@@ -1102,6 +1102,22 @@ export const Meetings = {
   // call and share the link.
   quickStart: ({ title = "Instant meeting", memberIds = [], waitingRoom = false, password = "" } = {}) =>
     post("/meetings/quick-start", { title, member_ids: memberIds, waiting_room: waitingRoom, password }),
+  // Schedule a meeting with NO existing group — the server makes a fresh room,
+  // schedules it, and auto-generates the shareable join link. Returns
+  // { meeting, chat, invite_code }.
+  // Join a meeting as a GUEST (no account) — meet.talkex.in. Returns
+  // { token, user, chat_id, invite_code }; the caller stores the token and
+  // drops the guest into the meeting.
+  guestJoin: ({ inviteCode, name }) =>
+    post("/meetings/guest-join", { invite_code: inviteCode, name }),
+
+  quickSchedule: ({ title, agenda = "", startsAt, durationMin = 30, reminderMin = 10,
+                    memberIds = [], waitingRoom = false, password = "" }) =>
+    post("/meetings/quick-schedule", {
+      title, agenda, starts_at: startsAt, duration_min: durationMin,
+      reminder_min: reminderMin, member_ids: memberIds,
+      waiting_room: waitingRoom, password,
+    }),
   // Whoever taps Join first moves a scheduled meeting to 'live' for everyone.
   start: (meetingId) => post(`/meetings/${meetingId}/start`),
   end: (meetingId) => post(`/meetings/${meetingId}/end`),
@@ -1465,7 +1481,7 @@ export const E2EE = {
 // 404s otherwise), same as opening the chat any other way — this is a
 // convenience shortcut, not a new access grant.
 export function meetingLink(meetingId) {
-  return `https://web.talkex.in/?meeting=${meetingId}`;
+  return `https://meet.talkex.in/?meeting=${meetingId}`;
 }
 
 export function newClientMessageId() {

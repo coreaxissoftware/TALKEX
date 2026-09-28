@@ -9,6 +9,51 @@ import { ensureLocaleLoaded } from './i18n.jsx'
 
 ensureLocaleLoaded(localStorage.getItem("talkex_lang"));
 
+// ── App-like touch behaviour (WhatsApp parity) ───────────────────────────────
+// Two native browser behaviours fight the app's own long-press / right-click
+// menus and make it feel like a web page instead of a messenger:
+//   1. Right-click (desktop) and touch-and-hold (phone) pop the *browser's*
+//      context menu (Back / Reload / Save-as / Inspect …) over our own menu.
+//   2. Touch-and-hold also starts a native text/row selection (the blue
+//      highlight + selection handles) and, on mobile, the long-press callout
+//      (image "save"/"copy" bubble) — so the custom menu opens on top of an
+//      accidental selection.
+// A real messenger suppresses both everywhere except where typing/pasting is
+// genuinely wanted (the composer and other inputs). Copying message text still
+// works — it's done through our own menu's Copy action, not a drag-select.
+(function installAppLikeInput() {
+  const style = document.createElement("style");
+  style.textContent = `
+    html, body, #root {
+      -webkit-user-select: none; -moz-user-select: none; -ms-user-select: none; user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    /* Re-enable selection/callout only where it's actually useful: form fields,
+       editable regions, and anything explicitly opted in with data-selectable. */
+    input, textarea, [contenteditable="true"], [contenteditable=""],
+    [data-selectable], .tx-selectable, .tx-selectable * {
+      -webkit-user-select: text; -moz-user-select: text; -ms-user-select: text; user-select: text;
+      -webkit-touch-callout: default;
+    }
+    @keyframes txRecBlink { 50% { opacity: 0.2; } }
+  `;
+  document.head.appendChild(style);
+
+  // Kill the native context menu, but leave it on inputs/editable so the
+  // composer keeps its paste / spell-check menu. The app's own bubble and
+  // chat-row handlers run first (on the target, before this bubbles to
+  // window) and open the custom menu; this only stops the browser fallback
+  // on everything else.
+  window.addEventListener("contextmenu", (event) => {
+    const el = event.target;
+    if (el && el.closest && el.closest('input, textarea, [contenteditable="true"], [contenteditable=""], [data-selectable], .tx-selectable')) {
+      return;
+    }
+    event.preventDefault();
+  });
+})();
+
 // Self-heal a stale PWA after a new deploy: when a lazily-imported chunk 404s
 // (an already-open app's old index.html points at a hashed file the new build
 // replaced), Vite fires `vite:preloadError`. Reload once to pull the fresh

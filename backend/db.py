@@ -1285,6 +1285,10 @@ COLUMNS_ADDED_LATER = [
     ("users", "nearby_updated_at", "REAL"),
     ("users", "plan", "TEXT NOT NULL DEFAULT 'free'"),
     ("users", "plan_expires_at", "REAL"),
+    # A meet.talkex.in guest — a throwaway account created just to join one
+    # meeting by its link, no phone/password. Used to scope down what the
+    # account can do and to sweep it later; a normal user is always 0.
+    ("users", "is_guest", "INTEGER NOT NULL DEFAULT 0"),
     ("chat_members", "last_delivered_at", "REAL"),
     ("chat_members", "last_read_at", "REAL"),
 ]

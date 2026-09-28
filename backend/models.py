@@ -593,6 +593,29 @@ class QuickMeetingRequest(BaseModel):
     password: str = Field(default="", max_length=64)
 
 
+class QuickScheduleRequest(BaseModel):
+    """Schedule a meeting with NO pre-existing group — the server spins up a
+    fresh ad-hoc room (like quick-start) but instead of going live now it
+    schedules the meeting for `starts_at` and auto-generates a shareable join
+    link, then returns { meeting, chat, invite_code }."""
+    title: str = Field(min_length=1, max_length=120)
+    agenda: str = Field(default="", max_length=2000)
+    starts_at: float
+    duration_min: int = Field(default=30, ge=5, le=24 * 60)
+    reminder_min: int = Field(default=10, ge=0, le=24 * 60)
+    member_ids: list[str] = Field(default_factory=list, max_length=200)
+    waiting_room: bool = False
+    password: str = Field(default="", max_length=64)
+
+
+class GuestJoinRequest(BaseModel):
+    """Join a meeting on meet.talkex.in as a guest — no account. The server
+    makes a throwaway guest user, adds it to the meeting room and returns a
+    session token, so the guest lands straight in the meeting."""
+    invite_code: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=60)
+
+
 class CreateBreakoutRoomsRequest(BaseModel):
     """assignments maps user_id -> which room (0-based) they land in — the
     caller decides the grouping (manually or by spreading people evenly

@@ -24,6 +24,7 @@ import * as offlineDb from "./offlineDb.js";
 import ChatList from "./screens/ChatList.jsx";
 import ChatView from "./screens/ChatView.jsx";
 import Login from "./screens/Login.jsx";
+import MeetLanding from "./MeetLanding.jsx";
 
 const AdminPanel = lazy(() => import("./screens/AdminPanel.jsx"));
 const CallOverlay = lazy(() => import("./screens/CallOverlay.jsx"));
@@ -53,6 +54,13 @@ const TAB_KEYS = [
   { key: "planner", i18n: "nav.planner", icon: I.calendar },
   { key: "settings", i18n: "nav.settings", icon: I.settings },
 ];
+
+// meet.talkex.in is the meeting-first front door: same TalkEx app + real
+// meeting engine, but it opens on the Planner (meeting dashboard) instead of
+// the chat list so it behaves like a dedicated meeting app.
+function isMeetHost() {
+  return typeof window !== "undefined" && window.location.hostname === "meet.talkex.in";
+}
 
 function PhoneLinkLanding({ phone, onContinue }) {
   const [profile, setProfile] = useState(null);
@@ -112,7 +120,8 @@ export default function App() {
   const [reactivatePending, setReactivatePending] = useState(false);
   const [checking, setChecking] = useState(true);
   const [phoneLinkDismissed, setPhoneLinkDismissed] = useState(false);
-  const [tab, setTab] = useState("chats");
+  const [meetLandingDismissed, setMeetLandingDismissed] = useState(false);
+  const [tab, setTab] = useState(isMeetHost() ? "planner" : "chats");
   const [chats, setChats] = useState([]);
   const [loadingChats, setLoadingChats] = useState(true);
   const [openChat, setOpenChat] = useState(null);
@@ -911,6 +920,37 @@ export default function App() {
   if (checking) return <Screen style={{ justifyContent: "center" }}><Spinner/></Screen>;
 
   if (!me) {
+    // meet.talkex.in — a meeting-focused public front door instead of the plain
+    // chat login. If the URL already carries a join param (?invite/?meeting),
+    // skip the landing and go straight to sign-in so the existing auto-join
+    // effects run once signed in. `meetLandingDismissed` lets "Sign in" here
+    // fall through to the normal Login below.
+    const onMeetHost = typeof window !== "undefined" && window.location.hostname === "meet.talkex.in";
+    const hasJoinParam = typeof window !== "undefined"
+      && /[?&](invite|meeting)=/.test(window.location.search);
+    if (onMeetHost && !hasJoinParam && !meetLandingDismissed) {
+      return <MeetLanding
+        onContinue={() => setMeetLandingDismissed(true)}
+        onGuestJoined={async (result) => {
+          // Guest joined with just a name — the token is already stored by
+          // MeetLanding. Sign them in and drop them into the meeting room.
+          setMe(result.user);
+          setLoadingChats(true);
+          try {
+            const chat = await Chats.get(result.chat_id);
+            if (chat) {
+              setOpenChat(chat);
+              // Meeting already running → drop straight into the call (auto-drop),
+              // instead of leaving the guest staring at the meeting card. A
+              // scheduled-but-not-yet-live meeting keeps the card + Join button.
+              if (result.meeting_status === "live") {
+                setTimeout(() => { try { groupCall.join(result.chat_id, "video"); } catch { /* ignore */ } }, 300);
+              }
+            }
+          } catch { /* the chat list load will still bring it in */ }
+        }}/>;
+    }
+
     // Only show the phone-link landing when THIS visit actually arrived via a
     // phone-link URL. A number left in localStorage by a previous visit must
     // not hijack the root screen on every reload (that stranded returning

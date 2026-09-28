@@ -22,9 +22,11 @@ import { logAdminAction, getAdminLog, clearAdminLog } from "../adminLog.js";
 import CameraCapture from "../CameraCapture.jsx";
 import GifPicker from "../GifPicker.jsx";
 import { contactsAvailable, pickContacts } from "../nativeContacts.js";
+import { galleryAvailable, nativeSave, nativeShare, nativeShareFiles } from "../nativeGallery.js";
 import { COUNTRY_CODES, flagFor, samplePlaceholder, splitPhone } from "../countryCodes.js";
 
 const LocationMap = lazy(() => import("../LocationMap.jsx"));
+const GalleryPicker = lazy(() => import("../GalleryPicker.jsx"));
 const PhotoEditor = lazy(() => import("../PhotoEditor.jsx"));
 const VideoTrimmer = lazy(() => import("../VideoTrimmer.jsx"));
 const QrView = lazy(() => import("../QrView.jsx"));
@@ -708,8 +710,12 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
       const attachmentId = message.payload?.attachment_id;
       if (attachmentId) {
         const blobUrl = message.payload?._localUrl || await Uploads.fetchBlobUrl(attachmentId, { cache: true });
+        const fileName = message.payload?.file_name || "file";
+        // Native Android first — the WebView has no navigator.share, so this is
+        // the only path that actually opens the system share sheet there.
+        if (await nativeShare(blobUrl, fileName, message.payload?.mime_type, message.text || undefined)) return;
         const blob = await fetch(blobUrl).then((r) => r.blob());
-        const file = new File([blob], message.payload?.file_name || "file", { type: blob.type });
+        const file = new File([blob], fileName, { type: blob.type });
         if (navigator.canShare && navigator.canShare({ files: [file] })) {
           await navigator.share({ files: [file], text: message.text || undefined });
           return;
@@ -722,6 +728,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         return;
       }
       if (message.text) {
+        if (await nativeShare(null, null, null, message.text)) return;
         if (navigator.share) {
           await navigator.share({ text: message.text });
         } else {
@@ -739,14 +746,55 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
     if (!attachmentId) return;
     try {
       const blobUrl = message.payload?._localUrl || await Uploads.fetchBlobUrl(attachmentId, { cache: true });
+      const fileName = message.payload?.file_name || "file";
+      // Native Android first — <a download> is a no-op in the WebView.
+      if (await nativeSave(blobUrl, fileName, message.payload?.mime_type)) { toast("Saved to gallery"); return; }
       const link = document.createElement("a");
       link.href = blobUrl;
-      link.download = message.payload?.file_name || "file";
+      link.download = fileName;
       document.body.appendChild(link);
       link.click();
       link.remove();
     } catch {
       toast("Could not download");
+    }
+  }
+
+  // Share every selected message that carries a file, through the OS share
+  // sheet (multi-file). Native Android uses the plugin; web uses navigator.share.
+  async function shareSelected() {
+    if (!selectedMsgIds.size) return;
+    const picked = messages.filter((m) => selectedMsgIds.has(m.id) && m.payload?.attachment_id);
+    const text = messages.filter((m) => selectedMsgIds.has(m.id) && m.text && !m.payload?.attachment_id)
+                         .map((m) => m.text).join("\n") || undefined;
+    const exit = () => { setSelectMode(false); setSelectedMsgIds(new Set()); };
+    try {
+      if (!picked.length) {
+        if (text) { if (!(await nativeShare(null, null, null, text)) && navigator.share) await navigator.share({ text }); }
+        exit(); return;
+      }
+      const items = [];
+      for (const m of picked) {
+        const url = m.payload?._localUrl || await Uploads.fetchBlobUrl(m.payload.attachment_id, { cache: true });
+        items.push({ blobUrl: url, name: m.payload?.file_name || "file", mime: m.payload?.mime_type });
+      }
+      // Native multi-share first (WebView has no navigator.share).
+      if (await nativeShareFiles(items, text)) { exit(); return; }
+      // Web: share as files if the browser supports it.
+      const files = [];
+      for (const it of items) {
+        const blob = await fetch(it.blobUrl).then((r) => r.blob());
+        files.push(new File([blob], it.name, { type: blob.type }));
+      }
+      if (navigator.canShare && navigator.canShare({ files })) {
+        await navigator.share({ files, text });
+      } else {
+        toast("Sharing isn't supported here");
+      }
+      exit();
+    } catch (problem) {
+      if (problem?.name !== "AbortError") toast("Could not share");
+      exit();
     }
   }
 
@@ -1425,9 +1473,14 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
               setSelectedMsgIds(new Set());
             }} style={{ cursor: selectedMsgIds.size ? "pointer" : "default", opacity: selectedMsgIds.size ? 1 : 0.4 }}
                  title="Forward selected">
-              {I.send(G.accent, 18)}
+              {(I.fwd || I.send)(G.accent, 18)}
             </div>
           )}
+          <div onClick={() => shareSelected()}
+               style={{ cursor: selectedMsgIds.size ? "pointer" : "default", opacity: selectedMsgIds.size ? 1 : 0.4 }}
+               title="Share selected">
+            {(I.share || I.fwd || I.send)(G.accent, 18)}
+          </div>
           <div onClick={async () => {
             if (!selectedMsgIds.size) return;
             try {
@@ -3561,8 +3614,10 @@ const Attachment = memo(function Attachment({ message, mine, onForward, onOpenMe
   // Blob URLs download fine through a synthesised <a download>; doing it in JS
   // (rather than a static link) lets the same handler back every download
   // button below and the in-app PDF viewer's own download control.
-  function downloadFile() {
+  async function downloadFile() {
     if (!effectiveUrl) return;
+    // Native Android first — <a download> is a no-op inside the WebView.
+    if (await nativeSave(effectiveUrl, fileName, message.payload?.mime_type)) { toast && toast("Saved to gallery"); return; }
     const link = document.createElement("a");
     link.href = effectiveUrl;
     link.download = fileName;
@@ -3598,9 +3653,23 @@ const Attachment = memo(function Attachment({ message, mine, onForward, onOpenMe
   if (message.kind === "photo") {
     return (
       <>
-        <img src={effectiveUrl} alt={fileName} data-media="1"
-             onClick={(event) => { event.stopPropagation(); onOpenMedia ? onOpenMedia(message) : setFullscreen(true); }}
-             style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 13, display: "block", cursor: "pointer" }}/>
+        <div style={{ position: "relative", display: "inline-block" }} data-media="1">
+          <img src={effectiveUrl} alt={fileName} data-media="1"
+               onClick={(event) => { event.stopPropagation(); onOpenMedia ? onOpenMedia(message) : setFullscreen(true); }}
+               style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 13, display: "block", cursor: "pointer" }}/>
+          {/* Quick-forward, WhatsApp-style: a forward icon on every photo so it
+              can be forwarded in one tap without opening the long-press menu. */}
+          {onForward && (
+            <div onClick={(event) => { event.stopPropagation(); onForward(); }} title="Forward" data-media="1"
+                 style={{
+                   position: "absolute", bottom: 8, right: 8, width: 32, height: 32, borderRadius: "50%",
+                   background: "#00000099", display: "flex", alignItems: "center", justifyContent: "center",
+                   cursor: "pointer",
+                 }}>
+              {I.fwd ? I.fwd("#fff", 16) : <span style={{ color: "#fff", fontSize: 15 }}>↪</span>}
+            </div>
+          )}
+        </div>
         {fullscreen && (
           <FullscreenMedia kind="photo" src={effectiveUrl} alt={fileName}
                            onEdit={() => { setFullscreen(false); openPhotoEditor(); }}
@@ -3632,10 +3701,22 @@ const Attachment = memo(function Attachment({ message, mine, onForward, onOpenMe
                }}>
             {I.expand ? I.expand("#fff", 15) : "⛶"}
           </div>
+          {/* Quick-forward icon on the video too (WhatsApp puts one on every
+              media), sat just left of the expand control so it clears the
+              native playback controls along the bottom. */}
+          {onForward && (
+            <div onClick={(event) => { event.stopPropagation(); onForward(); }} title="Forward" data-media="1"
+                 style={{
+                   position: "absolute", top: 6, right: 42, width: 30, height: 30, borderRadius: "50%",
+                   background: "#00000099", display: "flex", alignItems: "center", justifyContent: "center",
+                   cursor: "pointer",
+                 }}>
+              {I.fwd ? I.fwd("#fff", 15) : <span style={{ color: "#fff", fontSize: 15 }}>↪</span>}
+            </div>
+          )}
         </div>
         <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
           <AttachmentAction label="Download" icon={I.download} mine={mine} onClick={downloadFile}/>
-          {onForward && <AttachmentAction label="Forward" icon={I.fwd} mine={mine} onClick={onForward}/>}
         </div>
         {fullscreen && (
           <FullscreenMedia kind="video" src={effectiveUrl} alt={fileName}
@@ -4217,6 +4298,7 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
       {cameraOpen && (
         <CameraCapture
           onCapture={(file) => { setCameraOpen(false); onFilesPicked?.([file], null); }}
+          onGallery={(files) => { setCameraOpen(false); onFilesPicked?.(files, null); }}
           onClose={() => setCameraOpen(false)}/>
       )}
 
@@ -4745,19 +4827,34 @@ export function MeetingSheet({ chat, onClose, toast, onCreated }) {
     }
     setBusy(true);
     try {
-      const meeting = await Meetings.create({
-        chatId: chat.id,
-        title: form.title.trim(),
-        agenda: form.agenda.trim(),
-        startsAt,
-        durationMin: Number(form.duration) || 30,
-        reminderMin: Number(form.reminder) || 0,
-        joinUrl: form.joinUrl.trim(),
-        waitingRoom: form.waitingRoom,
-        password: form.password.trim(),
-      });
+      let result;
+      if (chat) {
+        result = await Meetings.create({
+          chatId: chat.id,
+          title: form.title.trim(),
+          agenda: form.agenda.trim(),
+          startsAt,
+          durationMin: Number(form.duration) || 30,
+          reminderMin: Number(form.reminder) || 0,
+          joinUrl: form.joinUrl.trim(),
+          waitingRoom: form.waitingRoom,
+          password: form.password.trim(),
+        });
+      } else {
+        // No group picked — the server spins up a fresh room and auto-generates
+        // the join link (Zoom/Meet-style scheduling without a team first).
+        result = await Meetings.quickSchedule({
+          title: form.title.trim(),
+          agenda: form.agenda.trim(),
+          startsAt,
+          durationMin: Number(form.duration) || 30,
+          reminderMin: Number(form.reminder) || 0,
+          waitingRoom: form.waitingRoom,
+          password: form.password.trim(),
+        });
+      }
       toast("Meeting scheduled");
-      onCreated?.(meeting);
+      onCreated?.(result);
       onClose();
     } catch (problem) {
       toast(problem.message || "Could not create meeting");
@@ -4781,8 +4878,14 @@ export function MeetingSheet({ chat, onClose, toast, onCreated }) {
           <Field label="Remind before" type="number" value={form.reminder} onChange={set("reminder")}/>
         </div>
       </div>
-      <Field label="Join link (optional)" value={form.joinUrl} onChange={set("joinUrl")}
-             placeholder="https://meet.example.com/abc"/>
+      {chat ? (
+        <Field label="Join link (optional)" value={form.joinUrl} onChange={set("joinUrl")}
+               placeholder="https://meet.talkex.in/abc"/>
+      ) : (
+        <div style={{ fontSize: 12, color: G.muted, margin: "2px 0 12px" }}>
+          🔗 A meet.talkex.in join link is generated automatically when you schedule.
+        </div>
+      )}
 
       <div onClick={() => setShowAdvanced((v) => !v)} style={{
         display: "flex", alignItems: "center", gap: 6, cursor: "pointer",
@@ -4867,10 +4970,19 @@ function PollSheet({ chat, onClose, toast, onCreated }) {
 function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker, onGif, onProduct,
                        onScanCaptured, onFilesPicked }) {
   const [cameraOpen, setCameraOpen] = useState(false);
+  const [galleryOpen, setGalleryOpen] = useState(false);
   const galleryInput = useRef(null);
   const docInput = useRef(null);
   const scanInput = useRef(null);
   const audioInput = useRef(null);
+
+  // Gallery button → in-app native grid when it's available (Android build),
+  // otherwise the ordinary OS file picker. galleryAvailable() is a synchronous
+  // platform/plugin check, so web never even mounts the grid.
+  function openGallery() {
+    if (galleryAvailable()) setGalleryOpen(true);
+    else galleryInput.current?.click();
+  }
 
   function tooBig(file) {
     if (file.size > MAX_ATTACHMENT_BYTES) {
@@ -4916,11 +5028,17 @@ function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker
     onClose();
   }
 
+  function onCameraGallery(files) {
+    setCameraOpen(false);
+    onFilesPicked(files, null);
+    onClose();
+  }
+
   // Each tile gets its own accent colour, WhatsApp-style — the icon takes the
   // colour and the circle behind it a soft tint of the same, so the grid reads
   // as a set of distinct actions rather than one wall of identical buttons.
   const options = [
-    { label: "Gallery", icon: I.image, color: "#7c5cff", action: () => galleryInput.current?.click() },
+    { label: "Gallery", icon: I.image, color: "#7c5cff", action: openGallery },
     { label: "Camera", icon: I.camera, color: "#e0245e", action: () => setCameraOpen(true) },
     { label: "Location", icon: I.mapPin, color: "#22c55e", action: () => { onLocation(); onClose(); } },
     { label: "Contact", icon: I.contactCard, color: "#3b82f6", action: () => { onContact(); onClose(); } },
@@ -4934,7 +5052,7 @@ function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker
   ];
 
   if (cameraOpen) {
-    return <CameraCapture onCapture={onCameraCaptured} onClose={() => setCameraOpen(false)}/>;
+    return <CameraCapture onCapture={onCameraCaptured} onGallery={onCameraGallery} onClose={() => setCameraOpen(false)}/>;
   }
 
   return (
@@ -4944,9 +5062,11 @@ function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker
       // is the theme's own surface colour at ~85% opacity, so it stays correct
       // in both light and dark, with the backdrop blur doing the frosted effect.
       position: "absolute", bottom: "100%", left: 0, right: 0,
-      background: `${G.surface}d9`,
-      backdropFilter: "blur(20px) saturate(1.4)",
-      WebkitBackdropFilter: "blur(20px) saturate(1.4)",
+      // Clearly translucent frosted glass — the chat shows through. Lower alpha
+      // (~0.62) + stronger blur so it reads as glass, not a solid sheet.
+      background: `${G.surface}9e`,
+      backdropFilter: "blur(30px) saturate(1.6)",
+      WebkitBackdropFilter: "blur(30px) saturate(1.6)",
       borderTop: `1px solid ${G.border}`,
       borderTopLeftRadius: 16, borderTopRightRadius: 16,
       boxShadow: `0 -4px 24px rgba(0,0,0,0.28)`, overflow: "hidden",
@@ -4971,22 +5091,34 @@ function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker
              onChange={pickToScan} style={{ display: "none" }}/>
       <input ref={audioInput} type="file" accept="audio/*" onChange={pickAudio} style={{ display: "none" }}/>
 
-      {/* Vertical list (icon + label rows) — quicker to scan and tap than a
-          grid, and matches the modern messenger attach menu. */}
-      <div style={{ display: "flex", flexDirection: "column", padding: "6px 8px 12px" }}>
+      {/* In-app native gallery grid (Android). Rendered inline (not an early
+          return) so the hidden inputs above stay mounted — that lets onFallback
+          drop back to the OS picker if the grid can't load or permission is
+          denied at runtime. */}
+      {galleryOpen && (
+        <Suspense fallback={null}>
+          <GalleryPicker
+            onClose={() => setGalleryOpen(false)}
+            onPick={(files) => {
+              setGalleryOpen(false);
+              if (files.length && !files.some(tooBig)) { onFilesPicked(files, null); onClose(); }
+            }}
+            onFallback={() => { setGalleryOpen(false); galleryInput.current?.click(); }}/>
+        </Suspense>
+      )}
+
+      {/* Compact grid — small icon tiles (glassy translucent panel above). */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14, padding: "14px 16px 18px" }}>
         {options.map((option) => (
-          <div key={option.label} onClick={option.action} className="tx-attach-row"
-               style={{
-                 display: "flex", alignItems: "center", gap: 14, padding: "11px 12px",
-                 cursor: "pointer", borderRadius: 12,
-               }}>
+          <div key={option.label} onClick={option.action} className="tx-attach-tile"
+               style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6, cursor: "pointer" }}>
             <div style={{
-              width: 40, height: 40, borderRadius: "50%", background: `${option.color}22`,
-              display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+              width: 46, height: 46, borderRadius: "50%", background: `${option.color}22`,
+              display: "flex", alignItems: "center", justifyContent: "center",
             }}>
               {option.icon(option.color, 20)}
             </div>
-            <div style={{ fontSize: 15, fontWeight: 500, color: G.text }}>{option.label}</div>
+            <div style={{ fontSize: 11.5, color: G.sub }}>{option.label}</div>
           </div>
         ))}
       </div>
@@ -5099,127 +5231,147 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
     );
   }
 
-  const editBtn = (onClick, title) => (
-    <div onClick={onClick} title={title} style={{
-      position: "absolute", top: 6, right: 6, width: 32, height: 32, borderRadius: "50%",
-      background: "#00000099", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
-    }}>{I.edit("#fff", 16)}</div>
-  );
+  const roundBtn = {
+    width: 40, height: 40, borderRadius: "50%", flexShrink: 0, cursor: "pointer",
+    display: "flex", alignItems: "center", justifyContent: "center", background: "#00000055",
+  };
 
+  // Full-screen, glass-dark send preview (WhatsApp-style): no filename, the
+  // chat shows faintly through the translucent backdrop, and the image gets the
+  // whole screen instead of a small thumbnail inside a bottom sheet.
   return (
-    <Sheet title={multi ? `${workingFiles.length} items` : (current?.name || "Send file")} onClose={onClose}>
-      {/* Main preview of the selected item */}
-      <div style={{ display: "flex", justifyContent: "center", marginBottom: 12, position: "relative" }}>
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 1200,
+      background: "rgba(8,8,10,0.82)",
+      backdropFilter: "blur(26px) saturate(1.3)", WebkitBackdropFilter: "blur(26px) saturate(1.3)",
+      display: "flex", flexDirection: "column", userSelect: "none",
+    }}>
+      {/* Top bar — close + edit/trim. No filename shown. */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 10,
+        padding: "calc(10px + env(safe-area-inset-top)) 14px 6px",
+      }}>
+        <div onClick={onClose} title="Close" style={roundBtn}>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </div>
+        <div style={{ flex: 1 }}/>
+        {canEdit && (
+          <div onClick={() => setEditing(true)} title="Edit photo" style={roundBtn}>{I.edit("#fff", 18)}</div>
+        )}
+        {canTrim && (
+          <div onClick={() => setTrimming(true)} title="Trim video" style={roundBtn}>{I.edit("#fff", 18)}</div>
+        )}
+      </div>
+
+      {/* Large centred preview — fills the screen */}
+      <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", padding: "4px 10px", position: "relative" }}>
         {isImage && previewUrl ? (
-          <>
-            <img src={previewUrl} alt={current?.name ? `Preview of ${current.name}` : "Selected photo preview"} style={{
-              maxWidth: "100%", maxHeight: 260, borderRadius: 10, filter: viewOnce ? "blur(14px)" : "none",
-            }}/>
-            {canEdit && editBtn(() => setEditing(true), "Edit photo")}
-          </>
+          <img src={previewUrl} alt="Selected photo preview" style={{
+            maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 10,
+            filter: viewOnce ? "blur(16px)" : "none",
+          }}/>
         ) : isVideo && previewUrl ? (
-          <>
-            <video src={previewUrl} controls style={{
-              maxWidth: "100%", maxHeight: 260, borderRadius: 10, filter: viewOnce ? "blur(14px)" : "none",
-            }}/>
-            {canTrim && editBtn(() => setTrimming(true), "Trim video")}
-          </>
+          <video src={previewUrl} controls style={{
+            maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 10,
+            filter: viewOnce ? "blur(16px)" : "none",
+          }}/>
         ) : (
-          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0" }}>
-            {I.doc(G.accent, 28)}
-            <div style={{ fontSize: 13.5 }}>{current?.name}</div>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12, color: "#fff" }}>
+            {I.doc("#fff", 54)}
+            <div style={{ fontSize: 13.5, opacity: 0.85, maxWidth: 260, textAlign: "center", wordBreak: "break-word" }}>{current?.name}</div>
           </div>
         )}
         {canViewOnce && viewOnce && (
           <div style={{
             position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)",
-            fontSize: 28, color: "#fff",
+            width: 54, height: 54, borderRadius: "50%", border: "2px solid #fff",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: 24, fontWeight: 800, color: "#fff", background: "#00000055",
           }}>1</div>
         )}
       </div>
 
-      {/* Thumbnail strip — select / remove / reorder, plus an "add more" tile */}
-      {(multi || canAddMore) && (
-        <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 8, marginBottom: 12 }}>
-          {workingFiles.map((file, i) => {
-            const active = i === index;
-            const thumb = urls[i];
-            const img = file.type.startsWith("image/");
-            const vid = file.type.startsWith("video/");
-            return (
-              <div key={i} onClick={() => setIndex(i)} style={{
-                position: "relative", flexShrink: 0, width: 56, height: 56, borderRadius: 8, cursor: "pointer",
-                border: `2px solid ${active ? G.accent : "transparent"}`, overflow: "hidden", background: G.dim,
-              }}>
-                {img && thumb ? (
-                  <img src={thumb} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
-                ) : vid && thumb ? (
-                  <video src={thumb} style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
-                ) : (
-                  <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                    {I.doc(G.accent, 20)}
-                  </div>
-                )}
-                <div onClick={(e) => { e.stopPropagation(); removeAt(i); }} title="Remove" style={{
-                  position: "absolute", top: 2, right: 2, width: 18, height: 18, borderRadius: "50%",
-                  background: "#000000bb", color: "#fff", fontSize: 12, lineHeight: "18px", textAlign: "center",
-                }}>✕</div>
-              </div>
-            );
-          })}
-          {canAddMore && (
-            <div onClick={() => addMoreRef.current?.click()} title="Add more" style={{
-              flexShrink: 0, width: 56, height: 56, borderRadius: 8, cursor: "pointer",
-              border: `1px dashed ${G.border}`, background: G.dim,
-              display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, color: G.sub,
-            }}>+</div>
-          )}
-          <input ref={addMoreRef} type="file" accept="image/*,video/*" multiple hidden onChange={onAddMore}/>
-        </div>
-      )}
-
-      {/* Reorder controls for the selected item */}
-      {multi && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-          <span style={{ fontSize: 12, color: G.muted, flex: 1 }}>Item {index + 1} of {workingFiles.length}</span>
-          <div onClick={() => move(index, -1)} title="Move left" style={{
-            padding: "4px 10px", borderRadius: 8, cursor: "pointer", fontSize: 13,
-            background: G.dim, border: `1px solid ${G.border}`, opacity: index === 0 ? 0.4 : 1,
-          }}>←</div>
-          <div onClick={() => move(index, 1)} title="Move right" style={{
-            padding: "4px 10px", borderRadius: 8, cursor: "pointer", fontSize: 13,
-            background: G.dim, border: `1px solid ${G.border}`, opacity: index === workingFiles.length - 1 ? 0.4 : 1,
-          }}>→</div>
-        </div>
-      )}
-
-      {canViewOnce && (
-        <div onClick={() => setViewOnce((v) => !v)} style={{
-          display: "flex", alignItems: "center", gap: 8, marginBottom: 14, cursor: "pointer",
-          padding: "8px 10px", borderRadius: 10, background: viewOnce ? G.accentSoft : G.dim,
-          border: `1px solid ${viewOnce ? G.accent : G.border}`,
-        }}>
-          <div style={{
-            width: 22, height: 22, borderRadius: "50%", flexShrink: 0,
-            display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 700,
-            background: viewOnce ? G.accent : "transparent", color: viewOnce ? "#fff" : G.muted,
-            border: `2px solid ${viewOnce ? G.accent : G.border}`,
-          }}>1</div>
-          <div style={{ fontSize: 13, fontWeight: 600, color: G.text }}>
-            View once — disappears after opening
+      {/* Bottom controls */}
+      <div style={{ padding: "8px 12px calc(12px + env(safe-area-inset-bottom))" }}>
+        {/* Thumbnail strip — select / remove / reorder, plus an "add more" tile */}
+        {(multi || canAddMore) && (
+          <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 8, marginBottom: 10 }}>
+            {workingFiles.map((file, i) => {
+              const active = i === index;
+              const thumb = urls[i];
+              const img = file.type.startsWith("image/");
+              const vid = file.type.startsWith("video/");
+              return (
+                <div key={i} onClick={() => setIndex(i)} style={{
+                  position: "relative", flexShrink: 0, width: 52, height: 52, borderRadius: 8, cursor: "pointer",
+                  border: `2px solid ${active ? "#25d366" : "transparent"}`, overflow: "hidden", background: "#ffffff14",
+                }}>
+                  {img && thumb ? (
+                    <img src={thumb} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
+                  ) : vid && thumb ? (
+                    <video src={thumb} style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
+                  ) : (
+                    <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      {I.doc("#fff", 20)}
+                    </div>
+                  )}
+                  <div onClick={(e) => { e.stopPropagation(); removeAt(i); }} title="Remove" style={{
+                    position: "absolute", top: 2, right: 2, width: 18, height: 18, borderRadius: "50%",
+                    background: "#000000bb", color: "#fff", fontSize: 12, lineHeight: "18px", textAlign: "center",
+                  }}>✕</div>
+                </div>
+              );
+            })}
+            {canAddMore && (
+              <div onClick={() => addMoreRef.current?.click()} title="Add more" style={{
+                flexShrink: 0, width: 52, height: 52, borderRadius: 8, cursor: "pointer",
+                border: `1px dashed #ffffff44`, background: "#ffffff10",
+                display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, color: "#fff",
+              }}>+</div>
+            )}
+            <input ref={addMoreRef} type="file" accept="image/*,video/*" multiple hidden onChange={onAddMore}/>
           </div>
+        )}
+
+        {/* Caption + view-once toggle + send */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input value={captions[index] || ""}
+                 onChange={(event) => setCaptionAt(index, event.target.value)}
+                 placeholder={multi ? `Caption for item ${index + 1}…` : "Add a caption…"}
+                 style={{
+                   flex: 1, minWidth: 0, padding: "12px 16px", borderRadius: 22,
+                   background: "#ffffff1a", border: "1px solid #ffffff2b", color: "#fff",
+                   fontSize: 14.5, outline: "none",
+                 }}/>
+          {canViewOnce && (
+            <div onClick={() => setViewOnce((v) => !v)} title={viewOnce ? "View once is on" : "Send as view once"}
+                 style={{
+                   width: 44, height: 44, borderRadius: "50%", flexShrink: 0, cursor: "pointer",
+                   display: "flex", alignItems: "center", justifyContent: "center",
+                   background: viewOnce ? "#25d36633" : "#ffffff1a",
+                   border: `1px solid ${viewOnce ? "#25d366" : "#ffffff2b"}`,
+                 }}>
+              {I.eye ? I.eye(viewOnce ? "#25d366" : "#fff", 20)
+                     : <span style={{ fontWeight: 700, color: "#fff" }}>1</span>}
+            </div>
+          )}
+          <button onClick={send} title="Send" style={{
+            position: "relative", width: 48, height: 48, borderRadius: "50%", border: "none", cursor: "pointer",
+            background: `linear-gradient(135deg,${G.accent},${G.accentD})`, flexShrink: 0,
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}>
+            {I.send ? I.send() : <span style={{ color: "#fff", fontSize: 18 }}>➤</span>}
+            {multi && (
+              <span style={{
+                position: "absolute", top: -2, right: -2, minWidth: 18, height: 18, padding: "0 4px",
+                borderRadius: 9, background: "#fff", color: G.accent, fontSize: 11, fontWeight: 800,
+                display: "flex", alignItems: "center", justifyContent: "center", border: "2px solid #101014",
+              }}>{workingFiles.length}</span>
+            )}
+          </button>
         </div>
-      )}
-
-      <Field label={multi ? `Caption for item ${index + 1} (optional)` : "Caption (optional)"}
-             value={captions[index] || ""}
-             onChange={(event) => setCaptionAt(index, event.target.value)}
-             placeholder="Add a caption…"/>
-
-      <Button onClick={send} style={{ width: "100%" }}>
-        {multi ? `Send ${workingFiles.length}` : "Send"}
-      </Button>
-    </Sheet>
+      </div>
+    </div>
   );
 }
 
@@ -7794,6 +7946,8 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
   const [editing, setEditing] = useState(false);
   const [editFile, setEditFile] = useState(null);
   const dragRef = useRef(null);
+  const pointersRef = useRef(new Map()); // active pointers for pinch-zoom
+  const pinchRef = useRef(null);          // { startDist, zoomAtStart }
   const attachmentId = current?.payload?.attachment_id;
   const isVideo = current?.kind === "video";
 
@@ -7842,11 +7996,13 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
   const senderColor = senderPerson?.color || current?.sender_color || G.accent;
   const senderLetter = senderPerson?.avatar_letter || (senderName || "?")[0];
 
-  function download() {
+  async function download() {
     if (!blobUrl) return;
+    const fname = current.payload?.file_name || (isVideo ? "video.mp4" : "photo.jpg");
+    if (await nativeSave(blobUrl, fname, current.payload?.mime_type)) { toast && toast("Saved to gallery"); return; }
     const link = document.createElement("a");
     link.href = blobUrl;
-    link.download = current.payload?.file_name || (isVideo ? "video.mp4" : "photo.jpg");
+    link.download = fname;
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -7880,12 +8036,33 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
     setZoom((z) => Math.min(6, Math.max(1, z * factor)));
   }
   function onImgPointerDown(event) {
+    if (isVideo) return;
+    pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    // Two fingers down → start a pinch-zoom; cancel any single-finger pan/swipe.
+    if (pointersRef.current.size === 2) {
+      const [a, b] = [...pointersRef.current.values()];
+      pinchRef.current = { startDist: Math.hypot(a.x - b.x, a.y - b.y) || 1, zoomAtStart: zoom };
+      dragRef.current = null;
+      setSwipeDX(0);
+      return;
+    }
     // Zoomed in → drag to pan. At normal zoom → arm a horizontal swipe that
     // flips to the previous/next media (WhatsApp-style).
     dragRef.current = { x: event.clientX, y: event.clientY, pan, swipe: zoom <= 1 };
     event.currentTarget.setPointerCapture?.(event.pointerId);
   }
   function onImgPointerMove(event) {
+    // Pinch-zoom takes priority whenever two fingers are down.
+    if (pinchRef.current && pointersRef.current.has(event.pointerId)) {
+      pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (pointersRef.current.size >= 2) {
+        const [a, b] = [...pointersRef.current.values()];
+        const dist = Math.hypot(a.x - b.x, a.y - b.y);
+        const next = pinchRef.current.zoomAtStart * (dist / pinchRef.current.startDist);
+        setZoom(Math.min(6, Math.max(1, next)));
+      }
+      return;
+    }
     if (!dragRef.current) return;
     if (dragRef.current.swipe) {
       // At normal zoom the image tracks the finger horizontally, WhatsApp-
@@ -7899,6 +8076,15 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
     setPan({ x: dragRef.current.pan.x + (event.clientX - dragRef.current.x), y: dragRef.current.pan.y + (event.clientY - dragRef.current.y) });
   }
   function onImgPointerUp(event) {
+    // Release this finger from the pinch tracker.
+    if (pointersRef.current.has(event.pointerId)) pointersRef.current.delete(event.pointerId);
+    if (pinchRef.current) {
+      if (pointersRef.current.size < 2) {
+        pinchRef.current = null;
+        if (zoom <= 1.02) setPan({ x: 0, y: 0 }); // snap back to centred when zoomed out
+      }
+      return;
+    }
     const drag = dragRef.current;
     dragRef.current = null;
     if (drag?.swipe) {

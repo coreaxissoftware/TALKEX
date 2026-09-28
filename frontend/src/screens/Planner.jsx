@@ -20,6 +20,7 @@ export default function Planner({ toast, onOpenChat, chats, onJoinCall, me }) {
   const [editingItem, setEditingItem] = useState(null);
   const [pickingChat, setPickingChat] = useState(false); // false | 'instant' | 'schedule'
   const [schedulingChat, setSchedulingChat] = useState(null);
+  const [schedulingNoGroup, setSchedulingNoGroup] = useState(false); // schedule with no group
 
   function reload() {
     setLoading(true);
@@ -96,7 +97,7 @@ export default function Planner({ toast, onOpenChat, chats, onJoinCall, me }) {
     setStartingQuick(true);
     try {
       const { chat, invite_code } = await Meetings.quickStart({ title: "Instant meeting" });
-      const link = `https://web.talkex.in/?invite=${invite_code}`;
+      const link = `https://meet.talkex.in/?invite=${invite_code}`;
       try {
         await navigator.clipboard.writeText(link);
         toast("Meeting started — invite link copied to share");
@@ -150,17 +151,21 @@ export default function Planner({ toast, onOpenChat, chats, onJoinCall, me }) {
         <Button onClick={newInstantMeeting} disabled={startingQuick} style={{ flex: 1 }}>
           {startingQuick ? "Starting…" : "🎥 New Meeting"}
         </Button>
-        <Button onClick={() => setPickingChat("schedule")} variant="ghost" style={{ flex: 1 }}>
+        {/* Schedule a meeting with NO group needed — a fresh room + auto link. */}
+        <Button onClick={() => setSchedulingNoGroup(true)} variant="ghost" style={{ flex: 1 }}>
           📅 Schedule
         </Button>
       </div>
-      {/* Secondary: start a meeting inside a group you already have (rings
-          its members), for when the meeting belongs to an existing team
-          rather than an ad-hoc room. */}
-      <div style={{ padding: "8px 16px 0" }}>
+      {/* Secondary: schedule/meet inside a group you already have (rings its
+          members), for when the meeting belongs to an existing team. */}
+      <div style={{ padding: "8px 16px 0", display: "flex", gap: 8 }}>
         <Button onClick={() => setPickingChat("instant")} variant="ghost"
-                style={{ width: "100%", fontSize: 13 }}>
-          👥 Meet in an existing group
+                style={{ flex: 1, fontSize: 13 }}>
+          👥 Meet in a group
+        </Button>
+        <Button onClick={() => setPickingChat("schedule")} variant="ghost"
+                style={{ flex: 1, fontSize: 13 }}>
+          📅 Schedule in a group
         </Button>
       </div>
 
@@ -318,11 +323,29 @@ export default function Planner({ toast, onOpenChat, chats, onJoinCall, me }) {
                            && confirm("Share this meeting's link now?")) {
                          Chats.createInvite(schedulingChat.id)
                            .then(async ({ invite_code: code }) => {
-                             const url = `https://web.talkex.in/?invite=${code}`;
+                             const url = `https://meet.talkex.in/?invite=${code}`;
                              if (navigator.share) await navigator.share({ url, text: `Join ${schedulingChat.name || "the chat"} on TalkEx` });
                              else { await navigator.clipboard.writeText(url); toast("Link copied"); }
                            })
                            .catch((problem) => toast(problem.message || "Could not create a link"));
+                       }
+                     }}/>
+      )}
+      {/* Group-less scheduling — server creates the room + auto link. */}
+      {schedulingNoGroup && (
+        <MeetingSheet chat={null} toast={toast}
+                     onClose={() => setSchedulingNoGroup(false)}
+                     onCreated={async (result) => {
+                       setSchedulingNoGroup(false);
+                       setTab("meetings");
+                       reload();
+                       const code = result?.invite_code;
+                       if (code) {
+                         const url = `https://meet.talkex.in/?invite=${code}`;
+                         try {
+                           if (navigator.share) await navigator.share({ url, text: "Join my meeting on TalkEx" });
+                           else { await navigator.clipboard.writeText(url); toast("Meeting link copied"); }
+                         } catch { /* user dismissed the share sheet */ }
                        }
                      }}/>
       )}

@@ -70,6 +70,7 @@ from models import (
     CreateLabelRequest, CreateMeetingRequest, CreateProductRequest, CreateSubChannelRequest,
     CreateTemplateRequest, CreateTopicRequest, CreateWebhookRequest,
     CreateBreakoutRoomsRequest, DisappearingRequest, InstantMeetingRequest, QuickMeetingRequest,
+    QuickScheduleRequest, GuestJoinRequest,
     EditMessageRequest, FeedbackRequest, ForwardRequest, ForwardStoryRequest, HighlightStoryRequest,
     LiveLocationUpdateRequest, LoginRequest,
     MatchContactsRequest,
@@ -6683,6 +6684,120 @@ async def quick_start_meeting(request: QuickMeetingRequest, user: dict = Depends
         "meeting": meeting,
         "chat": get_chat(chat_id, user),
         "invite_code": invite_code,
+    }
+
+
+@app.post("/meetings/quick-schedule")
+async def quick_schedule_meeting(request: QuickScheduleRequest, user: dict = Depends(current_user)):
+    """
+    Schedule a meeting with NO pre-existing group — the counterpart to
+    /meetings/quick-start, but for a FUTURE time. Spins up a fresh ad-hoc group
+    room, generates a shareable invite code, and creates the meeting as
+    'scheduled' (not live) with an auto-generated join link. The room then shows
+    in the participants' chat list and the meeting in their Scheduled tab.
+    """
+    if request.starts_at <= time.time():
+        raise HTTPException(400, "starts_at must be in the future")
+
+    member_ids = set(request.member_ids) - {user["id"]}
+    if len(member_ids) + 1 > MAX_GROUP_MEMBERS:
+        raise HTTPException(400, f"A meeting can have at most {MAX_GROUP_MEMBERS} people")
+
+    title = request.title.strip() or "Meeting"
+    chat_id = new_id("group")
+    now = time.time()
+    invite_code = secrets.token_urlsafe(8)
+    # Auto-generated shareable join link (the deployed web origin + invite code)
+    # — created the moment the meeting is, so there's always a link to share.
+    join_url = f"https://meet.talkex.in/?invite={invite_code}"
+
+    with db.transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO chats (id, type, name, color, avatar_letter, owner_id, created_at, invite_code)
+            VALUES (?, 'group', ?, '#6366f1', ?, ?, ?, ?)
+            """,
+            (chat_id, title, title[0].upper(), user["id"], now, invite_code),
+        )
+        conn.execute(
+            "INSERT INTO chat_members (chat_id, user_id, role, joined_at) VALUES (?, ?, 'owner', ?)",
+            (chat_id, user["id"], now),
+        )
+        for member_id in member_ids:
+            conn.execute(
+                "INSERT OR IGNORE INTO chat_members (chat_id, user_id, role, joined_at) "
+                "VALUES (?, ?, 'member', ?)",
+                (chat_id, member_id, now),
+            )
+
+    meeting = await _create_meeting_row(
+        chat_id, user["id"], title, request.agenda, request.starts_at,
+        request.duration_min, join_url, request.reminder_min,
+        [], "scheduled",
+        waiting_room=request.waiting_room, password=request.password,
+    )
+    return {
+        "meeting": meeting,
+        "chat": get_chat(chat_id, user),
+        "invite_code": invite_code,
+    }
+
+
+@app.post("/meetings/guest-join")
+def guest_join_meeting(request: GuestJoinRequest, http_request: Request):
+    """
+    Join a meeting on meet.talkex.in as a GUEST — no account, no OTP. Given a
+    meeting's invite code and a display name, the server creates a throwaway
+    guest user, adds it to the meeting room and returns a session token, so the
+    guest lands straight in the meeting. Rate-limited per IP so it can't be used
+    to mint accounts in bulk.
+    """
+    ip_register_rate_limiter.check(client_ip(http_request))
+
+    chat = db.query_one("SELECT * FROM chats WHERE invite_code = ?", (request.invite_code,))
+    if not chat:
+        raise HTTPException(404, "That meeting link is invalid or expired")
+    # Guests may only enter a room that actually has a meeting — this endpoint
+    # must not become a way to slip into an ordinary group by its invite code.
+    meeting = db.query_one(
+        "SELECT id, status FROM meetings WHERE chat_id = ? AND status IN ('scheduled', 'live') "
+        # A live meeting first so a guest joining a room that has both a live and
+        # a future meeting drops into the one that's actually running.
+        "ORDER BY (status = 'live') DESC, starts_at LIMIT 1",
+        (chat["id"],),
+    )
+    if not meeting:
+        raise HTTPException(404, "No active meeting for this link")
+
+    name = request.name.strip() or "Guest"
+    user_id = new_id("user")
+    username = f"guest_{secrets.token_hex(4)}"
+    now = time.time()
+    db.execute(
+        """
+        INSERT INTO users (id, name, username, phone, bio, color, avatar_letter,
+                           password_hash, created_at, last_seen, is_guest)
+        VALUES (?, ?, ?, '', '', ?, ?, ?, ?, ?, 1)
+        """,
+        (
+            user_id, name, username, avatar_color_for(user_id), name[0].upper(),
+            auth.hash_password(secrets.token_urlsafe(32)), now, now,
+        ),
+    )
+    db.execute(
+        "INSERT OR IGNORE INTO chat_members (chat_id, user_id, role, joined_at) "
+        "VALUES (?, ?, 'member', ?)",
+        (chat["id"], user_id, now),
+    )
+    token = start_session(user_id, "Guest (meet.talkex.in)")
+    user = db.query_one("SELECT * FROM users WHERE id = ?", (user_id,))
+    return {
+        "token": token,
+        "user": public_user(user),
+        "chat_id": chat["id"],
+        "invite_code": request.invite_code,
+        "meeting_id": meeting["id"],
+        "meeting_status": meeting["status"],
     }
 
 

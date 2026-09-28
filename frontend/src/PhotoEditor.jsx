@@ -46,6 +46,8 @@ const OUTPUT_LONG_EDGE_HD = 2400;
 const TABS = [
   { key: "adjust", label: "Adjust", tools: [
     { key: "crop", label: "Crop" },
+    { key: "aspect", label: "Ratio" },
+    { key: "angle", label: "Angle" },
     { key: "rotate", label: "Rotate" },
     { key: "flip", label: "Flip" },
     { key: "tune", label: "Tune" },
@@ -182,8 +184,29 @@ function ShapeIcon({ color = "#fff", size = 20 }) {
   );
 }
 
+// Ratio (fixed aspect-ratio picker) — overlapping frames suggesting choices.
+function AspectIcon({ color = "#fff", size = 20 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="6" width="13" height="12" rx="1.5"/>
+      <path d="M19 9v9a1.5 1.5 0 01-1.5 1.5H8" opacity="0.55"/>
+    </svg>
+  );
+}
+// Angle (fine straighten dial) — a tilted line over a baseline, protractor-like.
+function AngleIcon({ color = "#fff", size = 20 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 19h16"/>
+      <path d="M4 19L18 8"/>
+      <path d="M4 19a8 8 0 016.5-7.85"/>
+    </svg>
+  );
+}
+
 const TOOL_ICON_MAP = {
-  crop: CropIcon, rotate: RotateIcon, flip: FlipIcon, tune: TuneIcon,
+  crop: CropIcon, aspect: AspectIcon, angle: AngleIcon,
+  rotate: RotateIcon, flip: FlipIcon, tune: TuneIcon,
   draw: PenIcon, highlighter: MarkerIcon, eraser: EraserIcon,
   text: TextIcon, sticker: StickerIcon, shape: ShapeIcon,
 };
@@ -368,6 +391,13 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
   const [cropActive, setCropActive] = useState(false);
   const [fineAngle, setFineAngle] = useState(0); // -45 to 45 degrees fine rotation
 
+  // Actual space the editing stage has RIGHT NOW. The image is fit into this,
+  // so when a tool panel (Ratio / Angle / Tune) opens at the bottom and the
+  // stage shrinks, the image zooms out to stay whole on screen instead of the
+  // panel overlapping it. Measured live with a ResizeObserver.
+  const stageRef = useRef(null);
+  const [avail, setAvail] = useState({ w: VIEWPORT_MAX_WIDTH, h: VIEWPORT_MAX_HEIGHT });
+
   // Pinch-to-zoom state
   const pinchRef = useRef(null);
 
@@ -375,6 +405,24 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
     || tool === "sticker" || tool === "shape";
 
   useEffect(() => { injectEditorStyles(); }, []);
+
+  // Track the stage's live size so the viewport can be fit into whatever space
+  // is actually available (shrinks when a bottom tool panel opens).
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const measure = () => {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) setAvail({ w: r.width, h: r.height });
+    };
+    measure();
+    let ro;
+    if (typeof ResizeObserver !== "undefined") {
+      ro = new ResizeObserver(measure);
+      ro.observe(el);
+    }
+    return () => ro?.disconnect();
+  }, []);
 
   const adjustmentCss = (brightness !== 100 || contrast !== 100 || saturation !== 100)
     ? `brightness(${brightness / 100}) contrast(${contrast / 100}) saturate(${saturation / 100})`
@@ -438,10 +486,14 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
   // crop). This is what makes a portrait photo / 9:16 crop show whole and stay
   // clear of the tools below, instead of overflowing off the editing area.
   const _targetAspect = aspect.ratio || (rotatedSrc ? rotatedSrc.w / rotatedSrc.h : 1);
-  let viewportW = VIEWPORT_MAX_WIDTH;
+  // Cap by the live stage size (minus a small gutter) as well as the absolute
+  // maxima, so the image always fits the space that's actually there.
+  const _maxW = Math.min(VIEWPORT_MAX_WIDTH, (avail.w || VIEWPORT_MAX_WIDTH) - 8);
+  const _maxH = Math.min(VIEWPORT_MAX_HEIGHT, (avail.h || VIEWPORT_MAX_HEIGHT) - 8);
+  let viewportW = _maxW;
   let viewportH = viewportW / _targetAspect;
-  if (viewportH > VIEWPORT_MAX_HEIGHT) {
-    viewportH = VIEWPORT_MAX_HEIGHT;
+  if (viewportH > _maxH) {
+    viewportH = _maxH;
     viewportW = viewportH * _targetAspect;
   }
 
@@ -833,10 +885,18 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
 
   const rotatedUrl = useMemo(() => (rotatedSrc ? rotatedSrc.previewCanvas.toDataURL() : null), [rotatedSrc]);
 
-  // Activate/deactivate crop mode
+  // Activate/deactivate crop mode. The crop frame is shown for all three
+  // crop-family tools: free Crop, fixed Ratio, and straighten Angle (so you
+  // can see and adjust the frame while picking a ratio or straightening).
   useEffect(() => {
-    setCropActive(activeTab === "adjust" && tool === "crop");
+    setCropActive(activeTab === "adjust" && (tool === "crop" || tool === "aspect" || tool === "angle"));
   }, [activeTab, tool]);
+
+  // Picking the Crop tool means "free crop right now" — reset any previously
+  // chosen fixed ratio to Free so the drag is unconstrained.
+  useEffect(() => {
+    if (tool === "crop") setAspect(ASPECTS[0]);
+  }, [tool]);
 
   async function done() {
     if (!rotatedSrc) return;
@@ -1227,8 +1287,8 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
         </div>
       </div>
 
-      {/* Viewport */}
-      <div style={{
+      {/* Viewport stage — measured live so the image fits the remaining space */}
+      <div ref={stageRef} style={{
         flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center",
         overflow: "hidden",
       }}>
@@ -1291,12 +1351,14 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
         {/* ADJUST tab — Aspect pills + Brightness/Contrast/Saturation */}
         {activeTab === "adjust" && (
           <div style={{ padding: "8px 16px" }}>
-            {/* Crop tool → aspect ratio pills + fine-rotation dial. Nothing in
-                this panel shows until a tool is picked from the bottom bar, so
-                the sliders no longer sit here permanently. */}
-            {tool === "crop" && (<>
-            {/* Aspect ratio pills */}
-            <div style={{ display: "flex", gap: 8, marginBottom: 10, overflowX: "auto" }}>
+            {/* Crop tool → free crop only, no panel row of its own (the aspect
+                is reset to Free by an effect below). Fixed ratios live under the
+                Ratio tool, straightening under Angle. */}
+
+            {/* Ratio tool → fixed aspect-ratio picker (was previously stuck at
+                the top of the crop panel). */}
+            {tool === "aspect" && (
+            <div style={{ display: "flex", gap: 8, marginBottom: 4, overflowX: "auto", padding: "4px 0" }}>
               {ASPECTS.map((option) => (
                 <div key={option.key} onClick={() => setAspect(option)} style={{
                   padding: "6px 14px", borderRadius: 20, fontSize: 12.5, flexShrink: 0, cursor: "pointer",
@@ -1306,7 +1368,11 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
                 }}>{option.label}</div>
               ))}
             </div>
-            {/* Fine rotation dial — WhatsApp-style curved ruler */}
+            )}
+
+            {/* Angle tool → fine-rotation (straighten) dial — WhatsApp-style
+                curved ruler. */}
+            {tool === "angle" && (
             <div style={{ position: "relative", height: 48, marginBottom: 8, overflow: "hidden" }}>
               <svg viewBox="0 0 340 48" width="100%" height="48" style={{ display: "block" }}>
                 {/* Arc path for the curved ruler */}
@@ -1353,7 +1419,7 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
                 }}>Reset</div>
               )}
             </div>
-            </>)}
+            )}
 
             {/* Tune tool → Brightness / Contrast / Saturation (shown only when
                 the Tune tool is active, not permanently). */}
@@ -1503,7 +1569,14 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
         {/* Tool buttons for active tab */}
         {TABS.find((t) => t.key === activeTab)?.tools.length > 0 && (
           <div style={{
-            display: "flex", gap: 6, justifyContent: "center", marginBottom: 8,
+            display: "flex", gap: 6, marginBottom: 8,
+            // The Adjust tab now has 6 tools (crop / ratio / angle / rotate /
+            // flip / tune) — more than fit a narrow phone, so let the row
+            // scroll horizontally instead of squishing the buttons. Tabs with a
+            // few tools still centre; the crowded one starts at the left so the
+            // first tool isn't clipped by centring the overflow.
+            justifyContent: (TABS.find((t) => t.key === activeTab).tools.length > 4) ? "flex-start" : "center",
+            overflowX: "auto", flexWrap: "nowrap", WebkitOverflowScrolling: "touch",
           }}>
             {TABS.find((t) => t.key === activeTab).tools.map((t, i) => {
               const IconComponent = TOOL_ICON_MAP[t.key];
@@ -1517,7 +1590,7 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
                   setTool((current) => current === t.key ? null : t.key);
                   setShowStickers(false);
                 }} style={{
-                  display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
+                  display: "flex", flexDirection: "column", alignItems: "center", gap: 4, flexShrink: 0,
                   padding: "8px 14px", borderRadius: 12, cursor: "pointer",
                   background: isActive ? `${G.accent}22` : "#ffffff0d",
                   border: `1px solid ${isActive ? G.accent : "transparent"}`,
