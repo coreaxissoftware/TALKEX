@@ -1052,7 +1052,11 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
 
     return (
       <div
-        style={{ position: "absolute", inset: 0, zIndex: 5 }}
+        // touchAction:none is the fix for "the crop handle only nudges a
+        // little per swipe": without it a touch drag is claimed by the browser
+        // as a scroll gesture and the pointer drag is cancelled after a few
+        // pixels, so the handle crept instead of following the finger.
+        style={{ position: "absolute", inset: 0, zIndex: 5, touchAction: "none" }}
         onPointerDown={onCropPointerDown}
         onPointerMove={onCropPointerMove}
         onPointerUp={onCropPointerUp}

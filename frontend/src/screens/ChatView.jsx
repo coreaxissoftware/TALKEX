@@ -3940,6 +3940,7 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
   const enterToSend = useEnterToSend();
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
+  const [cameraOpen, setCameraOpen] = useState(false); // direct camera button in the composer
   const [quickReplyOpen, setQuickReplyOpen] = useState(false);
   const [cannedReplies, setCannedReplies] = useState([]);
   const inputRef = useRef(null);
@@ -4203,6 +4204,17 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
       <IconButton onClick={toggleEmoji} label={emojiOpen ? "Keyboard" : "Emoji"} style={{ fontSize: 19 }}>
         {emojiOpen ? I.keyboard(G.sub, 20) : "🙂"}
       </IconButton>
+      {/* Direct camera — snap a photo/video straight from the composer, without
+          going through the +/Attach sheet. Captured media rides the same
+          caption + preview path as the gallery picker (onFilesPicked). */}
+      <IconButton onClick={() => { setEmojiOpen(false); setAttachOpen(false); inputRef.current?.blur(); setCameraOpen(true); }} label="Camera">
+        {I.camera ? I.camera(G.sub, 21) : "📷"}
+      </IconButton>
+      {cameraOpen && (
+        <CameraCapture
+          onCapture={(file) => { setCameraOpen(false); onFilesPicked?.([file], null); }}
+          onClose={() => setCameraOpen(false)}/>
+      )}
 
       <div style={{ flex: 1, position: "relative", display: "flex", alignItems: "center" }}>
         <textarea
@@ -4949,17 +4961,22 @@ function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker
              onChange={pickToScan} style={{ display: "none" }}/>
       <input ref={audioInput} type="file" accept="audio/*" onChange={pickAudio} style={{ display: "none" }}/>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, padding: 16 }}>
+      {/* Vertical list (icon + label rows) — quicker to scan and tap than a
+          grid, and matches the modern messenger attach menu. */}
+      <div style={{ display: "flex", flexDirection: "column", padding: "6px 8px 12px" }}>
         {options.map((option) => (
-          <div key={option.label} onClick={option.action} className="tx-attach-tile"
-               style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, cursor: "pointer" }}>
+          <div key={option.label} onClick={option.action} className="tx-attach-row"
+               style={{
+                 display: "flex", alignItems: "center", gap: 14, padding: "11px 12px",
+                 cursor: "pointer", borderRadius: 12,
+               }}>
             <div style={{
-              width: 58, height: 58, borderRadius: "50%", background: `${option.color}22`,
-              display: "flex", alignItems: "center", justifyContent: "center",
+              width: 40, height: 40, borderRadius: "50%", background: `${option.color}22`,
+              display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
             }}>
-              {option.icon(option.color, 24)}
+              {option.icon(option.color, 20)}
             </div>
-            <div style={{ fontSize: 12, color: G.sub }}>{option.label}</div>
+            <div style={{ fontSize: 15, fontWeight: 500, color: G.text }}>{option.label}</div>
           </div>
         ))}
       </div>
@@ -7877,6 +7894,8 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
     if (drag?.swipe) {
       const dx = event.clientX - drag.x;
       const dy = event.clientY - drag.y;
+      // Swipe DOWN to dismiss the viewer (Instagram/WhatsApp gesture).
+      if (dy > 90 && Math.abs(dy) > Math.abs(dx)) { onClose(); return; }
       if (Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy)) {
         // Neighbour is already preloaded, so the switch is instant; the index
         // effect resets swipeDX to 0 and the transition eases it into place.
@@ -7892,7 +7911,16 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
   }
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "#0b0b0b", zIndex: 1250, display: "flex", flexDirection: "column" }}>
+    <div onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+         style={{
+           position: "fixed", inset: 0, zIndex: 1250, display: "flex", flexDirection: "column",
+           // Translucent, blurred backdrop (the chat shows softly behind) —
+           // a modern glassy viewer rather than a flat black screen. Tapping
+           // any empty area (or swiping down) closes it.
+           background: "rgba(8,8,10,0.72)",
+           backdropFilter: "blur(18px) saturate(1.3)",
+           WebkitBackdropFilter: "blur(18px) saturate(1.3)",
+         }}>
       {/* Top bar */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 16px", flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, color: "#fff" }}>
@@ -7917,7 +7945,9 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
       </div>
 
       {/* Stage */}
-      <div onWheel={onWheel} style={{
+      <div onWheel={onWheel}
+           onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+           style={{
         flex: 1, minHeight: 0, position: "relative", display: "flex",
         alignItems: "center", justifyContent: "center", overflow: "hidden",
       }}>
