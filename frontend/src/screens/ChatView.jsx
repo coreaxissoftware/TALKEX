@@ -4206,10 +4206,14 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
       </IconButton>
       {/* Direct camera — snap a photo/video straight from the composer, without
           going through the +/Attach sheet. Captured media rides the same
-          caption + preview path as the gallery picker (onFilesPicked). */}
-      <IconButton onClick={() => { setEmojiOpen(false); setAttachOpen(false); inputRef.current?.blur(); setCameraOpen(true); }} label="Camera">
-        {I.camera ? I.camera(G.sub, 21) : "📷"}
-      </IconButton>
+          caption + preview path as the gallery picker (onFilesPicked). Hidden
+          the moment you start typing, exactly like the mic button, so the text
+          field gets the room. */}
+      {!value.trim() && (
+        <IconButton onClick={() => { setEmojiOpen(false); setAttachOpen(false); inputRef.current?.blur(); setCameraOpen(true); }} label="Camera">
+          {I.camera ? I.camera(G.sub, 21) : "📷"}
+        </IconButton>
+      )}
       {cameraOpen && (
         <CameraCapture
           onCapture={(file) => { setCameraOpen(false); onFilesPicked?.([file], null); }}
@@ -4935,11 +4939,17 @@ function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker
 
   return (
     <div onClick={(e) => e.stopPropagation()} style={{
-      // Same edge-to-edge bottom-panel chrome as the emoji picker.
+      // Translucent, blurred glass — the chat shows softly behind the panel
+      // (modern messenger look) rather than a flat solid sheet. `G.surface + d9`
+      // is the theme's own surface colour at ~85% opacity, so it stays correct
+      // in both light and dark, with the backdrop blur doing the frosted effect.
       position: "absolute", bottom: "100%", left: 0, right: 0,
-      background: G.surface, borderTop: `1px solid ${G.border}`,
+      background: `${G.surface}d9`,
+      backdropFilter: "blur(20px) saturate(1.4)",
+      WebkitBackdropFilter: "blur(20px) saturate(1.4)",
+      borderTop: `1px solid ${G.border}`,
       borderTopLeftRadius: 16, borderTopRightRadius: 16,
-      boxShadow: `0 -4px 16px ${G.border}`, overflow: "hidden",
+      boxShadow: `0 -4px 24px rgba(0,0,0,0.28)`, overflow: "hidden",
       maxHeight: "min(340px, 55vh)", overflowY: "auto", zIndex: 20,
       animation: "txAttachUp 0.18s ease-out",
     }}>
