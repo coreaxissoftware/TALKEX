@@ -1494,7 +1494,11 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
             if (bgLongPressTimer.current) { clearTimeout(bgLongPressTimer.current); bgLongPressTimer.current = null; }
           }}
           style={{
-          position: "relative", zIndex: 1, height: "100%", overflowY: "auto", padding: "12px 14px",
+          // overflowX MUST be explicit: with only overflowY:auto set, CSS
+          // computes overflow-x to `auto` too, so any too-wide child (a long
+          // unbroken URL, a wide embed) makes the whole chat scroll sideways
+          // on phones. Pinning it to hidden keeps scrolling strictly vertical.
+          position: "relative", zIndex: 1, height: "100%", overflowY: "auto", overflowX: "hidden", padding: "12px 14px",
         }}>
         {/* E2EE system banner at top of messages */}
         {!loading && (
@@ -7744,6 +7748,7 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
   const [blobUrl, setBlobUrl] = useState(null);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [swipeDX, setSwipeDX] = useState(0); // live horizontal drag offset for a smooth swipe
   const [editing, setEditing] = useState(false);
   const [editFile, setEditFile] = useState(null);
   const dragRef = useRef(null);
@@ -7761,7 +7766,17 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
     return () => { cancelled = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
   }, [attachmentId]);
 
-  useEffect(() => { setZoom(1); setPan({ x: 0, y: 0 }); }, [index]);
+  useEffect(() => { setZoom(1); setPan({ x: 0, y: 0 }); setSwipeDX(0); }, [index]);
+
+  // Warm the neighbouring media into the blob cache so a swipe to the next/
+  // previous photo shows instantly instead of flashing a spinner while it
+  // downloads — the main reason paging through a gallery felt janky.
+  useEffect(() => {
+    [index - 1, index + 1].forEach((i) => {
+      const a = items[i]?.payload?.attachment_id;
+      if (a) Uploads.fetchBlobUrl(a, { cache: true }).catch(() => {});
+    });
+  }, [index, items]);
 
   useEffect(() => {
     function onKey(event) {
@@ -7829,7 +7844,16 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
     event.currentTarget.setPointerCapture?.(event.pointerId);
   }
   function onImgPointerMove(event) {
-    if (!dragRef.current || dragRef.current.swipe) return;
+    if (!dragRef.current) return;
+    if (dragRef.current.swipe) {
+      // At normal zoom the image tracks the finger horizontally, WhatsApp-
+      // style. Resistance at the ends (nothing to page to) so it rubber-bands
+      // instead of sliding off into empty space.
+      let dx = event.clientX - dragRef.current.x;
+      if ((dx > 0 && index === 0) || (dx < 0 && index === items.length - 1)) dx *= 0.28;
+      setSwipeDX(dx);
+      return;
+    }
     setPan({ x: dragRef.current.pan.x + (event.clientX - dragRef.current.x), y: dragRef.current.pan.y + (event.clientY - dragRef.current.y) });
   }
   function onImgPointerUp(event) {
@@ -7839,9 +7863,12 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
       const dx = event.clientX - drag.x;
       const dy = event.clientY - drag.y;
       if (Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy)) {
-        if (dx > 0 && index > 0) onIndexChange(index - 1);
-        else if (dx < 0 && index < items.length - 1) onIndexChange(index + 1);
+        // Neighbour is already preloaded, so the switch is instant; the index
+        // effect resets swipeDX to 0 and the transition eases it into place.
+        if (dx > 0 && index > 0) { onIndexChange(index - 1); return; }
+        if (dx < 0 && index < items.length - 1) { onIndexChange(index + 1); return; }
       }
+      setSwipeDX(0); // not far enough (or at an end) → rubber-band back
     }
   }
 
@@ -7904,8 +7931,10 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
                onPointerUp={onImgPointerUp} onPointerCancel={onImgPointerUp}
                style={{
                  maxWidth: "96vw", maxHeight: "100%", objectFit: "contain",
-                 transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-                 transition: dragRef.current ? "none" : "transform 0.12s ease-out",
+                 transform: `translate(${pan.x + (zoom <= 1 ? swipeDX : 0)}px, ${pan.y}px) scale(${zoom})`,
+                 // While the finger is down, follow it 1:1 (no transition);
+                 // on release, ease the rubber-band / settle smoothly.
+                 transition: dragRef.current ? "none" : "transform 0.2s ease-out",
                  cursor: zoom > 1 ? "grab" : "default", touchAction: "none",
                }}/>
         )}

@@ -9,6 +9,20 @@ import { ensureLocaleLoaded } from './i18n.jsx'
 
 ensureLocaleLoaded(localStorage.getItem("talkex_lang"));
 
+// Self-heal a stale PWA after a new deploy: when a lazily-imported chunk 404s
+// (an already-open app's old index.html points at a hashed file the new build
+// replaced), Vite fires `vite:preloadError`. Reload once to pull the fresh
+// index + chunks instead of showing the "Something broke" screen. The 10s
+// timestamp guard prevents a reload loop while still allowing recovery on each
+// future deploy.
+window.addEventListener("vite:preloadError", () => {
+  const last = Number(sessionStorage.getItem("tx_preload_reload_at") || 0);
+  if (Date.now() - last > 10000) {
+    sessionStorage.setItem("tx_preload_reload_at", String(Date.now()));
+    window.location.reload();
+  }
+});
+
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <ErrorBoundary>
