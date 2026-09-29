@@ -46,6 +46,7 @@ export default function PdfDoc({ src, name, onClose, onDownloadOriginal, toast }
   const drawing = useRef(false);
   const scrollRef = useRef(null);
   const pinchRef = useRef(null); // { startDist, startZoom }
+  const urlsRef = useRef([]);    // page blob object-URLs to revoke on cleanup
 
   // ── Load + render every page PROGRESSIVELY ──────────────────────────────────
   useEffect(() => {
@@ -54,6 +55,9 @@ export default function PdfDoc({ src, name, onClose, onDownloadOriginal, toast }
     setTotal(0);
     setError(false);
     setZoom(1);
+    // Revoke any URLs from a previous document before loading the next.
+    urlsRef.current.forEach((u) => URL.revokeObjectURL(u));
+    urlsRef.current = [];
     (async () => {
       try {
         const buffer = await (await fetch(src)).arrayBuffer();
@@ -76,9 +80,13 @@ export default function PdfDoc({ src, name, onClose, onDownloadOriginal, toast }
           const ctx = canvas.getContext("2d");
           await page.render({ canvasContext: ctx, viewport }).promise;
           if (cancelled) return;
-          // Encode ONCE here (JPEG — smaller & faster than PNG) so React
-          // re-renders and scroll never re-encode the bitmap.
-          const url = canvas.toDataURL("image/jpeg", 0.82);
+          // Encode ONCE to a Blob object-URL (not a base64 data URL): a blob is
+          // far cheaper for the browser to hold and paint than a multi-MB base64
+          // string, which is what made rendering/scroll heavy on big pages.
+          const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.8));
+          if (cancelled) { return; }
+          const url = blob ? URL.createObjectURL(blob) : canvas.toDataURL("image/jpeg", 0.8);
+          if (blob) urlsRef.current.push(url);
           const pageObj = { canvas, url, width: canvas.width, height: canvas.height };
           // Append so page 1 shows immediately, then the rest stream in.
           setPages((prev) => (prev ? [...prev, pageObj] : [pageObj]));
@@ -90,7 +98,11 @@ export default function PdfDoc({ src, name, onClose, onDownloadOriginal, toast }
         if (!cancelled) setError(true);
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      urlsRef.current.forEach((u) => URL.revokeObjectURL(u));
+      urlsRef.current = [];
+    };
   }, [src]);
 
   useEffect(() => {
