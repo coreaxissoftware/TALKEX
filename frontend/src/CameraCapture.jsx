@@ -37,7 +37,8 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
   const [error, setError] = useState("");
   const [retryTick, setRetryTick] = useState(0);
   const [flashOn, setFlashOn] = useState(false);
-  const [needsTap, setNeedsTap] = useState(false); // WebView wouldn't autoplay — show a start overlay
+  const [needsTap, setNeedsTap] = useState(false); // WebView truly won't autoplay — show a start overlay
+  const [ready, setReady] = useState(false);       // true once the live preview is actually playing
   const [showGrid, setShowGrid] = useState(false);
   const [selfTimer, setSelfTimer] = useState(0); // 0 | 3 | 10 seconds
   const [countdown, setCountdown] = useState(null);
@@ -57,6 +58,7 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
       // granted yet, which looks like "the camera doesn't work". No-op on web.
       try { await ensurePermissions(["camera", "microphone"]); } catch { /* fall through to getUserMedia */ }
       setNeedsTap(false);
+      setReady(false);
       try {
         // Keep constraints SIMPLE — an over-specified request (a fixed 1080p, a
         // hard facingMode) makes some phone cameras hand back a black/frozen
@@ -91,13 +93,15 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
         const video = videoRef.current;
         if (video) {
           video.srcObject = stream;
-          // Some Android WebViews won't auto-start a MediaStream <video> even
-          // muted — retry play() a few times, and if it's still paused show a
-          // one-tap "start" overlay (a tap is a user gesture that always works).
-          for (let i = 0; i < 8 && !cancelled; i++) {
+          // Some Android WebViews take a few seconds to actually start rendering
+          // a MediaStream <video>. A "Starting camera…" overlay (below) covers
+          // the frozen poster meanwhile; here we keep nudging play() until it
+          // runs (onPlaying flips `ready`), and only fall back to a one-tap
+          // "start" overlay if it's still stuck after a long wait (~8s).
+          for (let i = 0; i < 32 && !cancelled; i++) {
             try { await video.play(); } catch { /* keep retrying */ }
             if (!video.paused) break;
-            await new Promise((r) => setTimeout(r, 200));
+            await new Promise((r) => setTimeout(r, 250));
           }
           if (!cancelled && video.paused) setNeedsTap(true);
         }
@@ -387,14 +391,33 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
                onPointerDown={onPreviewDown} onPointerMove={onPreviewMove} onPointerUp={onPreviewUp} onPointerCancel={onPreviewUp}>
             <video ref={videoRef} playsInline muted autoPlay disablePictureInPicture
               controls={false}
-              onLoadedMetadata={() => videoRef.current?.play().then(() => setNeedsTap(false)).catch(() => {})}
-              onCanPlay={() => videoRef.current?.play().then(() => setNeedsTap(false)).catch(() => {})}
-              onPlaying={() => setNeedsTap(false)}
-              onClick={() => { videoRef.current?.play().then(() => setNeedsTap(false)).catch(() => {}); }}
+              onLoadedMetadata={() => videoRef.current?.play().catch(() => {})}
+              onCanPlay={() => videoRef.current?.play().catch(() => {})}
+              onPlaying={() => { setReady(true); setNeedsTap(false); }}
+              onClick={() => { videoRef.current?.play().then(() => { setReady(true); setNeedsTap(false); }).catch(() => {}); }}
               style={{
                 width: "100%", height: "100%", objectFit: "cover",
                 transform: facing === "user" ? "scaleX(-1)" : "none",
+                // Hide the element (and its frozen poster) until it's actually
+                // playing — the loader below shows during the WebView warm-up.
+                opacity: ready ? 1 : 0,
               }}/>
+
+            {/* Warm-up loader — covers the WebView's frozen play-button poster
+                for the couple of seconds before the live stream starts. */}
+            {!ready && !needsTap && (
+              <div style={{
+                position: "absolute", inset: 0, zIndex: 2, background: "#000",
+                display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14,
+              }}>
+                <div style={{
+                  width: 44, height: 44, borderRadius: "50%",
+                  border: "3px solid #ffffff33", borderTopColor: "#fff",
+                  animation: "txCamSpin 0.8s linear infinite",
+                }}/>
+                <div style={{ color: "#ffffffcc", fontSize: 13.5, fontWeight: 500 }}>Starting camera…</div>
+              </div>
+            )}
 
             {/* If the WebView refused to autoplay the live stream, a single tap
                 (a real user gesture) always starts it — no more staring at a

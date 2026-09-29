@@ -20,6 +20,11 @@ import { checkSpam, getSpamSettings, setSpamSettings } from "../spamFilter.js";
 import { shouldAutoDownload } from "../mediaPrefs.js";
 import { logAdminAction, getAdminLog, clearAdminLog } from "../adminLog.js";
 import CameraCapture from "../CameraCapture.jsx";
+import { Capacitor } from "@capacitor/core";
+// On the native phone app, open the device's OWN camera app (reliable, high
+// quality) instead of the in-WebView getUserMedia camera, which can take
+// seconds to warm up. On the web we keep the in-app camera.
+const IS_NATIVE_APP = (() => { try { return !!Capacitor?.isNativePlatform?.(); } catch { return false; } })();
 import GifPicker from "../GifPicker.jsx";
 import { contactsAvailable, pickContacts } from "../nativeContacts.js";
 import { galleryAvailable, nativeSave, nativeShare, nativeShareFiles } from "../nativeGallery.js";
@@ -4046,10 +4051,11 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
   const enterToSend = useEnterToSend();
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
-  const [cameraOpen, setCameraOpen] = useState(false); // direct camera button in the composer
+  const [cameraOpen, setCameraOpen] = useState(false); // direct camera button in the composer (web only)
   const [quickReplyOpen, setQuickReplyOpen] = useState(false);
   const [cannedReplies, setCannedReplies] = useState([]);
   const inputRef = useRef(null);
+  const composerCamRef = useRef(null); // hidden native-camera input (phone app)
 
   // Dropping into edit mode selects the pre-filled text instead of just
   // parking the cursor at the end — the iOS/desktop-app convention for
@@ -4316,10 +4322,22 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
           the moment you start typing, exactly like the mic button, so the text
           field gets the room. */}
       {!value.trim() && (
-        <IconButton onClick={() => { setEmojiOpen(false); setAttachOpen(false); inputRef.current?.blur(); setCameraOpen(true); }} label="Camera">
+        <IconButton onClick={() => {
+          setEmojiOpen(false); setAttachOpen(false); inputRef.current?.blur();
+          if (IS_NATIVE_APP) composerCamRef.current?.click(); // native app → device camera
+          else setCameraOpen(true);                            // web → in-app camera
+        }} label="Camera">
           {I.camera ? I.camera(G.sub, 21) : "📷"}
         </IconButton>
       )}
+      {/* Native phone camera (image or video), routed through the same preview. */}
+      <input ref={composerCamRef} type="file" accept="image/*,video/*" capture="environment"
+             style={{ display: "none" }}
+             onChange={(e) => {
+               const file = e.target.files?.[0];
+               e.target.value = "";
+               if (file) onFilesPicked?.([file], null);
+             }}/>
       {cameraOpen && (
         <CameraCapture
           onCapture={(file) => { setCameraOpen(false); onFilesPicked?.([file], null); }}
@@ -5000,6 +5018,7 @@ function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker
   const docInput = useRef(null);
   const scanInput = useRef(null);
   const audioInput = useRef(null);
+  const attachCamRef = useRef(null); // hidden native-camera input (phone app)
 
   // Gallery button → in-app native grid when it's available (Android build),
   // otherwise the ordinary OS file picker. galleryAvailable() is a synchronous
@@ -5064,7 +5083,7 @@ function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker
   // as a set of distinct actions rather than one wall of identical buttons.
   const options = [
     { label: "Gallery", icon: I.image, color: "#7c5cff", action: openGallery },
-    { label: "Camera", icon: I.camera, color: "#e0245e", action: () => setCameraOpen(true) },
+    { label: "Camera", icon: I.camera, color: "#e0245e", action: () => { if (IS_NATIVE_APP) attachCamRef.current?.click(); else setCameraOpen(true); } },
     { label: "Location", icon: I.mapPin, color: "#22c55e", action: () => { onLocation(); onClose(); } },
     { label: "Contact", icon: I.contactCard, color: "#3b82f6", action: () => { onContact(); onClose(); } },
     { label: "Document", icon: I.doc, color: "#5b6ef5", action: () => docInput.current?.click() },
@@ -5115,6 +5134,13 @@ function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker
       <input ref={scanInput} type="file" accept="image/*" capture="environment"
              onChange={pickToScan} style={{ display: "none" }}/>
       <input ref={audioInput} type="file" accept="audio/*" onChange={pickAudio} style={{ display: "none" }}/>
+      {/* Native phone camera (image/video) → same caption/preview path. */}
+      <input ref={attachCamRef} type="file" accept="image/*,video/*" capture="environment"
+             onChange={(e) => {
+               const files = [...(e.target.files || [])];
+               e.target.value = "";
+               if (files.length && !files.some(tooBig)) { onFilesPicked(files, null); onClose(); }
+             }} style={{ display: "none" }}/>
 
       {/* In-app native gallery grid (Android). Rendered inline (not an early
           return) so the hidden inputs above stay mounted — that lets onFallback

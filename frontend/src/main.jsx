@@ -37,6 +37,7 @@ ensureLocaleLoaded(localStorage.getItem("talkex_lang"));
       -webkit-touch-callout: default;
     }
     @keyframes txRecBlink { 50% { opacity: 0.2; } }
+    @keyframes txCamSpin { to { transform: rotate(360deg); } }
   `;
   document.head.appendChild(style);
 
