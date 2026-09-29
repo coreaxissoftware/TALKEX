@@ -37,6 +37,7 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
   const [error, setError] = useState("");
   const [retryTick, setRetryTick] = useState(0);
   const [flashOn, setFlashOn] = useState(false);
+  const [needsTap, setNeedsTap] = useState(false); // WebView wouldn't autoplay — show a start overlay
   const [showGrid, setShowGrid] = useState(false);
   const [selfTimer, setSelfTimer] = useState(0); // 0 | 3 | 10 seconds
   const [countdown, setCountdown] = useState(null);
@@ -55,15 +56,21 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
       // getUserMedia can otherwise reject with no popup when they aren't
       // granted yet, which looks like "the camera doesn't work". No-op on web.
       try { await ensurePermissions(["camera", "microphone"]); } catch { /* fall through to getUserMedia */ }
+      setNeedsTap(false);
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: facing },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-          },
-          audio: true,
-        });
+        // Keep constraints SIMPLE — an over-specified request (a fixed 1080p, a
+        // hard facingMode) makes some phone cameras hand back a black/frozen
+        // frame that looks like "the camera doesn't work". Ask only for the
+        // facing side as a preference and let the device pick a good size.
+        let stream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: facing } }, audio: true });
+        } catch (withAudio) {
+          if (withAudio && withAudio.name === "NotAllowedError") throw withAudio;
+          // Some devices fail the combined audio+video grab — retry video-only so
+          // the preview still opens (a recording just won't carry sound).
+          stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: facing } } });
+        }
         if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
         streamRef.current = stream;
         const track = stream.getVideoTracks()[0];
@@ -84,7 +91,15 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
         const video = videoRef.current;
         if (video) {
           video.srcObject = stream;
-          await video.play().catch(() => {});
+          // Some Android WebViews won't auto-start a MediaStream <video> even
+          // muted — retry play() a few times, and if it's still paused show a
+          // one-tap "start" overlay (a tap is a user gesture that always works).
+          for (let i = 0; i < 8 && !cancelled; i++) {
+            try { await video.play(); } catch { /* keep retrying */ }
+            if (!video.paused) break;
+            await new Promise((r) => setTimeout(r, 200));
+          }
+          if (!cancelled && video.paused) setNeedsTap(true);
         }
         setError("");
       } catch (problem) {
@@ -372,13 +387,33 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
                onPointerDown={onPreviewDown} onPointerMove={onPreviewMove} onPointerUp={onPreviewUp} onPointerCancel={onPreviewUp}>
             <video ref={videoRef} playsInline muted autoPlay disablePictureInPicture
               controls={false}
-              onLoadedMetadata={() => videoRef.current?.play().catch(() => {})}
-              onCanPlay={() => videoRef.current?.play().catch(() => {})}
-              onClick={() => { if (videoRef.current?.paused) videoRef.current.play().catch(() => {}); }}
+              onLoadedMetadata={() => videoRef.current?.play().then(() => setNeedsTap(false)).catch(() => {})}
+              onCanPlay={() => videoRef.current?.play().then(() => setNeedsTap(false)).catch(() => {})}
+              onPlaying={() => setNeedsTap(false)}
+              onClick={() => { videoRef.current?.play().then(() => setNeedsTap(false)).catch(() => {}); }}
               style={{
                 width: "100%", height: "100%", objectFit: "cover",
                 transform: facing === "user" ? "scaleX(-1)" : "none",
               }}/>
+
+            {/* If the WebView refused to autoplay the live stream, a single tap
+                (a real user gesture) always starts it — no more staring at a
+                frozen play-button poster. */}
+            {needsTap && (
+              <div onClick={() => { videoRef.current?.play().then(() => setNeedsTap(false)).catch(() => {}); }}
+                   style={{
+                     position: "absolute", inset: 0, zIndex: 2, display: "flex", flexDirection: "column",
+                     alignItems: "center", justifyContent: "center", gap: 12, background: "#000000aa", cursor: "pointer",
+                   }}>
+                <div style={{
+                  width: 74, height: 74, borderRadius: "50%", border: "3px solid #fff",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}>
+                  <svg width="30" height="30" viewBox="0 0 24 24" fill="#fff"><path d="M8 5v14l11-7z"/></svg>
+                </div>
+                <div style={{ color: "#fff", fontSize: 14, fontWeight: 600 }}>Tap to start camera</div>
+              </div>
+            )}
 
             {/* Rule-of-thirds grid */}
             {showGrid && (
