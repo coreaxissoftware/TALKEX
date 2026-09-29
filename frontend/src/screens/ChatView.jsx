@@ -1465,6 +1465,16 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
           <div style={{ flex: 1, fontSize: 13, fontWeight: 600 }}>
             {selectedMsgIds.size} selected
           </div>
+          {/* When exactly one is selected, a "more" button opens the full
+              per-message menu (reply / star / copy / pin / react / info …) so
+              nothing from the long-press menu is lost in selection mode. */}
+          {selectedMsgIds.size === 1 && (
+            <div onClick={() => {
+              const only = messages.find((x) => x.id === [...selectedMsgIds][0]);
+              if (only) setMenuFor(only);
+            }} style={{ cursor: "pointer", fontSize: 20, lineHeight: 1, color: G.accent, padding: "0 2px" }}
+                 title="More actions">⋮</div>
+          )}
           {canForwardHere && (
             <div onClick={() => {
               if (!selectedMsgIds.size) return;
@@ -1677,18 +1687,28 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
                         if (message.pending || message.queued || message.failed || message.deleted_at || message.expired) return;
                         react(message, "❤️");
                       }}
+                      selectMode={selectMode}
+                      selected={selectedMsgIds.has(message.id)}
                       onLongPress={() => {
                         if (message.pending || message.queued || message.failed) return;
-                        haptic("medium"); // the tactile "grabbed it" cue when the menu/selection opens
-                        if (selectMode) {
-                          setSelectedMsgIds((prev) => {
-                            const n = new Set(prev);
-                            if (n.has(message.id)) n.delete(message.id); else n.add(message.id);
-                            return n;
-                          });
-                        } else {
-                          setMenuFor(message);
+                        haptic("medium"); // the tactile "grabbed it" cue
+                        // Touch-and-hold enters selection mode with this message
+                        // already ticked (WhatsApp-style); a further tap/hold on
+                        // any message toggles it.
+                        if (!selectMode) {
+                          setSelectMode(true);
+                          setSelectedMsgIds(new Set([message.id]));
+                          return;
                         }
+                        setSelectedMsgIds((prev) => {
+                          const n = new Set(prev);
+                          if (n.has(message.id)) n.delete(message.id); else n.add(message.id);
+                          return n;
+                        });
+                      }}
+                      onMenu={() => {
+                        if (message.pending || message.queued || message.failed) return;
+                        setMenuFor(message);
                       }}
                       onSwipeReply={() => {
                         if (message.pending || message.queued || message.failed) return;
@@ -2585,7 +2605,7 @@ const SWIPE_INFO_TRIGGER = -56;
 const SWIPE_INFO_MAX = -74;
 
 const Bubble = memo(function Bubble({ message, me, chatAccent, animateIn, translatedText, replyTarget, meetingUpdates, isPinned, isRead, isDelivered, signature,
-                  commentsOn, onComments, onDoubleTap, onLongPress, onSwipeReply, onSwipeInfo, onVote, onForward, onOpenMedia, onCallAgain, onJoinMeeting, onCancelUpload, onRetry, onRemoveFailed, uploadPct, toast }) {
+                  commentsOn, onComments, onDoubleTap, onLongPress, onMenu, selectMode, selected, onSwipeReply, onSwipeInfo, onVote, onForward, onOpenMedia, onCallAgain, onJoinMeeting, onCancelUpload, onRetry, onRemoveFailed, uploadPct, toast }) {
   const mine = message.sender_id === me.id;
   const gone = message.deleted_at || message.expired;
   const spamSettings = getSpamSettings();
@@ -2657,6 +2677,16 @@ const Bubble = memo(function Bubble({ message, me, chatAccent, animateIn, transl
   }
   function handlePointerUp(event) {
     clearPressTimer();
+    const onMedia = event.target.closest?.("[data-media]");
+    // In selection mode a plain tap/click anywhere on the bubble toggles this
+    // message's selection (WhatsApp-style), instead of double-tap-react or menu.
+    if (selectMode && !longPressFired.current) {
+      onLongPress();
+      longPressFired.current = false;
+      swipeAxis.current = null;
+      setDragX(0);
+      return;
+    }
     if (event.pointerType === "touch" && !longPressFired.current && !gone) {
       const now = Date.now();
       if (now - lastTapTime.current < 300) {
@@ -2668,9 +2698,9 @@ const Bubble = memo(function Bubble({ message, me, chatAccent, animateIn, transl
       }
       lastTapTime.current = now;
     }
-    if (event.pointerType !== "touch" && !longPressFired.current
-        && !event.target.closest?.("[data-media]")) {
-      onLongPress();
+    // Desktop: a left-click that isn't on the media itself opens the action menu.
+    if (event.pointerType !== "touch" && !longPressFired.current && !onMedia) {
+      onMenu?.();
     }
     longPressFired.current = false;
     if (swipeAxis.current === "x") {
@@ -2688,7 +2718,7 @@ const Bubble = memo(function Bubble({ message, me, chatAccent, animateIn, transl
   const pressHandlers = {
     onPointerDown: handlePointerDown, onPointerMove: handlePointerMove,
     onPointerUp: handlePointerUp, onPointerCancel: handlePointerCancel,
-    onContextMenu: (event) => { event.preventDefault(); onLongPress(); },
+    onContextMenu: (event) => { event.preventDefault(); (selectMode ? onLongPress : (onMenu || onLongPress))(); },
     onDoubleClick: (event) => { if (!gone && !event.target.closest?.("[data-media]")) onDoubleTap?.(); },
   };
   const swipeStyle = dragX ? {
@@ -2721,6 +2751,21 @@ const Bubble = memo(function Bubble({ message, me, chatAccent, animateIn, transl
   const showChevron = () => { if (chevronRef.current) chevronRef.current.style.opacity = "1"; };
   const hideChevron = () => { if (chevronRef.current) chevronRef.current.style.opacity = "0"; };
 
+  // WhatsApp-style forward affordance: a bare grey arrow that sits BESIDE the
+  // bubble (outside it), not overlaid on the media — shown for media/documents
+  // when forwarding is allowed and we're not selecting.
+  const showSideFwd = onForward && !gone && !selectMode
+    && ["photo", "video", "document", "voice"].includes(message.kind);
+  const fwdArrow = showSideFwd ? (
+    <div onClick={(event) => { event.stopPropagation(); onForward(); }} title="Forward"
+         style={{
+           flexShrink: 0, alignSelf: "flex-end", marginBottom: 12, padding: 3, cursor: "pointer",
+           display: "flex", alignItems: "center", justifyContent: "center", opacity: 0.72,
+         }}>
+      {I.fwd ? I.fwd(G.muted, 20) : <span style={{ color: G.muted, fontSize: 16 }}>↪</span>}
+    </div>
+  ) : null;
+
   if (message.kind === "meeting") {
     return <MeetingCard message={message} mine={mine}
                         update={meetingUpdates?.[message.payload?.meeting_id]}
@@ -2747,7 +2792,8 @@ const Bubble = memo(function Bubble({ message, me, chatAccent, animateIn, transl
 
   return (
     <div id={`msg-${message.id}`}
-         style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start", marginBottom: 8 }}>
+         style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start", alignItems: "flex-end", gap: 2, marginBottom: 8 }}>
+      {mine && fwdArrow}
       <div
         {...pressHandlers}
         onMouseEnter={showChevron} onMouseLeave={hideChevron}
@@ -2807,7 +2853,7 @@ const Bubble = memo(function Bubble({ message, me, chatAccent, animateIn, transl
           </div>
         )}
 
-        <div ref={chevronRef} onClick={(event) => { event.stopPropagation(); onLongPress(); }} style={{
+        <div ref={chevronRef} onClick={(event) => { event.stopPropagation(); (onMenu || onLongPress)(); }} style={{
           position: "absolute", top: 2, right: mine ? 2 : "auto", left: mine ? "auto" : 2,
           opacity: 0, transition: "opacity 0.15s", cursor: "pointer",
           width: 20, height: 20, borderRadius: "50%",
@@ -2975,6 +3021,7 @@ const Bubble = memo(function Bubble({ message, me, chatAccent, animateIn, transl
           </div>
         )}
       </div>
+      {!mine && fwdArrow}
     </div>
   );
 });
@@ -3657,18 +3704,8 @@ const Attachment = memo(function Attachment({ message, mine, onForward, onOpenMe
           <img src={effectiveUrl} alt={fileName} data-media="1"
                onClick={(event) => { event.stopPropagation(); onOpenMedia ? onOpenMedia(message) : setFullscreen(true); }}
                style={{ maxWidth: "100%", maxHeight: 280, borderRadius: 13, display: "block", cursor: "pointer" }}/>
-          {/* Quick-forward, WhatsApp-style: a forward icon on every photo so it
-              can be forwarded in one tap without opening the long-press menu. */}
-          {onForward && (
-            <div onClick={(event) => { event.stopPropagation(); onForward(); }} title="Forward" data-media="1"
-                 style={{
-                   position: "absolute", bottom: 8, right: 8, width: 32, height: 32, borderRadius: "50%",
-                   background: "#00000099", display: "flex", alignItems: "center", justifyContent: "center",
-                   cursor: "pointer",
-                 }}>
-              {I.fwd ? I.fwd("#fff", 16) : <span style={{ color: "#fff", fontSize: 15 }}>↪</span>}
-            </div>
-          )}
+          {/* Forwarding is offered by the WhatsApp-style arrow BESIDE the bubble
+              (see Bubble.fwdArrow), not overlaid on the media. */}
         </div>
         {fullscreen && (
           <FullscreenMedia kind="photo" src={effectiveUrl} alt={fileName}
@@ -3701,19 +3738,7 @@ const Attachment = memo(function Attachment({ message, mine, onForward, onOpenMe
                }}>
             {I.expand ? I.expand("#fff", 15) : "⛶"}
           </div>
-          {/* Quick-forward icon on the video too (WhatsApp puts one on every
-              media), sat just left of the expand control so it clears the
-              native playback controls along the bottom. */}
-          {onForward && (
-            <div onClick={(event) => { event.stopPropagation(); onForward(); }} title="Forward" data-media="1"
-                 style={{
-                   position: "absolute", top: 6, right: 42, width: 30, height: 30, borderRadius: "50%",
-                   background: "#00000099", display: "flex", alignItems: "center", justifyContent: "center",
-                   cursor: "pointer",
-                 }}>
-              {I.fwd ? I.fwd("#fff", 15) : <span style={{ color: "#fff", fontSize: 15 }}>↪</span>}
-            </div>
-          )}
+          {/* Forwarding is via the arrow beside the bubble (Bubble.fwdArrow). */}
         </div>
         <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
           <AttachmentAction label="Download" icon={I.download} mine={mine} onClick={downloadFile}/>
@@ -3749,7 +3774,7 @@ const Attachment = memo(function Attachment({ message, mine, onForward, onOpenMe
       <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
         {isPdf && <AttachmentAction label="View" icon={I.eye} mine={mine} onClick={() => setViewingPdf(true)}/>}
         <AttachmentAction label="Download" icon={I.download} mine={mine} onClick={downloadFile}/>
-        {onForward && <AttachmentAction label="Forward" icon={I.fwd} mine={mine} onClick={onForward}/>}
+        {/* Forward is the arrow beside the bubble (Bubble.fwdArrow). */}
       </div>
       {viewingPdf && (
         <Suspense fallback={
@@ -5147,6 +5172,54 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
   const [urls, setUrls] = useState([]);
   const addMoreRef = useRef(null);
 
+  // Flexible, responsive zoom for the image preview — wheel (desktop) and
+  // pinch (touch), with drag-to-pan once zoomed in. Reset when the selected
+  // item changes so each photo opens at fit-to-screen.
+  const [pvZoom, setPvZoom] = useState(1);
+  const [pvPan, setPvPan] = useState({ x: 0, y: 0 });
+  const pvPointers = useRef(new Map());
+  const pvPinch = useRef(null);
+  const pvDrag = useRef(null);
+  useEffect(() => { setPvZoom(1); setPvPan({ x: 0, y: 0 }); }, [index]);
+
+  function pvOnWheel(e) {
+    const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+    setPvZoom((z) => Math.min(6, Math.max(1, z * factor)));
+  }
+  function pvOnDown(e) {
+    pvPointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pvPointers.current.size === 2) {
+      const [a, b] = [...pvPointers.current.values()];
+      pvPinch.current = { startDist: Math.hypot(a.x - b.x, a.y - b.y) || 1, zoomAtStart: pvZoom };
+      pvDrag.current = null;
+    } else if (pvZoom > 1) {
+      pvDrag.current = { x: e.clientX, y: e.clientY, pan: pvPan };
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+    }
+  }
+  function pvOnMove(e) {
+    if (pvPinch.current && pvPointers.current.has(e.pointerId)) {
+      pvPointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pvPointers.current.size >= 2) {
+        const [a, b] = [...pvPointers.current.values()];
+        const dist = Math.hypot(a.x - b.x, a.y - b.y);
+        setPvZoom(Math.min(6, Math.max(1, pvPinch.current.zoomAtStart * (dist / pvPinch.current.startDist))));
+      }
+      return;
+    }
+    if (pvDrag.current) {
+      setPvPan({ x: pvDrag.current.pan.x + (e.clientX - pvDrag.current.x), y: pvDrag.current.pan.y + (e.clientY - pvDrag.current.y) });
+    }
+  }
+  function pvOnUp(e) {
+    pvPointers.current.delete(e.pointerId);
+    if (pvPointers.current.size < 2) {
+      pvPinch.current = null;
+      if (pvZoom <= 1.02) setPvPan({ x: 0, y: 0 });
+    }
+    pvDrag.current = null;
+  }
+
   const current = workingFiles[index];
   const isImage = current?.type.startsWith("image/");
   const isVideo = current?.type.startsWith("video/");
@@ -5263,13 +5336,19 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
         )}
       </div>
 
-      {/* Large centred preview — fills the screen */}
-      <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", padding: "4px 10px", position: "relative" }}>
+      {/* Large centred preview — fills the screen; flexible zoom (wheel + pinch) */}
+      <div onWheel={isImage ? pvOnWheel : undefined}
+           style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", padding: "4px 10px", position: "relative", overflow: "hidden" }}>
         {isImage && previewUrl ? (
-          <img src={previewUrl} alt="Selected photo preview" style={{
-            maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 10,
-            filter: viewOnce ? "blur(16px)" : "none",
-          }}/>
+          <img src={previewUrl} alt="Selected photo preview" draggable={false}
+            onPointerDown={pvOnDown} onPointerMove={pvOnMove} onPointerUp={pvOnUp} onPointerCancel={pvOnUp}
+            style={{
+              maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 10,
+              filter: viewOnce ? "blur(16px)" : "none",
+              transform: `translate(${pvPan.x}px, ${pvPan.y}px) scale(${pvZoom})`,
+              transition: pvDrag.current || pvPinch.current ? "none" : "transform 0.18s ease-out",
+              cursor: pvZoom > 1 ? "grab" : "default", touchAction: "none",
+            }}/>
         ) : isVideo && previewUrl ? (
           <video src={previewUrl} controls style={{
             maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 10,
