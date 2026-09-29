@@ -3751,6 +3751,30 @@ const Attachment = memo(function Attachment({ message, mine, onForward, onOpenMe
   }
 
   if (message.kind === "video") {
+    // A video note (recorded in the camera's NOTE mode) is a square clip shown
+    // as a round bubble, WhatsApp-style — detected by its filename so no backend
+    // change is needed. Tap to play/pause inline.
+    const isVideoNote = /^videonote/i.test(fileName || "");
+    if (isVideoNote) {
+      return (
+        <div style={{ position: "relative", width: 220, height: 220 }} data-media="1">
+          <video src={effectiveUrl} playsInline loop preload="metadata"
+                 onClick={(e) => { const v = e.currentTarget; v.paused ? v.play() : v.pause(); }}
+                 style={{
+                   width: 220, height: 220, borderRadius: "50%", objectFit: "cover",
+                   display: "block", cursor: "pointer", background: "#000",
+                 }}/>
+          <div onClick={(event) => { event.stopPropagation(); onOpenMedia ? onOpenMedia(message) : setFullscreen(true); }}
+               title="Full screen" data-media="1" style={{
+                 position: "absolute", bottom: 8, right: 8, width: 30, height: 30, borderRadius: "50%",
+                 background: "#00000099", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
+               }}>{I.expand ? I.expand("#fff", 14) : "⛶"}</div>
+          {fullscreen && (
+            <FullscreenMedia kind="video" src={effectiveUrl} alt={fileName} onClose={() => setFullscreen(false)}/>
+          )}
+        </div>
+      );
+    }
     return (
       <div>
         <div style={{ position: "relative" }} data-media="1">

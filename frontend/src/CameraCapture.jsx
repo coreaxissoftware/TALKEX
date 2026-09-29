@@ -22,8 +22,20 @@ import { galleryAvailable, listMedia, mediaSrc, itemToFile } from "./nativeGalle
  *     = stop. Drag the finger up while holding to zoom in.
  *   • VIDEO mode: tap shutter = start, tap again = stop.
  */
+const FILTERS = [
+  { key: "none", label: "None", css: "none" },
+  { key: "vivid", label: "Vivid", css: "saturate(1.5) contrast(1.08)" },
+  { key: "warm", label: "Warm", css: "sepia(0.35) saturate(1.3)" },
+  { key: "cool", label: "Cool", css: "saturate(1.1) hue-rotate(-12deg) brightness(1.03)" },
+  { key: "mono", label: "Mono", css: "grayscale(1)" },
+  { key: "noir", label: "Noir", css: "grayscale(1) contrast(1.3) brightness(0.95)" },
+  { key: "sepia", label: "Sepia", css: "sepia(0.8)" },
+];
+
 export default function CameraCapture({ onCapture, onClose, onGallery }) {
   const videoRef = useRef(null);
+  const noteCanvasRef = useRef(null); // canvas pipeline (effects / video note)
+  const noteRafRef = useRef(null);
   const streamRef = useRef(null);
   const trackRef = useRef(null);
   const recorderRef = useRef(null);
@@ -33,7 +45,9 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
   const fallbackInputRef = useRef(null);
 
   const [facing, setFacing] = useState("environment");
-  const [mode, setMode] = useState("photo"); // "photo" | "video"
+  const [mode, setMode] = useState("photo"); // "photo" | "video" | "note"
+  const [effect, setEffect] = useState(0);   // index into FILTERS
+  const [effectsOpen, setEffectsOpen] = useState(false);
   const [recording, setRecording] = useState(false);
   const [recordSecs, setRecordSecs] = useState(0);
   const [error, setError] = useState("");
@@ -182,11 +196,13 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
       ctx.translate(canvas.width, 0);
       ctx.scale(-1, 1);
     }
+    const css = FILTERS[effect]?.css;
+    if (css && css !== "none") ctx.filter = css; // bake the live effect into the photo
     ctx.drawImage(video, 0, 0);
     canvas.toBlob((blob) => {
       if (blob) onCapture(new File([blob], `photo-${Date.now()}.jpg`, { type: "image/jpeg" }));
     }, "image/jpeg", 0.92);
-  }, [facing, onCapture]);
+  }, [facing, onCapture, effect]);
 
   const takePhoto = useCallback(() => {
     if (selfTimer > 0) {
@@ -220,31 +236,73 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
     return "";
   }
 
+  // When an effect is on, or in VIDEO NOTE mode, we record from a <canvas> that
+  // draws the live video each frame (with the CSS-equivalent filter, and a
+  // centre square crop for a note) — because MediaRecorder captures the raw
+  // camera stream, not the visually-filtered <video>. Plain video with no
+  // effect records the raw stream directly (cheapest).
+  function buildRecordStream() {
+    const filterCss = FILTERS[effect]?.css || "none";
+    const isNote = mode === "note";
+    if (filterCss === "none" && !isNote) return streamRef.current;
+    const video = videoRef.current;
+    const vw = video.videoWidth || 720, vh = video.videoHeight || 1280;
+    const size = Math.min(vw, vh);
+    const canvas = noteCanvasRef.current || document.createElement("canvas");
+    noteCanvasRef.current = canvas;
+    canvas.width = isNote ? size : vw;
+    canvas.height = isNote ? size : vh;
+    const ctx = canvas.getContext("2d");
+    const draw = () => {
+      ctx.save();
+      ctx.filter = filterCss;
+      if (facing === "user") { ctx.translate(canvas.width, 0); ctx.scale(-1, 1); }
+      if (isNote) {
+        const sx = (vw - size) / 2, sy = (vh - size) / 2;
+        ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size);
+      } else {
+        ctx.drawImage(video, 0, 0, vw, vh);
+      }
+      ctx.restore();
+      noteRafRef.current = requestAnimationFrame(draw);
+    };
+    draw();
+    const canvasStream = canvas.captureStream(30);
+    const audio = streamRef.current.getAudioTracks()[0];
+    if (audio) canvasStream.addTrack(audio);
+    return canvasStream;
+  }
+
   const startRecording = useCallback(() => {
     if (recording || !streamRef.current) return;
     chunksRef.current = [];
+    const isNote = mode === "note";
     let recorder;
     try {
       const mime = pickMime();
-      recorder = new MediaRecorder(streamRef.current, mime ? { mimeType: mime } : undefined);
+      const recStream = buildRecordStream();
+      recorder = new MediaRecorder(recStream, mime ? { mimeType: mime } : undefined);
     } catch {
+      if (noteRafRef.current) cancelAnimationFrame(noteRafRef.current);
       return; // MediaRecorder unsupported — the shutter just won't record here
     }
     recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunksRef.current.push(e.data); };
     recorder.onstop = () => {
       setRecording(false);
+      if (noteRafRef.current) { cancelAnimationFrame(noteRafRef.current); noteRafRef.current = null; }
       const type = recorder.mimeType || "video/webm";
       const ext = type.includes("mp4") ? "mp4" : "webm";
       const blob = new Blob(chunksRef.current, { type });
-      if (blob.size > 0) onCapture(new File([blob], `video-${Date.now()}.${ext}`, { type }));
+      if (blob.size > 0) {
+        const file = new File([blob], `${isNote ? "videonote" : "video"}-${Date.now()}.${ext}`, { type });
+        if (isNote) { try { file.isVideoNote = true; } catch { /* ignore */ } }
+        onCapture(file, isNote ? { videoNote: true } : undefined);
+      }
     };
-    // A timeslice makes ondataavailable fire periodically instead of only once
-    // at stop — more robust on WebViews that otherwise drop the single final
-    // chunk, and it means a very short clip still has data to save.
     recorder.start(250);
     recorderRef.current = recorder;
     setRecording(true);
-  }, [recording, onCapture]);
+  }, [recording, onCapture, mode, effect, facing]);
 
   const stopRecording = useCallback(() => {
     const r = recorderRef.current;
@@ -262,7 +320,7 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
     // finger drifts off it mid-gesture — without this a hold-to-record whose
     // finger wandered never received pointerup, so recording never stopped.
     try { e.currentTarget.setPointerCapture?.(e.pointerId); } catch { /* ignore */ }
-    if (mode === "video") { return; } // handled on up as a toggle
+    if (mode !== "photo") { return; } // video & video-note: toggle on up
     pressInfo.current = { startY: e.clientY, zoomAtStart: zoom, becameVideo: false };
     holdTimer.current = setTimeout(() => {
       if (pressInfo.current) pressInfo.current.becameVideo = true;
@@ -278,7 +336,7 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
   }
   function onShutterUp() {
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
-    if (mode === "video") {
+    if (mode !== "photo") { // video & video-note toggle record on tap
       if (recording) stopRecording(); else startRecording();
       return;
     }
@@ -414,6 +472,10 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
                   }}>{selfTimer}</span>
                 )}
               </div>
+              {/* Effects (filters) */}
+              <div onClick={() => setEffectsOpen((v) => !v)} style={{ ...controlBtn, opacity: effect > 0 || effectsOpen ? 1 : 0.7 }}>
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={effect > 0 ? "#ffd43b" : "#fff"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3l1.9 4.6L18.5 9l-4.6 1.9L12 15l-1.9-4.1L5.5 9l4.6-1.4z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z"/></svg>
+              </div>
               <div onClick={() => setShowGrid((g) => !g)} style={{ ...controlBtn, opacity: showGrid ? 1 : 0.6 }}>{ic.grid}</div>
             </div>
           </div>
@@ -430,10 +492,20 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
               style={{
                 width: "100%", height: "100%", objectFit: "cover",
                 transform: facing === "user" ? "scaleX(-1)" : "none",
+                // Live effect applied to the preview (baked into the capture too).
+                filter: FILTERS[effect]?.css !== "none" ? FILTERS[effect].css : "none",
                 // Hide the element (and its frozen poster) until it's actually
                 // playing — the loader below shows during the WebView warm-up.
                 opacity: ready ? 1 : 0,
               }}/>
+            {/* VIDEO NOTE round mask — dims the corners so the framed circle is
+                clear (the recording is a centre square crop). */}
+            {mode === "note" && ready && (
+              <div style={{
+                position: "absolute", inset: 0, zIndex: 1, pointerEvents: "none",
+                background: "radial-gradient(circle at 50% 50%, transparent 46%, rgba(0,0,0,0.72) 47%)",
+              }}/>
+            )}
 
             {/* Warm-up loader — covers the WebView's frozen play-button poster
                 for the couple of seconds before the live stream starts. */}
@@ -563,15 +635,29 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
               </div>
             )}
 
-            {/* PHOTO / VIDEO mode switch */}
-            <div style={{ display: "flex", justifyContent: "center", gap: 26, marginBottom: 14 }}>
-              {["photo", "video"].map((m) => (
+            {/* Effects (filter) chooser row */}
+            {effectsOpen && !recording && (
+              <div style={{ display: "flex", gap: 8, overflowX: "auto", padding: "0 12px 10px" }}>
+                {FILTERS.map((f, i) => (
+                  <div key={f.key} onClick={() => setEffect(i)} style={{
+                    flexShrink: 0, padding: "7px 14px", borderRadius: 16, cursor: "pointer", fontSize: 12.5, fontWeight: 600,
+                    background: effect === i ? "#ffd43b" : "#00000055",
+                    color: effect === i ? "#000" : "#fff",
+                    border: `1px solid ${effect === i ? "#ffd43b" : "#ffffff33"}`,
+                  }}>{f.label}</div>
+                ))}
+              </div>
+            )}
+
+            {/* PHOTO / VIDEO / VIDEO NOTE mode switch */}
+            <div style={{ display: "flex", justifyContent: "center", gap: 22, marginBottom: 14 }}>
+              {[["video", "Video"], ["photo", "Photo"], ["note", "Video note"]].map(([m, label]) => (
                 <span key={m} onClick={() => { if (!recording) setMode(m); }}
                       style={{
-                        color: mode === m ? "#ffd43b" : "#ffffffaa", fontSize: 13, fontWeight: 700,
-                        letterSpacing: 1, cursor: "pointer", textTransform: "uppercase",
+                        color: mode === m ? "#ffd43b" : "#ffffffaa", fontSize: 12.5, fontWeight: 700,
+                        letterSpacing: 0.6, cursor: "pointer", textTransform: "uppercase", whiteSpace: "nowrap",
                       }}>
-                  {m}
+                  {label}
                 </span>
               ))}
             </div>
@@ -597,10 +683,10 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
                 }}>
                 <div style={{
                   transition: "all .15s",
-                  width: recording ? 30 : (mode === "video" ? 58 : 66),
-                  height: recording ? 30 : (mode === "video" ? 58 : 66),
+                  width: recording ? 30 : (mode !== "photo" ? 58 : 66),
+                  height: recording ? 30 : (mode !== "photo" ? 58 : 66),
                   borderRadius: recording ? 8 : "50%",
-                  background: mode === "video" || recording ? "#ef4444" : "#fff",
+                  background: mode !== "photo" || recording ? "#ef4444" : "#fff",
                 }}/>
               </div>
 
