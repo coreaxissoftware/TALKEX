@@ -15,16 +15,18 @@ const FILTERS = [
 
 const ENHANCE_CSS = "saturate(1.15) contrast(1.08) brightness(1.03)";
 
+// WhatsApp's crop ratio list. "original" resolves to the image's own aspect at
+// runtime (see cropRatio); "free" (Fit to screen) is unconstrained free-drag.
 const ASPECTS = [
-  { key: "free", label: "Free", ratio: null },
-  { key: "square", label: "1:1", ratio: 1 },
-  { key: "portrait", label: "4:5", ratio: 4 / 5 },
-  { key: "photo_p", label: "2:3", ratio: 2 / 3 },
-  { key: "photo_l", label: "3:2", ratio: 3 / 2 },
-  { key: "wide", label: "16:9", ratio: 16 / 9 },
-  { key: "story", label: "9:16", ratio: 9 / 16 },
-  // A wide banner ratio for profile cover photos.
-  { key: "cover", label: "Cover", ratio: 3 },
+  { key: "original", label: "Original", ratio: "original" },
+  { key: "free", label: "Fit to screen", ratio: null },
+  { key: "square", label: "Square", ratio: 1 },
+  { key: "r23", label: "2:3", ratio: 2 / 3 },
+  { key: "r35", label: "3:5", ratio: 3 / 5 },
+  { key: "r34", label: "3:4", ratio: 3 / 4 },
+  { key: "r45", label: "4:5", ratio: 4 / 5 },
+  { key: "r57", label: "5:7", ratio: 5 / 7 },
+  { key: "r916", label: "9:16", ratio: 9 / 16 },
 ];
 
 const DRAW_COLORS = ["#ffffff", "#ef4444", "#f59e0b", "#22c55e", "#38bdf8", "#a855f7", "#ec4899", "#000000"];
@@ -344,7 +346,7 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
   // fully draggable/resizable crop box (the flexible mode), which the user can
   // still switch to any fixed ratio (including "Cover") from the aspect pills.
   const [aspect, setAspect] = useState(
-    () => ASPECTS.find((a) => a.key === initialAspectKey) || ASPECTS[0]);
+    () => ASPECTS.find((a) => a.key === initialAspectKey) || ASPECTS.find((a) => a.key === "free"));
   const [filter, setFilter] = useState(FILTERS[0]);
   // 0-100 — iOS Photos/Instagram both let a filter be scrubbed to a
   // strength, not just switched on/off. Blended by stacking the unfiltered
@@ -485,7 +487,12 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
   // target aspect (the fixed crop ratio, or the image's own aspect for free
   // crop). This is what makes a portrait photo / 9:16 crop show whole and stay
   // clear of the tools below, instead of overflowing off the editing area.
-  const _targetAspect = aspect.ratio || (rotatedSrc ? rotatedSrc.w / rotatedSrc.h : 1);
+  // "original" resolves to the image's own aspect; everything else is its fixed
+  // number, and null (Fit to screen) means free-drag.
+  const cropRatio = aspect.ratio === "original"
+    ? (rotatedSrc ? rotatedSrc.w / rotatedSrc.h : null)
+    : aspect.ratio;
+  const _targetAspect = cropRatio || (rotatedSrc ? rotatedSrc.w / rotatedSrc.h : 1);
   // Cap by the live stage size (minus a small gutter) as well as the absolute
   // maxima, so the image always fits the space that's actually there.
   const _maxW = Math.min(VIEWPORT_MAX_WIDTH, (avail.w || VIEWPORT_MAX_WIDTH) - 8);
@@ -613,7 +620,7 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
     // Only FREE crop has draggable resize handles. For a fixed ratio the frame
     // is locked to that ratio, so a pointer-down there pans/zooms the image
     // behind it instead of resizing (which would break the ratio).
-    const handle = aspect.ratio ? null : getCropHandle(px, py);
+    const handle = cropRatio ? null : getCropHandle(px, py);
     if (handle) {
       cropDragRef.current = {
         type: handle === "move" ? "move" : handle,
@@ -895,7 +902,7 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
   // Picking the Crop tool means "free crop right now" — reset any previously
   // chosen fixed ratio to Free so the drag is unconstrained.
   useEffect(() => {
-    if (tool === "crop") setAspect(ASPECTS[0]);
+    if (tool === "crop") setAspect(ASPECTS.find((a) => a.key === "free"));
   }, [tool]);
 
   async function done() {
@@ -1150,7 +1157,7 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
 
         {/* Resize handles only for FREE crop — a fixed ratio shows just the
             locked frame (you pan/zoom the image behind it). */}
-        {!aspect.ratio && (<>
+        {!cropRatio && (<>
         {/* Corner handles — L-shaped like WhatsApp */}
         {/* Top-left */}
         <div style={{
@@ -1355,18 +1362,32 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
                 is reset to Free by an effect below). Fixed ratios live under the
                 Ratio tool, straightening under Angle. */}
 
-            {/* Ratio tool → fixed aspect-ratio picker (was previously stuck at
-                the top of the crop panel). */}
+            {/* Ratio tool → WhatsApp-style aspect-ratio bottom-sheet. Picking a
+                ratio applies it and drops back to the crop frame. */}
             {tool === "aspect" && (
-            <div style={{ display: "flex", gap: 8, marginBottom: 4, overflowX: "auto", padding: "4px 0" }}>
-              {ASPECTS.map((option) => (
-                <div key={option.key} onClick={() => setAspect(option)} style={{
-                  padding: "6px 14px", borderRadius: 20, fontSize: 12.5, flexShrink: 0, cursor: "pointer",
-                  border: `1px solid ${aspect.key === option.key ? G.accent : "#ffffff22"}`,
-                  background: aspect.key === option.key ? `${G.accent}22` : "transparent",
-                  color: aspect.key === option.key ? G.accent : "#ffffffcc",
-                }}>{option.label}</div>
-              ))}
+            <div onClick={() => setTool("crop")} style={{
+              position: "fixed", inset: 0, zIndex: 60, background: "#00000066",
+              display: "flex", alignItems: "flex-end", justifyContent: "center",
+              animation: "txSheetFade 0.15s ease-out",
+            }}>
+              <div onClick={(e) => e.stopPropagation()} style={{
+                width: "100%", maxWidth: 480, background: "#1c1c1e",
+                borderTopLeftRadius: 18, borderTopRightRadius: 18,
+                paddingBottom: "calc(10px + env(safe-area-inset-bottom))",
+                maxHeight: "72vh", overflowY: "auto", animation: "txSheetUp 0.2s ease-out",
+              }}>
+                <div style={{ display: "flex", justifyContent: "center", padding: "10px 0 4px" }}>
+                  <div style={{ width: 38, height: 4, borderRadius: 2, background: "#ffffff33" }}/>
+                </div>
+                {ASPECTS.map((option) => (
+                  <div key={option.key} onClick={() => { setAspect(option); setTool("crop"); }} style={{
+                    padding: "15px 22px", fontSize: 16, cursor: "pointer",
+                    color: aspect.key === option.key ? G.accent : "#fff",
+                    fontWeight: aspect.key === option.key ? 700 : 400,
+                  }}>{option.label}</div>
+                ))}
+              </div>
+              <style>{"@keyframes txSheetFade{from{opacity:0}to{opacity:1}}@keyframes txSheetUp{from{transform:translateY(20px)}to{transform:none}}"}</style>
             </div>
             )}
 
