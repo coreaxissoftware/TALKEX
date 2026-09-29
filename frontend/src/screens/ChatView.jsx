@@ -5242,6 +5242,7 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
   // item changes so each photo opens at fit-to-screen.
   const [pvZoom, setPvZoom] = useState(1);
   const [pvPan, setPvPan] = useState({ x: 0, y: 0 });
+  const [videoPoster, setVideoPoster] = useState(null); // real first-frame poster for a recorded video
   const pvPointers = useRef(new Map());
   const pvPinch = useRef(null);
   const pvDrag = useRef(null);
@@ -5311,6 +5312,30 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
   }, [workingFiles.length, index]);
 
   const previewUrl = urls[index];
+
+  // Grab a real first-frame poster for a recorded video so the preview shows the
+  // footage instead of the WebView's generic grey play-button placeholder.
+  useEffect(() => {
+    setVideoPoster(null);
+    if (!isVideo || !previewUrl) return;
+    let cancelled = false;
+    const v = document.createElement("video");
+    v.src = previewUrl; v.muted = true; v.playsInline = true; v.preload = "metadata";
+    const onMeta = () => { try { v.currentTime = Math.min(0.1, (v.duration || 1) / 2); } catch { /* ignore */ } };
+    const onSeeked = () => {
+      if (cancelled) return;
+      try {
+        const c = document.createElement("canvas");
+        c.width = v.videoWidth || 320; c.height = v.videoHeight || 240;
+        c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+        setVideoPoster(c.toDataURL("image/jpeg", 0.7));
+      } catch { /* tainted/decoding failure — fall back to no poster */ }
+    };
+    v.addEventListener("loadedmetadata", onMeta);
+    v.addEventListener("seeked", onSeeked);
+    v.load();
+    return () => { cancelled = true; v.removeEventListener("loadedmetadata", onMeta); v.removeEventListener("seeked", onSeeked); v.src = ""; };
+  }, [isVideo, previewUrl]);
 
   function setCaptionAt(i, value) {
     setCaptions((prev) => prev.map((c, j) => (j === i ? value : c)));
@@ -5415,10 +5440,12 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
               cursor: pvZoom > 1 ? "grab" : "default", touchAction: "none",
             }}/>
         ) : isVideo && previewUrl ? (
-          <video src={previewUrl} controls style={{
-            maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 10,
-            filter: viewOnce ? "blur(16px)" : "none",
-          }}/>
+          <video src={previewUrl} controls playsInline preload="metadata"
+            poster={videoPoster || undefined}
+            style={{
+              maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 10,
+              filter: viewOnce ? "blur(16px)" : "none",
+            }}/>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12, color: "#fff" }}>
             {I.doc("#fff", 54)}
@@ -5453,7 +5480,8 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
                   {img && thumb ? (
                     <img src={thumb} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
                   ) : vid && thumb ? (
-                    <video src={thumb} style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
+                    <video src={thumb} muted playsInline preload="metadata"
+                           style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
                   ) : (
                     <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
                       {I.doc("#fff", 20)}
