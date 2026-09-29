@@ -4218,33 +4218,26 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
 
   return (
     <div style={{
-      position: "relative", display: "flex", alignItems: "center", gap: 8,
-      paddingTop: 10, paddingLeft: 12, paddingRight: 12,
-      // Reserve the device's own bottom inset (gesture bar / home indicator)
-      // so the composer never sits underneath it — a plain 10px was enough
-      // on some phones but got covered by the OS nav bar on others.
+      // Column so the attach grid can sit BELOW the input row (WhatsApp/Telegram
+      // style) instead of floating above the composer.
+      position: "relative", display: "flex", flexDirection: "column",
+      // Reserve the device's own bottom inset (gesture bar / home indicator).
       paddingBottom: "max(10px, env(safe-area-inset-bottom))",
       borderTop: `1px solid ${G.border}`, background: G.surface,
-      // Lift the composer (and the emoji/attach/quick-reply panel it hosts)
-      // above the tap-catcher below while a panel is open, so the input and its
-      // buttons stay interactive — only taps OUTSIDE the composer hit the catcher.
       zIndex: panelOpen ? 30 : "auto",
     }}>
       {/* Tap-anywhere-to-dismiss: while a panel is up, a tap on the chat (or
-          anywhere off the composer) closes it, the way WhatsApp dismisses its
-          emoji/attach keyboard. Tapping the button again still toggles it shut
-          via that button's own handler. */}
+          anywhere off the composer) closes it. */}
       {panelOpen && (
         <div onClick={() => { setEmojiOpen(false); setQuickReplyOpen(false); setAttachOpen(false); }}
              style={{ position: "fixed", inset: 0, zIndex: 20 }}/>
       )}
 
-      {attachOpen && (
-        <AttachPanel onClose={() => setAttachOpen(false)}
-                     onFile={onFile} onLocation={onLocation} onContact={onContact}
-                     onPoll={onPoll} onSticker={onSticker} onGif={onGif} onProduct={onProduct}
-                     onScanCaptured={onScanCaptured} onFilesPicked={onFilesPicked}/>
-      )}
+      {/* Input row */}
+      <div style={{
+        position: "relative", display: "flex", alignItems: "center", gap: 8,
+        paddingTop: 10, paddingLeft: 12, paddingRight: 12,
+      }}>
 
       {mentionCandidates.length > 0 && (
         <div style={{
@@ -4404,6 +4397,15 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
         }}>
           {I.mic(G.sub, 19)}
         </IconButton>
+      )}
+      </div>{/* end input row */}
+
+      {/* Attach grid — BELOW the input row, filling the keyboard area. */}
+      {attachOpen && (
+        <AttachPanel onClose={() => setAttachOpen(false)}
+                     onFile={onFile} onLocation={onLocation} onContact={onContact}
+                     onPoll={onPoll} onSticker={onSticker} onGif={onGif} onProduct={onProduct}
+                     onScanCaptured={onScanCaptured} onFilesPicked={onFilesPicked}/>
       )}
     </div>
   );
@@ -5098,20 +5100,15 @@ function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker
 
   return (
     <div onClick={(e) => e.stopPropagation()} style={{
-      // Translucent, blurred glass — the chat shows softly behind the panel
-      // (modern messenger look) rather than a flat solid sheet. `G.surface + d9`
-      // is the theme's own surface colour at ~85% opacity, so it stays correct
-      // in both light and dark, with the backdrop blur doing the frosted effect.
-      position: "absolute", bottom: "100%", left: 0, right: 0,
-      // Clearly translucent frosted glass — the chat shows through. Lower alpha
-      // (~0.62) + stronger blur so it reads as glass, not a solid sheet.
+      // In-flow panel BELOW the input row (fills the keyboard area), translucent
+      // frosted glass so the chat shows softly through.
+      width: "100%", marginTop: 8,
       background: `${G.surface}9e`,
       backdropFilter: "blur(30px) saturate(1.6)",
       WebkitBackdropFilter: "blur(30px) saturate(1.6)",
       borderTop: `1px solid ${G.border}`,
-      borderTopLeftRadius: 16, borderTopRightRadius: 16,
-      boxShadow: `0 -4px 24px rgba(0,0,0,0.28)`, overflow: "hidden",
-      maxHeight: "min(340px, 55vh)", overflowY: "auto", zIndex: 20,
+      overflow: "hidden",
+      maxHeight: "min(320px, 46vh)", overflowY: "auto", zIndex: 20,
       animation: "txAttachUp 0.18s ease-out",
     }}>
       <style>{
