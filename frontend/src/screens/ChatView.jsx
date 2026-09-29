@@ -1874,6 +1874,10 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
                            onIndexChange={setLightboxIndex} onClose={() => setLightboxIndex(null)}
                            me={me} members={members}
                            onForward={canForwardHere ? (m) => { setLightboxIndex(null); setForwarding(m); } : undefined}
+                           onShare={(m) => shareMessage(m)}
+                           onReply={(m) => { setLightboxIndex(null); setReplyTo(m); }}
+                           onStar={(m) => toggleStar(m)}
+                           onDelete={(m) => { setLightboxIndex(null); setMenuFor(m); }}
                            toast={toast}/>
       )}
 
@@ -5193,7 +5197,9 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
   const pvPointers = useRef(new Map());
   const pvPinch = useRef(null);
   const pvDrag = useRef(null);
-  useEffect(() => { setPvZoom(1); setPvPan({ x: 0, y: 0 }); }, [index]);
+  const pvSwipe = useRef(null); // single-finger horizontal swipe → change item
+  const [pvSwipeDX, setPvSwipeDX] = useState(0);
+  useEffect(() => { setPvZoom(1); setPvPan({ x: 0, y: 0 }); setPvSwipeDX(0); }, [index]);
 
   function pvOnWheel(e) {
     const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
@@ -5204,10 +5210,13 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
     if (pvPointers.current.size === 2) {
       const [a, b] = [...pvPointers.current.values()];
       pvPinch.current = { startDist: Math.hypot(a.x - b.x, a.y - b.y) || 1, zoomAtStart: pvZoom };
-      pvDrag.current = null;
+      pvDrag.current = null; pvSwipe.current = null;
     } else if (pvZoom > 1) {
       pvDrag.current = { x: e.clientX, y: e.clientY, pan: pvPan };
       e.currentTarget.setPointerCapture?.(e.pointerId);
+    } else {
+      // At normal zoom a single finger can swipe between the batch's items.
+      pvSwipe.current = { x: e.clientX, y: e.clientY, id: e.pointerId };
     }
   }
   function pvOnMove(e) {
@@ -5222,6 +5231,13 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
     }
     if (pvDrag.current) {
       setPvPan({ x: pvDrag.current.pan.x + (e.clientX - pvDrag.current.x), y: pvDrag.current.pan.y + (e.clientY - pvDrag.current.y) });
+      return;
+    }
+    if (pvSwipe.current && pvSwipe.current.id === e.pointerId && workingFiles.length > 1) {
+      let dx = e.clientX - pvSwipe.current.x;
+      // Rubber-band at the ends so it doesn't slide off into empty space.
+      if ((dx > 0 && index === 0) || (dx < 0 && index === workingFiles.length - 1)) dx *= 0.3;
+      setPvSwipeDX(dx);
     }
   }
   function pvOnUp(e) {
@@ -5231,6 +5247,16 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
       if (pvZoom <= 1.02) setPvPan({ x: 0, y: 0 });
     }
     pvDrag.current = null;
+    const sw = pvSwipe.current;
+    pvSwipe.current = null;
+    if (sw && sw.id === e.pointerId && pvZoom <= 1.02) {
+      const dx = e.clientX - sw.x, dy = e.clientY - sw.y;
+      if (Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy)) {
+        if (dx < 0 && index < workingFiles.length - 1) { setIndex(index + 1); return; }
+        if (dx > 0 && index > 0) { setIndex(index - 1); return; }
+      }
+      setPvSwipeDX(0); // snap back
+    }
   }
 
   const current = workingFiles[index];
@@ -5382,8 +5408,8 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
             style={{
               maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 10,
               filter: viewOnce ? "blur(16px)" : "none",
-              transform: `translate(${pvPan.x}px, ${pvPan.y}px) scale(${pvZoom})`,
-              transition: pvDrag.current || pvPinch.current ? "none" : "transform 0.18s ease-out",
+              transform: `translate(${pvPan.x + (pvZoom <= 1 ? pvSwipeDX : 0)}px, ${pvPan.y}px) scale(${pvZoom})`,
+              transition: pvDrag.current || pvPinch.current || pvSwipe.current ? "none" : "transform 0.18s ease-out",
               cursor: pvZoom > 1 ? "grab" : "default", touchAction: "none",
             }}/>
         ) : isVideo && previewUrl ? (
@@ -8056,7 +8082,7 @@ function LightboxThumb({ item, active, onClick }) {
  * bubble tap (ChatView lifts the media list up so navigation spans the whole
  * chat, not just the one photo).
  */
-function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, onForward, toast }) {
+function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, onForward, onShare, onReply, onStar, onDelete, toast }) {
   const current = items[index];
   const [blobUrl, setBlobUrl] = useState(null);
   const [zoom, setZoom] = useState(1);
@@ -8067,6 +8093,7 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
   const dragRef = useRef(null);
   const pointersRef = useRef(new Map()); // active pointers for pinch-zoom
   const pinchRef = useRef(null);          // { startDist, zoomAtStart }
+  const lastTapRef = useRef(0);           // double-tap-to-zoom timing
   const attachmentId = current?.payload?.attachment_id;
   const isVideo = current?.kind === "video";
 
@@ -8209,6 +8236,17 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
     if (drag?.swipe) {
       const dx = event.clientX - drag.x;
       const dy = event.clientY - drag.y;
+      // Double-tap toggles zoom (WhatsApp/Instagram) — a tap barely moves.
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) {
+        const now = Date.now();
+        if (now - lastTapRef.current < 300) {
+          lastTapRef.current = 0;
+          setZoom((z) => (z > 1 ? 1 : 2.5));
+          setPan({ x: 0, y: 0 });
+          return;
+        }
+        lastTapRef.current = now;
+      }
       // Swipe DOWN to dismiss the viewer (Instagram/WhatsApp gesture).
       if (dy > 90 && Math.abs(dy) > Math.abs(dx)) { onClose(); return; }
       if (Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy)) {
@@ -8253,7 +8291,6 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
           {!isVideo && <LbIconBtn onClick={() => setZoom((z) => Math.max(1, +(z - 0.5).toFixed(2)))} title="Zoom out">−</LbIconBtn>}
           {!isVideo && <LbIconBtn onClick={() => setZoom((z) => Math.min(6, +(z + 0.5).toFixed(2)))} title="Zoom in">+</LbIconBtn>}
           {!isVideo && <LbIconBtn onClick={openEditor} title="Edit">{I.edit("#fff", 18)}</LbIconBtn>}
-          {onForward && current && <LbIconBtn onClick={() => { onForward(current); onClose(); }} title="Forward">{I.fwd("#fff", 18)}</LbIconBtn>}
           <LbIconBtn onClick={download} title="Download">{I.download("#fff", 18)}</LbIconBtn>
           <LbIconBtn onClick={onClose} title="Close">×</LbIconBtn>
         </div>
@@ -8311,6 +8348,34 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
           ))}
         </div>
       )}
+
+      {/* WhatsApp-style bottom action bar */}
+      {current && (
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "space-around",
+          padding: "10px 12px calc(12px + env(safe-area-inset-bottom))", background: "#000", flexShrink: 0,
+          borderTop: "0.5px solid #ffffff14",
+        }}>
+          {onReply && <LbAction icon={I.reply} label="Reply" onClick={() => onReply(current)}/>}
+          {onForward && <LbAction icon={I.fwd} label="Forward" onClick={() => onForward(current)}/>}
+          {onShare && <LbAction icon={I.share || I.fwd} label="Share" onClick={() => onShare(current)}/>}
+          {onStar && <LbAction icon={I.star || I.pin} label="Star" onClick={() => onStar(current)}/>}
+          {onDelete && <LbAction icon={I.trash} label="Delete" onClick={() => onDelete(current)}/>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// One labelled icon button in the media viewer's bottom action bar.
+function LbAction({ icon, label, onClick }) {
+  return (
+    <div onClick={onClick} style={{
+      display: "flex", flexDirection: "column", alignItems: "center", gap: 4, cursor: "pointer",
+      padding: "2px 10px", minWidth: 54,
+    }}>
+      {icon ? icon("#fff", 22) : <span style={{ color: "#fff" }}>•</span>}
+      <span style={{ color: "#ffffffcc", fontSize: 11 }}>{label}</span>
     </div>
   );
 }
