@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { ensurePermissions } from "./nativePermissions.js";
+import { galleryAvailable, listMedia, mediaSrc, itemToFile } from "./nativeGallery.js";
 
 /**
  * A full, WhatsApp-style in-app camera built on getUserMedia — a live preview
@@ -39,6 +40,22 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
   const [flashOn, setFlashOn] = useState(false);
   const [needsTap, setNeedsTap] = useState(false); // WebView truly won't autoplay — show a start overlay
   const [ready, setReady] = useState(false);       // true once the live preview is actually playing
+  const [recent, setRecent] = useState([]);        // recent device media for the gallery strip (native)
+
+  // Load a few recent photos/videos for the WhatsApp-style gallery strip.
+  useEffect(() => {
+    if (!galleryAvailable()) return;
+    let cancelled = false;
+    listMedia({ limit: 18 }).then((items) => { if (!cancelled && items) setRecent(items); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  async function pickRecent(item) {
+    try {
+      const file = await itemToFile(item);
+      if (onGallery) onGallery([file]); else onCapture(file);
+    } catch { /* skip unreadable item */ }
+  }
   const [showGrid, setShowGrid] = useState(false);
   const [selfTimer, setSelfTimer] = useState(0); // 0 | 3 | 10 seconds
   const [countdown, setCountdown] = useState(null);
@@ -498,6 +515,37 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
             padding: "10px 0 calc(20px + env(safe-area-inset-bottom))",
             background: "linear-gradient(transparent, #000000cc 45%)",
           }}>
+            {/* Recent-media gallery strip (native) — tap to pick, WhatsApp-style */}
+            {recent.length > 0 && !recording && (
+              <div style={{ display: "flex", gap: 6, overflowX: "auto", padding: "0 12px 10px" }}>
+                {recent.map((it) => (
+                  <div key={it.id} onClick={() => pickRecent(it)} style={{
+                    flexShrink: 0, width: 54, height: 54, borderRadius: 8, overflow: "hidden",
+                    background: "#ffffff14", cursor: "pointer", position: "relative",
+                  }}>
+                    {it.isVideo
+                      ? <video src={mediaSrc(it)} muted playsInline preload="metadata" style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
+                      : <img src={mediaSrc(it)} alt="" loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover" }}/>}
+                    {it.isVideo && <div style={{ position: "absolute", bottom: 3, left: 4 }}><svg width="12" height="12" viewBox="0 0 24 24" fill="#fff"><path d="M8 5v14l11-7z"/></svg></div>}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Quick zoom buttons (when the camera supports zoom) */}
+            {zoomCaps && !recording && (
+              <div style={{ display: "flex", justifyContent: "center", gap: 8, marginBottom: 10 }}>
+                {[1, 2, zoomCaps.max >= 4 ? 4 : null].filter(Boolean).map((z) => (
+                  <div key={z} onClick={() => applyZoom(z)} style={{
+                    minWidth: 34, height: 30, padding: "0 8px", borderRadius: 15, cursor: "pointer",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    background: Math.abs(zoom - z) < 0.15 ? "#ffffff33" : "#00000055",
+                    color: Math.abs(zoom - z) < 0.15 ? "#ffd43b" : "#fff", fontSize: 12, fontWeight: 700,
+                  }}>{z}x</div>
+                ))}
+              </div>
+            )}
+
             {/* PHOTO / VIDEO mode switch */}
             <div style={{ display: "flex", justifyContent: "center", gap: 26, marginBottom: 14 }}>
               {["photo", "video"].map((m) => (

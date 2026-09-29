@@ -175,6 +175,7 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
   const [replyTo, setReplyTo] = useState(null);
   const [editing, setEditing] = useState(null);
   const [menuFor, setMenuFor] = useState(null);
+  const edgeBackRef = useRef(null); // edge-swipe-back gesture start
   const [infoFor, setInfoFor] = useState(null); // message currently showing the "Message info" sheet
   const [bgMenu, setBgMenu] = useState(null); // { x, y } for right-click/long-press on empty chat background
   const [forwarding, setForwarding] = useState(null);
@@ -1343,6 +1344,21 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
     // standalone PWA a plain 100vh mis-sizes the shell and could stack the
     // composer near the top; 100dvh tracks the true visible viewport.
     <div style={{ display: "flex", flexDirection: "column", height: "var(--app-height, 100dvh)", position: "relative" }}
+      // Edge-swipe-back: a swipe that STARTS at the very left edge and travels
+      // right goes back to the chat list (WhatsApp/iOS gesture). Starting at the
+      // edge keeps it clear of the message swipe-to-reply, which is on bubbles.
+      onPointerDown={(event) => {
+        if (event.pointerType === "touch" && event.clientX < 24 && !selectMode) {
+          edgeBackRef.current = { x: event.clientX, y: event.clientY };
+        }
+      }}
+      onPointerUp={(event) => {
+        const s = edgeBackRef.current; edgeBackRef.current = null;
+        if (!s) return;
+        const dx = event.clientX - s.x, dy = event.clientY - s.y;
+        if (dx > 72 && Math.abs(dy) < 60) onBack();
+      }}
+      onPointerCancel={() => { edgeBackRef.current = null; }}
       onDragEnter={(event) => {
         if (!event.dataTransfer?.types?.includes("Files")) return;
         event.preventDefault();
