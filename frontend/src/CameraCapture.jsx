@@ -280,12 +280,16 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
 
   // ── Pinch-to-zoom on the preview ─────────────────────────────────────────────
   const pinch = useRef({ pointers: new Map(), startDist: 0, zoomAtStart: 1 });
+  const swipeRef = useRef(null); // single-finger horizontal swipe → switch photo/video
   function onPreviewDown(e) {
     pinch.current.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pinch.current.pointers.size === 2) {
       const [a, b] = [...pinch.current.pointers.values()];
       pinch.current.startDist = Math.hypot(a.x - b.x, a.y - b.y);
       pinch.current.zoomAtStart = zoom;
+      swipeRef.current = null; // a pinch is not a swipe
+    } else if (pinch.current.pointers.size === 1) {
+      swipeRef.current = { x: e.clientX, y: e.clientY, id: e.pointerId };
     }
   }
   function onPreviewMove(e) {
@@ -298,8 +302,18 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
     }
   }
   function onPreviewUp(e) {
+    const sw = swipeRef.current;
     pinch.current.pointers.delete(e.pointerId);
     if (pinch.current.pointers.size < 2) pinch.current.startDist = 0;
+    // A clear single-finger horizontal swipe flips photo ⇄ video (WhatsApp-
+    // style), unless a recording is in progress.
+    if (sw && sw.id === e.pointerId && !recording) {
+      const dx = e.clientX - sw.x, dy = e.clientY - sw.y;
+      if (Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+        setMode((m) => (m === "photo" ? "video" : "photo"));
+      }
+    }
+    swipeRef.current = null;
   }
 
   function fmt(s) {
@@ -534,7 +548,7 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
             </div>
 
             <div style={{ textAlign: "center", marginTop: 12, color: "#ffffff66", fontSize: 11 }}>
-              {mode === "photo" ? "Tap for photo · hold to record" : "Tap to start / stop recording"}
+              {mode === "photo" ? "Tap for photo · hold to record · swipe to switch" : "Tap to record · swipe for photo"}
             </div>
           </div>
         </>

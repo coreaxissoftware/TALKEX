@@ -4059,9 +4059,6 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
   const [quickReplyOpen, setQuickReplyOpen] = useState(false);
   const [cannedReplies, setCannedReplies] = useState([]);
   const inputRef = useRef(null);
-  const [camMenuOpen, setCamMenuOpen] = useState(false); // native Photo/Video chooser
-  const photoCamRef = useRef(null);
-  const videoCamRef = useRef(null);
 
   // Dropping into edit mode selects the pre-filled text instead of just
   // parking the cursor at the end — the iOS/desktop-app convention for
@@ -4330,33 +4327,11 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
       {!value.trim() && (
         <IconButton onClick={() => {
           setEmojiOpen(false); setAttachOpen(false); inputRef.current?.blur();
-          if (IS_NATIVE_APP) setCamMenuOpen((v) => !v); // native app → Photo/Video chooser
-          else setCameraOpen(true);                     // web → in-app camera
+          setCameraOpen(true); // in-app camera (direct open + swipe photo/video), web & phone
         }} label="Camera">
           {I.camera ? I.camera(G.sub, 21) : "📷"}
         </IconButton>
       )}
-      {/* Native phone camera — a small Photo / Video chooser, because a single
-          image+video capture input opens a VIDEO-only recorder on some devices.
-          Each opens the device camera in the right mode; the file rides the
-          same caption/preview/send path. */}
-      {camMenuOpen && (
-        <div onClick={() => setCamMenuOpen(false)} style={{
-          position: "absolute", bottom: "100%", left: 8, marginBottom: 6, zIndex: 30,
-          background: G.surface, border: `1px solid ${G.border}`, borderRadius: 14,
-          boxShadow: "0 6px 22px rgba(0,0,0,0.25)", overflow: "hidden", minWidth: 168,
-        }}>
-          <div onClick={() => { setCamMenuOpen(false); photoCamRef.current?.click(); }}
-               style={camMenuItem}>{I.camera ? I.camera(G.accent, 20) : "📷"}<span>Photo</span></div>
-          <div style={{ height: 1, background: G.border }}/>
-          <div onClick={() => { setCamMenuOpen(false); videoCamRef.current?.click(); }}
-               style={camMenuItem}>{I.video ? I.video(G.accent, 20) : "🎥"}<span>Video</span></div>
-        </div>
-      )}
-      <input ref={photoCamRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }}
-             onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) onFilesPicked?.([f], null); }}/>
-      <input ref={videoCamRef} type="file" accept="video/*" capture="environment" style={{ display: "none" }}
-             onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) onFilesPicked?.([f], null); }}/>
       {cameraOpen && (
         <CameraCapture
           onCapture={(file) => { setCameraOpen(false); onFilesPicked?.([file], null); }}
@@ -5037,9 +5012,6 @@ function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker
   const docInput = useRef(null);
   const scanInput = useRef(null);
   const audioInput = useRef(null);
-  const [attachCamMenu, setAttachCamMenu] = useState(false); // native Photo/Video chooser
-  const attachPhotoRef = useRef(null);
-  const attachVideoRef = useRef(null);
 
   // Gallery button → in-app native grid when it's available (Android build),
   // otherwise the ordinary OS file picker. galleryAvailable() is a synchronous
@@ -5104,7 +5076,7 @@ function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker
   // as a set of distinct actions rather than one wall of identical buttons.
   const options = [
     { label: "Gallery", icon: I.image, color: "#7c5cff", action: openGallery },
-    { label: "Camera", icon: I.camera, color: "#e0245e", action: () => { if (IS_NATIVE_APP) setAttachCamMenu(true); else setCameraOpen(true); } },
+    { label: "Camera", icon: I.camera, color: "#e0245e", action: () => setCameraOpen(true) },
     { label: "Location", icon: I.mapPin, color: "#22c55e", action: () => { onLocation(); onClose(); } },
     { label: "Contact", icon: I.contactCard, color: "#3b82f6", action: () => { onContact(); onClose(); } },
     { label: "Document", icon: I.doc, color: "#5b6ef5", action: () => docInput.current?.click() },
@@ -5155,31 +5127,6 @@ function AttachPanel({ onClose, onFile, onLocation, onContact, onPoll, onSticker
       <input ref={scanInput} type="file" accept="image/*" capture="environment"
              onChange={pickToScan} style={{ display: "none" }}/>
       <input ref={audioInput} type="file" accept="audio/*" onChange={pickAudio} style={{ display: "none" }}/>
-      {/* Native phone camera — separate Photo / Video (a combined capture input
-          opens a video-only recorder on some devices). Same preview path. */}
-      <input ref={attachPhotoRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }}
-             onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f && !tooBig(f)) { onFilesPicked([f], null); onClose(); } }}/>
-      <input ref={attachVideoRef} type="file" accept="video/*" capture="environment" style={{ display: "none" }}
-             onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f && !tooBig(f)) { onFilesPicked([f], null); onClose(); } }}/>
-      {attachCamMenu && (
-        <div onClick={() => setAttachCamMenu(false)} style={{
-          position: "fixed", inset: 0, zIndex: 40, background: "#00000066",
-          display: "flex", alignItems: "flex-end", justifyContent: "center",
-        }}>
-          <div onClick={(e) => e.stopPropagation()} style={{
-            width: "100%", maxWidth: 430, background: G.surface, borderTopLeftRadius: 18, borderTopRightRadius: 18,
-            paddingBottom: "calc(10px + env(safe-area-inset-bottom))",
-          }}>
-            <div onClick={() => { setAttachCamMenu(false); attachPhotoRef.current?.click(); }} style={camMenuItem}>
-              {I.camera ? I.camera(G.accent, 22) : "📷"}<span>Take photo</span>
-            </div>
-            <div style={{ height: 1, background: G.border }}/>
-            <div onClick={() => { setAttachCamMenu(false); attachVideoRef.current?.click(); }} style={camMenuItem}>
-              {I.video ? I.video(G.accent, 22) : "🎥"}<span>Record video</span>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* In-app native gallery grid (Android). Rendered inline (not an early
           return) so the hidden inputs above stay mounted — that lets onFallback
