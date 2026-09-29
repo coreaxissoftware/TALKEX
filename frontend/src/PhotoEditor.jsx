@@ -186,6 +186,16 @@ function ShapeIcon({ color = "#fff", size = 20 }) {
   );
 }
 
+// Filter — three overlapping colour circles (the classic "filters" glyph).
+function FilterIcon({ color = "#fff", size = 20 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={1.8}>
+      <circle cx="9" cy="9" r="6"/>
+      <circle cx="15" cy="9" r="6"/>
+      <circle cx="12" cy="15" r="6"/>
+    </svg>
+  );
+}
 // Ratio (fixed aspect-ratio picker) — overlapping frames suggesting choices.
 function AspectIcon({ color = "#fff", size = 20 }) {
   return (
@@ -1245,27 +1255,34 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
           color: "#fff", fontSize: 14, fontWeight: 500, cursor: "pointer", padding: "6px 12px",
           borderRadius: 20, background: "rgba(255,255,255,0.1)", flexShrink: 0,
         }}>Cancel</div>
-        {/* Adjust/Filter/Draw/Add moved into the header so the bottom is free
-            for a much bigger editing area (only the tool options + tool row
-            sit below now). */}
-        <div style={{
-          flex: 1, minWidth: 210, position: "relative", display: "flex", padding: 3, borderRadius: 12,
-          background: "rgba(255,255,255,0.08)",
-        }}>
-          <div style={{
-            position: "absolute", top: 3, bottom: 3, left: 3,
-            width: `calc((100% - 6px) / ${TABS.length})`,
-            transform: `translateX(${TABS.findIndex((t) => t.key === activeTab) * 100}%)`,
-            background: G.accent, borderRadius: 10,
-            transition: "transform 0.25s cubic-bezier(0.34, 1.3, 0.64, 1)",
-          }}/>
-          {TABS.map((tab) => (
-            <div key={tab.key} onClick={() => switchTab(tab.key)} style={{
-              position: "relative", flex: 1, padding: "6px", borderRadius: 10, cursor: "pointer",
-              textAlign: "center", fontSize: 12, fontWeight: 600,
-              color: activeTab === tab.key ? "#fff" : "#ffffff88", transition: "color 0.2s",
-            }}>{tab.label}</div>
-          ))}
+        {/* Flat WhatsApp-style icon row — direct access to the primary tools
+            (Crop / Filter / Text / Sticker / Draw / Tune) instead of tab
+            groups. The underlying activeTab/tool machinery is unchanged; each
+            icon just sets both at once. Sub-tools still appear in the row below. */}
+        <div style={{ flex: 1, minWidth: 0, display: "flex", justifyContent: "space-around", alignItems: "center", gap: 2, overflowX: "auto" }}>
+          {[
+            { key: "crop", tab: "adjust", tool: "crop", Icon: CropIcon },
+            { key: "filter", tab: "filter", tool: null, Icon: FilterIcon },
+            { key: "text", tab: "insert", tool: "text", Icon: TextIcon },
+            { key: "sticker", tab: "insert", tool: "sticker", Icon: StickerIcon },
+            { key: "draw", tab: "annotate", tool: "draw", Icon: PenIcon },
+            { key: "tune", tab: "adjust", tool: "tune", Icon: TuneIcon },
+          ].map((a) => {
+            const active = activeTab === a.tab && (a.tool ? tool === a.tool : true);
+            return (
+              <div key={a.key} onClick={() => {
+                setActiveTab(a.tab);
+                if (a.key === "sticker") { setShowStickers(true); setTool("sticker"); }
+                else { setShowStickers(false); setTool(a.tool); }
+              }} title={a.key} style={{
+                flexShrink: 0, padding: "7px 9px", borderRadius: 10, cursor: "pointer",
+                background: active ? `${G.accent}33` : "transparent",
+                border: `1px solid ${active ? G.accent : "transparent"}`,
+              }}>
+                <a.Icon color={active ? G.accent : "#ffffffcc"} size={20}/>
+              </div>
+            );
+          })}
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
           {marks.length > 0 && (
