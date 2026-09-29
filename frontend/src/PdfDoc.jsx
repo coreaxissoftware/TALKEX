@@ -3,19 +3,21 @@
 // its own chunk and never weighs down the initial app load.
 //
 // Viewing: every page is rasterised to a canvas via pdf.js and shown in a
-// scrollable column. This is the ONLY way a PDF renders reliably inside
-// Android's System WebView, which has no native PDF plugin.
+// scrollable, zoomable column. This is the ONLY way a PDF renders reliably
+// inside Android's System WebView, which has no native PDF plugin.
+//
+// Responsiveness: pages render PROGRESSIVELY — page 1 appears the moment it's
+// ready instead of waiting for the whole document — and each page is rasterised
+// to a JPEG data URL exactly ONCE (not re-encoded on every React render, which
+// was the big open/scroll stall before). Zoom is CSS width scaling with
+// wheel/ctrl-wheel, pinch, and +/- buttons; the column scrolls in both axes.
 //
 // Editing: a transparent overlay canvas sits on each page for freehand pen
-// strokes and tap-to-place text — the same "marks over pixels" idea the photo
-// editor uses. Exporting flattens each page canvas + its marks into a fresh
-// image and rewraps the lot into a new multi-page PDF (canvasesToPdfBlob), so
-// no PDF-mutation library is needed.
+// strokes and tap-to-place text. Exporting flattens each page canvas + its
+// marks into a fresh image and rewraps the lot into a new multi-page PDF.
 
 import { useEffect, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
-// The non-minified worker (pdf.worker.mjs, not .min) so this shipped file is
-// human-readable too, consistent with the rest of the un-minified build.
 import workerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
 import { canvasesToPdfBlob } from "./imageToPdf.js";
 import { G, I, usePrompt } from "./ui.jsx";
@@ -23,38 +25,46 @@ import { G, I, usePrompt } from "./ui.jsx";
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
 const PEN_COLORS = ["#ff3b30", "#0a84ff", "#111111", "#34c759", "#ffcc00"];
+const MIN_ZOOM = 0.5;
+const MAX_ZOOM = 5;
 
 export default function PdfDoc({ src, name, onClose, onDownloadOriginal, toast }) {
   const [promptFn, promptModal] = usePrompt();
-  const [pages, setPages] = useState(null); // [{ canvas, width, height }]
+  const [pages, setPages] = useState(null);   // [{ canvas, url, width, height }] — grows as pages render
+  const [total, setTotal] = useState(0);      // page count (known before all are rendered)
   const [error, setError] = useState(false);
-  const [mode, setMode] = useState("view"); // "view" | "edit"
-  const [tool, setTool] = useState("pen"); // "pen" | "text"
+  const [mode, setMode] = useState("view");   // "view" | "edit"
+  const [tool, setTool] = useState("pen");    // "pen" | "text"
   const [color, setColor] = useState(PEN_COLORS[0]);
   const [exporting, setExporting] = useState(false);
-  // marks[pageIndex] = [{ kind:"stroke", points:[{x,y}], color } | { kind:"text", x,y,text,color }]
+  const [zoom, setZoom] = useState(1);
+  const [containerW, setContainerW] = useState(0);
+
   const marksRef = useRef([]);
   const [, forceRender] = useState(0);
   const overlayRefs = useRef([]);
   const drawing = useRef(false);
+  const scrollRef = useRef(null);
+  const pinchRef = useRef(null); // { startDist, startZoom }
 
-  // Render every page to a canvas once, at a resolution that stays crisp on
-  // high-DPI screens without ballooning memory for a long document.
+  // ── Load + render every page PROGRESSIVELY ──────────────────────────────────
   useEffect(() => {
     let cancelled = false;
     setPages(null);
+    setTotal(0);
     setError(false);
+    setZoom(1);
     (async () => {
       try {
-        // Fetch the bytes ourselves and hand them to pdf.js as `data` rather
-        // than letting it fetch the blob: URL — keeps everything same-origin
-        // and predictable under the app's CSP. isEvalSupported:false skips
-        // pdf.js's eval feature-probe, which script-src 'self' would otherwise
-        // block with a noisy console error.
         const buffer = await (await fetch(src)).arrayBuffer();
         if (cancelled) return;
         const pdf = await pdfjsLib.getDocument({ data: buffer, isEvalSupported: false }).promise;
-        const out = [];
+        if (cancelled) return;
+        setTotal(pdf.numPages);
+        marksRef.current = Array.from({ length: pdf.numPages }, () => []);
+        setPages([]); // switch from "Loading…" to the (empty, filling) column
+
+        // Crisp on high-DPI without ballooning memory for a long document.
         const scale = Math.min(2, (window.devicePixelRatio || 1) * 1.3);
         for (let p = 1; p <= pdf.numPages; p++) {
           if (cancelled) return;
@@ -65,11 +75,16 @@ export default function PdfDoc({ src, name, onClose, onDownloadOriginal, toast }
           canvas.height = Math.floor(viewport.height);
           const ctx = canvas.getContext("2d");
           await page.render({ canvasContext: ctx, viewport }).promise;
-          out.push({ canvas, width: canvas.width, height: canvas.height });
-        }
-        if (!cancelled) {
-          marksRef.current = out.map(() => []);
-          setPages(out);
+          if (cancelled) return;
+          // Encode ONCE here (JPEG — smaller & faster than PNG) so React
+          // re-renders and scroll never re-encode the bitmap.
+          const url = canvas.toDataURL("image/jpeg", 0.82);
+          const pageObj = { canvas, url, width: canvas.width, height: canvas.height };
+          // Append so page 1 shows immediately, then the rest stream in.
+          setPages((prev) => (prev ? [...prev, pageObj] : [pageObj]));
+          // Yield to the event loop between pages so the UI stays responsive
+          // (scroll/tap) while a long document is still rendering.
+          await new Promise((r) => setTimeout(r, 0));
         }
       } catch {
         if (!cancelled) setError(true);
@@ -84,7 +99,70 @@ export default function PdfDoc({ src, name, onClose, onDownloadOriginal, toast }
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // Repaint one page's overlay from its stored marks.
+  // ── Measure the viewport width so zoom is relative to fit-width ─────────────
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const measure = () => setContainerW(el.clientWidth);
+    measure();
+    let ro;
+    if (typeof ResizeObserver !== "undefined") { ro = new ResizeObserver(measure); ro.observe(el); }
+    return () => ro?.disconnect();
+  }, [pages !== null]);
+
+  // ── Zoom: ctrl/⌘+wheel (desktop & trackpad pinch) and two-finger pinch ──────
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    function onWheel(e) {
+      // Trackpad pinch arrives as ctrlKey+wheel; ctrl/⌘+wheel is the mouse zoom.
+      if (!(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+      setZoom((z) => clampZoom(z * factor));
+    }
+    function dist(t) {
+      const [a, b] = t;
+      return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    }
+    function onTouchStart(e) {
+      if (e.touches.length === 2) pinchRef.current = { startDist: dist(e.touches) || 1, startZoom: zoom };
+    }
+    function onTouchMove(e) {
+      if (e.touches.length === 2 && pinchRef.current) {
+        e.preventDefault(); // stop native scroll while pinching
+        setZoom(clampZoom(pinchRef.current.startZoom * (dist(e.touches) / pinchRef.current.startDist)));
+      }
+    }
+    function onTouchEnd(e) {
+      if (e.touches.length < 2) pinchRef.current = null;
+    }
+
+    // Non-passive so preventDefault actually suppresses the browser's own zoom/scroll.
+    el.addEventListener("wheel", onWheel, { passive: false });
+    el.addEventListener("touchstart", onTouchStart, { passive: false });
+    el.addEventListener("touchmove", onTouchMove, { passive: false });
+    el.addEventListener("touchend", onTouchEnd);
+    el.addEventListener("touchcancel", onTouchEnd);
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("touchstart", onTouchStart);
+      el.removeEventListener("touchmove", onTouchMove);
+      el.removeEventListener("touchend", onTouchEnd);
+      el.removeEventListener("touchcancel", onTouchEnd);
+    };
+  }, [zoom, pages !== null]);
+
+  function clampZoom(z) { return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z)); }
+  const zoomBy = (f) => setZoom((z) => clampZoom(z * f));
+
+  // Fit-width base (minus padding), capped so a page isn't absurdly wide on
+  // desktop; zoom multiplies it and the column scrolls when it overflows.
+  const baseW = Math.min((containerW || 800) - 28, 900);
+  const pageW = Math.round(baseW * zoom);
+
+  // ── Edit overlay painting ───────────────────────────────────────────────────
   function repaintOverlay(pageIndex) {
     const canvas = overlayRefs.current[pageIndex];
     if (!canvas) return;
@@ -112,7 +190,6 @@ export default function PdfDoc({ src, name, onClose, onDownloadOriginal, toast }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, pages]);
 
-  // Map a pointer event to the overlay canvas's own pixel space.
   function toCanvasPoint(canvas, event) {
     const rect = canvas.getBoundingClientRect();
     return {
@@ -207,11 +284,13 @@ export default function PdfDoc({ src, name, onClose, onDownloadOriginal, toast }
     }
   }
 
+  const rendering = pages !== null && total > 0 && pages.length < total;
+
   return (
     <div style={{ position: "fixed", inset: 0, background: "#1e1e1e", zIndex: 1300, display: "flex", flexDirection: "column" }}>
       {/* Header */}
       <div style={{
-        display: "flex", alignItems: "center", gap: 12, padding: "10px 14px",
+        display: "flex", alignItems: "center", gap: 10, padding: "10px 12px",
         background: G.surface, borderBottom: `1px solid ${G.border}`, flexShrink: 0,
       }}>
         <div onClick={onClose} title="Back" style={{ cursor: "pointer", display: "flex" }}>
@@ -220,10 +299,22 @@ export default function PdfDoc({ src, name, onClose, onDownloadOriginal, toast }
         <div style={{
           flex: 1, minWidth: 0, fontSize: 14, fontWeight: 600, color: G.text,
           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-        }}>{name}</div>
+        }}>{name}{rendering ? ` · ${pages.length}/${total}` : ""}</div>
+
+        {/* Zoom controls (view mode) */}
+        {mode === "view" && (
+          <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+            <div onClick={() => zoomBy(1 / 1.25)} title="Zoom out" style={zoomBtn}>−</div>
+            <div onClick={() => setZoom(1)} title="Reset zoom" style={{ ...zoomBtn, width: "auto", padding: "0 8px", fontSize: 12 }}>
+              {Math.round(zoom * 100)}%
+            </div>
+            <div onClick={() => zoomBy(1.25)} title="Zoom in" style={zoomBtn}>+</div>
+          </div>
+        )}
+
         {mode === "view" ? (
           <>
-            <button onClick={() => setMode("edit")} disabled={!pages} style={ghostBtn}>
+            <button onClick={() => setMode("edit")} disabled={!pages || !pages.length} style={ghostBtn}>
               {I.edit ? I.edit(G.sub, 16) : null}<span>Edit</span>
             </button>
             <div onClick={onDownloadOriginal} title="Download" style={{ cursor: "pointer", display: "flex" }}>
@@ -264,29 +355,36 @@ export default function PdfDoc({ src, name, onClose, onDownloadOriginal, toast }
         </div>
       )}
 
-      {/* Pages */}
-      <div style={{ flex: 1, overflowY: "auto", padding: 14, display: "flex", flexDirection: "column", alignItems: "center", gap: 14 }}>
-        {error && <div style={{ color: "#fff", marginTop: 40 }}>Could not open this PDF.</div>}
-        {!pages && !error && <div style={{ color: "#fff", marginTop: 40 }}>Loading…</div>}
-        {pages && pages.map((page, index) => (
-          <div key={index} style={{ position: "relative", width: "100%", maxWidth: 820, boxShadow: "0 2px 12px #0006" }}>
-            <img src={page.canvas.toDataURL("image/png")} alt={`Page ${index + 1}`}
-                 style={{ width: "100%", display: "block", background: "#fff" }}/>
-            {mode === "edit" && (
-              <canvas
-                ref={(el) => { overlayRefs.current[index] = el; }}
-                width={page.width} height={page.height}
-                onPointerDown={(e) => onPointerDown(index, e)}
-                onPointerMove={(e) => onPointerMove(index, e)}
-                onPointerUp={onPointerUp}
-                onPointerCancel={onPointerUp}
-                style={{
-                  position: "absolute", inset: 0, width: "100%", height: "100%",
-                  touchAction: "none", cursor: tool === "text" ? "text" : "crosshair",
-                }}/>
+      {/* Pages — scrollable both axes; pinch / wheel / buttons zoom */}
+      <div ref={scrollRef} style={{ flex: 1, overflow: "auto", background: "#1e1e1e", WebkitOverflowScrolling: "touch" }}>
+        {error && <div style={{ color: "#fff", textAlign: "center", marginTop: 40 }}>Could not open this PDF.</div>}
+        {pages === null && !error && <div style={{ color: "#fff", textAlign: "center", marginTop: 40 }}>Loading…</div>}
+        {pages !== null && (
+          <div style={{ width: "max-content", minWidth: "100%", margin: "0 auto", padding: 14, display: "flex", flexDirection: "column", alignItems: "center", gap: 14 }}>
+            {pages.map((page, index) => (
+              <div key={index} style={{ position: "relative", width: pageW, maxWidth: "none", boxShadow: "0 2px 12px #0006", flexShrink: 0 }}>
+                <img src={page.url} alt={`Page ${index + 1}`}
+                     style={{ width: "100%", display: "block", background: "#fff" }}/>
+                {mode === "edit" && (
+                  <canvas
+                    ref={(el) => { overlayRefs.current[index] = el; }}
+                    width={page.width} height={page.height}
+                    onPointerDown={(e) => onPointerDown(index, e)}
+                    onPointerMove={(e) => onPointerMove(index, e)}
+                    onPointerUp={onPointerUp}
+                    onPointerCancel={onPointerUp}
+                    style={{
+                      position: "absolute", inset: 0, width: "100%", height: "100%",
+                      touchAction: "none", cursor: tool === "text" ? "text" : "crosshair",
+                    }}/>
+                )}
+              </div>
+            ))}
+            {rendering && (
+              <div style={{ color: "#ffffff99", fontSize: 12, padding: "6px 0 14px" }}>Rendering pages…</div>
             )}
           </div>
-        ))}
+        )}
       </div>
       {promptModal}
     </div>
@@ -297,6 +395,12 @@ const ghostBtn = {
   display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 16,
   cursor: "pointer", fontSize: 13, fontWeight: 600, color: G.text,
   background: G.dim, border: "none",
+};
+
+const zoomBtn = {
+  width: 30, height: 30, borderRadius: 8, cursor: "pointer",
+  display: "flex", alignItems: "center", justifyContent: "center",
+  fontSize: 18, color: G.text, background: G.dim, userSelect: "none",
 };
 
 function toolBtn(active) {
