@@ -29,6 +29,7 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
   const recorderRef = useRef(null);
   const chunksRef = useRef([]);
   const galleryInputRef = useRef(null);
+  const stripSwipe = useRef(null); // swipe-up on the gallery strip → full gallery
   const fallbackInputRef = useRef(null);
 
   const [facing, setFacing] = useState("environment");
@@ -515,20 +516,36 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
             padding: "10px 0 calc(20px + env(safe-area-inset-bottom))",
             background: "linear-gradient(transparent, #000000cc 45%)",
           }}>
-            {/* Recent-media gallery strip (native) — tap to pick, WhatsApp-style */}
+            {/* Recent-media gallery strip (native) — tap a thumb to pick, or
+                SWIPE UP anywhere on the strip to open the full gallery (WhatsApp
+                camera gesture). */}
             {recent.length > 0 && !recording && (
-              <div style={{ display: "flex", gap: 6, overflowX: "auto", padding: "0 12px 10px" }}>
-                {recent.map((it) => (
-                  <div key={it.id} onClick={() => pickRecent(it)} style={{
-                    flexShrink: 0, width: 54, height: 54, borderRadius: 8, overflow: "hidden",
-                    background: "#ffffff14", cursor: "pointer", position: "relative",
-                  }}>
-                    {it.isVideo
-                      ? <video src={mediaSrc(it)} muted playsInline preload="metadata" style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
-                      : <img src={mediaSrc(it)} alt="" loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover" }}/>}
-                    {it.isVideo && <div style={{ position: "absolute", bottom: 3, left: 4 }}><svg width="12" height="12" viewBox="0 0 24 24" fill="#fff"><path d="M8 5v14l11-7z"/></svg></div>}
-                  </div>
-                ))}
+              <div
+                onPointerDown={(e) => { stripSwipe.current = { x: e.clientX, y: e.clientY }; }}
+                onPointerUp={(e) => {
+                  const s = stripSwipe.current; stripSwipe.current = null;
+                  if (!s) return;
+                  const dy = e.clientY - s.y, dx = e.clientX - s.x;
+                  if (dy < -40 && Math.abs(dy) > Math.abs(dx)) galleryInputRef.current?.click();
+                }}
+                style={{ padding: "0 0 6px" }}>
+                {/* Grab handle hint */}
+                <div onClick={() => galleryInputRef.current?.click()} style={{ display: "flex", justifyContent: "center", padding: "2px 0 6px", cursor: "pointer" }}>
+                  <div style={{ width: 34, height: 4, borderRadius: 2, background: "#ffffff55" }}/>
+                </div>
+                <div style={{ display: "flex", gap: 6, overflowX: "auto", padding: "0 12px", touchAction: "pan-x" }}>
+                  {recent.map((it) => (
+                    <div key={it.id} onClick={() => pickRecent(it)} style={{
+                      flexShrink: 0, width: 54, height: 54, borderRadius: 8, overflow: "hidden",
+                      background: "#ffffff14", cursor: "pointer", position: "relative",
+                    }}>
+                      {it.isVideo
+                        ? <video src={mediaSrc(it)} muted playsInline preload="metadata" style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
+                        : <img src={mediaSrc(it)} alt="" loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover" }}/>}
+                      {it.isVideo && <div style={{ position: "absolute", bottom: 3, left: 4 }}><svg width="12" height="12" viewBox="0 0 24 24" fill="#fff"><path d="M8 5v14l11-7z"/></svg></div>}
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
 
