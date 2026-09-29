@@ -356,7 +356,13 @@ export default function PdfDoc({ src, name, onClose, onDownloadOriginal, toast }
       )}
 
       {/* Pages — scrollable both axes; pinch / wheel / buttons zoom */}
-      <div ref={scrollRef} style={{ flex: 1, overflow: "auto", background: "#1e1e1e", WebkitOverflowScrolling: "touch" }}>
+      <div ref={scrollRef} style={{
+        flex: 1, overflow: "auto", background: "#1e1e1e", WebkitOverflowScrolling: "touch",
+        // Allow one-finger pan/scroll but hand two-finger pinch to our zoom
+        // handler instead of letting the WebView zoom the whole page (which is
+        // why pinch "did nothing" before).
+        touchAction: "pan-x pan-y",
+      }}>
         {error && <div style={{ color: "#fff", textAlign: "center", marginTop: 40 }}>Could not open this PDF.</div>}
         {pages === null && !error && <div style={{ color: "#fff", textAlign: "center", marginTop: 40 }}>Loading…</div>}
         {pages !== null && (

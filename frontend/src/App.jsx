@@ -310,22 +310,23 @@ export default function App() {
 
   useEffect(() => {
     if (!getToken()) { setChecking(false); return; }
+    // Open STRAIGHT to the app using the cached profile (and cached chats)
+    // instead of blocking on a network round-trip — WhatsApp-style instant
+    // open. Me.get() then validates/refreshes in the background, so a slow or
+    // absent network no longer means a long spinner on every launch.
+    const cached = offlineDb.getCachedProfile();
+    if (cached) { setMe(cached); setChecking(false); }
     Me.get()
-      .then(setMe)
+      .then((fresh) => { setMe(fresh); offlineDb.saveProfile(fresh); })
       .catch((error) => {
         // A real 401 means the token itself is invalid or expired — signing
-        // out is correct. Anything else (no route to the server at all,
-        // fetch() rejecting before a status code ever exists) proves
-        // nothing about the session — it just means nothing could be
-        // confirmed right now. Falling back to the profile cached from the
-        // last successful check keeps a genuinely signed-in, merely
-        // offline user in the app, the way WhatsApp opens straight to your
-        // chats with no signal instead of asking you to sign in again.
+        // out is correct. Anything else (no route to the server at all) proves
+        // nothing, so we keep the cached, merely-offline session.
         if (error instanceof ApiError && error.status === 401) {
           setMe(null);
           return;
         }
-        setMe(offlineDb.getCachedProfile());
+        if (!cached) setMe(offlineDb.getCachedProfile());
       })
       .finally(() => setChecking(false));
   }, []);
