@@ -346,7 +346,8 @@ function DraggableMark({ mark, viewportW, viewportH, selected, onSelect, onChang
  *
  * Pinch-to-zoom replaces the zoom slider.
  */
-export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, initialTool }) {
+export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, initialTool,
+                                     onSend, initialCaption = "", initialViewOnce = false, recipientName }) {
   const [promptFn, promptModal] = usePrompt();
   const [rotatedSrc, setRotatedSrc] = useState(null);
   const [rotation, setRotation] = useState(0);
@@ -915,7 +916,12 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
     if (tool === "crop") setAspect(ASPECTS.find((a) => a.key === "free"));
   }, [tool]);
 
-  async function done() {
+  // Caption + view-once for the in-editor send bar (WhatsApp-style), only used
+  // when onSend is provided (the send flow).
+  const [cap, setCap] = useState(initialCaption);
+  const [vo, setVo] = useState(initialViewOnce);
+
+  async function done(deliver = onDone) {
     if (!rotatedSrc) return;
     setProcessing(true);
     try {
@@ -1001,7 +1007,7 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
       canvas.toBlob((blob) => {
         setProcessing(false);
         if (!blob) { onCancel(); return; }
-        onDone(new File([blob], file.name || `edited-${Date.now()}.jpg`, { type: "image/jpeg" }));
+        deliver(new File([blob], file.name || `edited-${Date.now()}.jpg`, { type: "image/jpeg" }));
       }, "image/jpeg", hd ? 0.95 : 0.9);
     } catch {
       setProcessing(false);
@@ -1661,6 +1667,38 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
         {/* Tabs + Done now live in the header (see top bar) — nothing here, so
             the editing area above gets that vertical space back. */}
       </div>
+
+      {/* WhatsApp-style in-editor caption + send bar (send flow only) */}
+      {onSend && (
+        <div style={{ padding: "8px 12px calc(10px + env(safe-area-inset-bottom))", background: "#000" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input value={cap} onChange={(e) => setCap(e.target.value)} placeholder="Add a caption…"
+                   style={{
+                     flex: 1, minWidth: 0, padding: "12px 16px", borderRadius: 22,
+                     background: "#ffffff1a", border: "1px solid #ffffff2b", color: "#fff",
+                     fontSize: 14.5, outline: "none",
+                   }}/>
+            <div onClick={() => setVo((v) => !v)} title={vo ? "View once is on" : "Send as view once"}
+                 style={{
+                   width: 44, height: 44, borderRadius: "50%", flexShrink: 0, cursor: "pointer",
+                   display: "flex", alignItems: "center", justifyContent: "center",
+                   background: vo ? "#25d36633" : "#ffffff1a", border: `1px solid ${vo ? "#25d366" : "#ffffff2b"}`,
+                 }}>
+              {I.eye ? I.eye(vo ? "#25d366" : "#fff", 20) : <span style={{ color: "#fff", fontWeight: 700 }}>1</span>}
+            </div>
+            <button onClick={() => done((f) => onSend(f, cap.trim(), vo))} disabled={processing} style={{
+              width: 48, height: 48, borderRadius: "50%", border: "none", cursor: "pointer", flexShrink: 0,
+              background: `linear-gradient(135deg,${G.accent},${G.accentD})`,
+              display: "flex", alignItems: "center", justifyContent: "center", opacity: processing ? 0.6 : 1,
+            }}>
+              {I.send ? I.send() : <span style={{ color: "#fff", fontSize: 18 }}>➤</span>}
+            </button>
+          </div>
+          {recipientName && (
+            <div style={{ marginTop: 6, fontSize: 12.5, color: "#ffffff99" }}>{recipientName}</div>
+          )}
+        </div>
+      )}
       {promptModal}
     </div>
   );

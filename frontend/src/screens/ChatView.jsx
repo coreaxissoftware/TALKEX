@@ -5220,7 +5220,11 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
   const [captions, setCaptions] = useState(() => files.map(() => ""));
   const [index, setIndex] = useState(0);
   const [viewOnce, setViewOnce] = useState(false);
-  const [editing, setEditing] = useState(false);
+  // A single picked photo opens straight into the editor (WhatsApp-style) — the
+  // editor is the send screen, with tools on top and caption + send at the
+  // bottom. Videos, documents and multi-image batches use the preview sheet.
+  const [editing, setEditing] = useState(
+    () => files.length === 1 && !!files[0]?.type?.startsWith("image/"));
   const [trimming, setTrimming] = useState(false);
   const [urls, setUrls] = useState([]);
   const addMoreRef = useRef(null);
@@ -5390,7 +5394,15 @@ function MediaPreviewSheet({ files, kindOverride, onClose, onSend }) {
     return (
       <Suspense fallback={null}>
         <PhotoEditor file={current} onCancel={() => setEditing(false)}
-                     onDone={(edited) => { replaceCurrent(edited); setEditing(false); }}/>
+                     onDone={(edited) => { replaceCurrent(edited); setEditing(false); }}
+                     initialCaption={captions[index] || ""}
+                     initialViewOnce={viewOnce}
+                     // Single-image edit gets WhatsApp-style caption + send right
+                     // in the editor; a multi-image batch keeps edit→done→preview
+                     // so the whole batch still sends together.
+                     onSend={workingFiles.length === 1
+                       ? (edited, caption, once) => { onSend([edited], kindOverride, "", once, [caption]); onClose(); }
+                       : undefined}/>
       </Suspense>
     );
   }
