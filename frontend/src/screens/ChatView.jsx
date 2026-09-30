@@ -1834,6 +1834,12 @@ export default function ChatView({ chat, me, events, typingBy, reconnectedAt, on
         onFilesPicked={(files, kindOverride) => {
           setMediaPreview({ files, kindOverride });
           setSheet("mediaPreview");
+        }}
+        onPanelToggle={() => {
+          // When the attach/emoji/quick-reply panel opens below the composer,
+          // the message list shrinks — scroll it to the bottom so the latest
+          // message stays visible instead of being hidden behind the panel.
+          setTimeout(() => bottom.current?.scrollIntoView({ behavior: "auto" }), 60);
         }}/>
 
       {menuFor && (
@@ -4093,7 +4099,7 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
                     disappearSecs, editing, onCancelEdit, members, toast, viewOnce, onToggleViewOnce,
                     canSilent, silent, onToggleSilent,
                     onFile, onLocation, onContact, onPoll, onSticker, onGif, onProduct,
-                    onScanCaptured, onFilesPicked }) {
+                    onScanCaptured, onFilesPicked, onPanelToggle }) {
   const voice = useVoiceRecorder((blob, transcript) => onVoice(blob, transcript));
   const enterToSend = useEnterToSend();
   const [emojiOpen, setEmojiOpen] = useState(false);
@@ -4105,6 +4111,13 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
   const [camMenuOpen, setCamMenuOpen] = useState(false); // native Photo/Video chooser
   const photoCamRef = useRef(null);
   const videoCamRef = useRef(null);
+
+  // Tell the parent to scroll the message list to the bottom whenever a panel
+  // opens below the composer (attach / emoji / quick replies), so the last
+  // message isn't hidden behind the now-taller composer.
+  useEffect(() => {
+    if (emojiOpen || attachOpen || quickReplyOpen) onPanelToggle?.();
+  }, [emojiOpen, attachOpen, quickReplyOpen]);
 
   // Dropping into edit mode selects the pre-filled text instead of just
   // parking the cursor at the end — the iOS/desktop-app convention for
