@@ -33,9 +33,26 @@ _creds = None
 _project_id = None
 
 
+def _service_account_json() -> str | None:
+    """The service-account JSON, from the env var directly, or read from the
+    file that FCM_SERVICE_ACCOUNT_FILE points at (a single-line JSON string in
+    an env var is fragile under systemd, so a file path is the robust option)."""
+    raw = os.environ.get("FCM_SERVICE_ACCOUNT_JSON")
+    if raw:
+        return raw
+    path = os.environ.get("FCM_SERVICE_ACCOUNT_FILE")
+    if path and os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+        except OSError as e:
+            logger.error("fcm: could not read FCM_SERVICE_ACCOUNT_FILE %s: %s", path, e)
+    return None
+
+
 def is_configured() -> bool:
     """True when a service-account key is available to send with."""
-    return bool(_IMPORTS_OK and os.environ.get("FCM_SERVICE_ACCOUNT_JSON"))
+    return bool(_IMPORTS_OK and _service_account_json())
 
 
 def _load_credentials():
@@ -43,7 +60,7 @@ def _load_credentials():
     global _creds, _project_id
     if _creds is not None:
         return _creds
-    raw = os.environ.get("FCM_SERVICE_ACCOUNT_JSON")
+    raw = _service_account_json()
     if not raw or not _IMPORTS_OK:
         if not _IMPORTS_OK:
             logger.warning("fcm: google-auth/requests import failed — FCM disabled")
@@ -51,7 +68,7 @@ def _load_credentials():
     try:
         info = json.loads(raw)
     except json.JSONDecodeError as e:
-        logger.error("fcm: FCM_SERVICE_ACCOUNT_JSON is not valid JSON: %s", e)
+        logger.error("fcm: service-account JSON is not valid JSON: %s", e)
         return None
     _project_id = info.get("project_id")
     if not _project_id:

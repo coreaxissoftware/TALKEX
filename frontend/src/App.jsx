@@ -6,6 +6,10 @@ import {
 } from "./api.js";
 import { initE2EE, clearE2EEKeys } from "./e2ee.js";
 import { initNativePush, stopNativePush, syncNativeCredentials } from "./pushNative.js";
+import { ensurePermissions } from "./nativePermissions.js";
+import { enablePush } from "./push.js";
+import { Capacitor } from "@capacitor/core";
+const IS_NATIVE = (() => { try { return !!Capacitor?.isNativePlatform?.(); } catch { return false; } })();
 import { getAllContacts } from "./nativeContacts.js";
 import { useRealtime } from "./useRealtime.js";
 import { useCall } from "./useCall.js";
@@ -243,19 +247,33 @@ export default function App() {
     syncNativeCredentials();
   }, [me?.id]);
 
-  // Request all runtime permissions upfront on native Android so the user
-  // approves them once right after sign-in instead of being surprised later.
+  // Request ALL runtime permissions upfront right after sign-in — one popup
+  // each for camera, microphone, photos, location, contacts and notifications —
+  // and turn push notifications ON by default, instead of only asking for
+  // contacts and leaving the rest to surprise the user later.
   useEffect(() => {
     if (!me?.id) return;
     const PERM_KEY = "talkex_permissions_requested";
     if (localStorage.getItem(PERM_KEY)) return;
     localStorage.setItem(PERM_KEY, "1");
     (async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-        stream.getTracks().forEach((t) => t.stop());
-      } catch { /* user denied or no device — fine */ }
-      try { navigator.geolocation.getCurrentPosition(() => {}, () => {}, { timeout: 1 }); } catch {}
+      if (IS_NATIVE) {
+        // Native Android: the OS permission dialogs, one after another.
+        try {
+          await ensurePermissions(["camera", "microphone", "photos", "location", "contacts", "notifications"]);
+        } catch { /* denials are fine — features degrade individually */ }
+        // Push is FCM on native (initNativePush registered the token above); the
+        // "notifications" permission was just requested, so it's on by default.
+      } else {
+        // Web: warm the media/location prompts so features aren't a surprise.
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+          stream.getTracks().forEach((t) => t.stop());
+        } catch { /* denied or no device — fine */ }
+        try { navigator.geolocation.getCurrentPosition(() => {}, () => {}, { timeout: 1 }); } catch {}
+        // Web Push ON by default (Service Worker + VAPID).
+        try { await enablePush(); } catch { /* user declined — fine */ }
+      }
     })();
   }, [me?.id]);
 
