@@ -2205,11 +2205,10 @@ function EmojiPicker({ onPick, onClose, onGif, onSticker }) {
 
   return (
     <div onClick={(e) => e.stopPropagation()} style={{
-      position: "absolute", bottom: "100%", left: 0, right: 0,
-      background: G.surface, borderTop: `1px solid ${G.border}`,
-      borderTopLeftRadius: 16, borderTopRightRadius: 16,
-      boxShadow: `0 -4px 16px ${G.border}`, overflow: "hidden",
-      height: "min(320px, 50vh)", display: "flex", flexDirection: "column", zIndex: 20,
+      // In-flow panel BELOW the input row (like the attach grid), not floating above.
+      width: "100%", borderTop: `1px solid ${G.border}`, background: G.surface,
+      overflow: "hidden",
+      height: "min(320px, 46vh)", display: "flex", flexDirection: "column", zIndex: 20,
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 10px", borderBottom: `1px solid ${G.border}` }}>
         <input value={query} onChange={(e) => setQuery(e.target.value)}
@@ -4301,29 +4300,6 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
 
       <ComposerLinkPreview text={value}/>
 
-      {emojiOpen && (
-        <EmojiPicker onPick={(emoji) => onChange(value + emoji)} onClose={() => setEmojiOpen(false)}
-                     onGif={onGif ? () => { setEmojiOpen(false); onGif(); } : undefined}
-                     onSticker={onSticker ? () => { setEmojiOpen(false); onSticker(); } : undefined}/>
-      )}
-
-      {quickReplyOpen && (
-        <div style={{
-          position: "absolute", bottom: "100%", left: 12, right: 12, marginBottom: 4,
-          background: G.surface, border: `1px solid ${G.border}`, borderRadius: 12,
-          boxShadow: `0 4px 16px ${G.border}`, overflow: "hidden", maxHeight: 240, overflowY: "auto",
-        }}>
-          {cannedReplies.map((reply) => (
-            <div key={reply.id}
-                 onClick={() => { onChange(value + reply.text); setQuickReplyOpen(false); }}
-                 style={{ padding: "10px 12px", cursor: "pointer", borderBottom: `1px solid ${G.border}` }}>
-              <div style={{ fontSize: 12.5, fontWeight: 600, color: G.accentText }}>{reply.label}</div>
-              <div style={{ fontSize: 13, color: G.sub, marginTop: 2 }}>{reply.text}</div>
-            </div>
-          ))}
-        </div>
-      )}
-
       {cannedReplies.length > 0 && (
         <IconButton onClick={() => setQuickReplyOpen((v) => !v)} label="Quick replies">
           {I.checkDouble(G.sub, 18)}
@@ -4439,6 +4415,30 @@ function Composer({ value, onChange, onSend, onSchedule, onVoice, uploading,
         </IconButton>
       )}
       </div>{/* end input row */}
+
+      {/* Emoji picker — BELOW the input row (keyboard area), like the attach grid. */}
+      {emojiOpen && (
+        <EmojiPicker onPick={(emoji) => onChange(value + emoji)} onClose={() => setEmojiOpen(false)}
+                     onGif={onGif ? () => { setEmojiOpen(false); onGif(); } : undefined}
+                     onSticker={onSticker ? () => { setEmojiOpen(false); onSticker(); } : undefined}/>
+      )}
+
+      {/* Quick replies — also below the input row. */}
+      {quickReplyOpen && (
+        <div style={{
+          width: "100%", borderTop: `1px solid ${G.border}`, background: G.surface,
+          overflow: "hidden", maxHeight: "min(300px, 44vh)", overflowY: "auto",
+        }}>
+          {cannedReplies.map((reply) => (
+            <div key={reply.id}
+                 onClick={() => { onChange(value + reply.text); setQuickReplyOpen(false); }}
+                 style={{ padding: "10px 14px", cursor: "pointer", borderBottom: `1px solid ${G.border}` }}>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: G.accentText }}>{reply.label}</div>
+              <div style={{ fontSize: 13, color: G.sub, marginTop: 2 }}>{reply.text}</div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Attach grid — BELOW the input row, filling the keyboard area. */}
       {attachOpen && (
