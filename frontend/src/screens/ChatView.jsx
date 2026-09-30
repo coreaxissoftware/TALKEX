@@ -8131,6 +8131,8 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
   const pointersRef = useRef(new Map()); // active pointers for pinch-zoom
   const pinchRef = useRef(null);          // { startDist, zoomAtStart }
   const lastTapRef = useRef(0);           // double-tap-to-zoom timing
+  const lpTimer = useRef(null);           // long-press → context menu
+  const [menuPos, setMenuPos] = useState(null);
   const attachmentId = current?.payload?.attachment_id;
   const isVideo = current?.kind === "video";
 
@@ -8233,8 +8235,17 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
     // flips to the previous/next media (WhatsApp-style).
     dragRef.current = { x: event.clientX, y: event.clientY, pan, swipe: zoom <= 1 };
     event.currentTarget.setPointerCapture?.(event.pointerId);
+    // Touch-and-hold → context menu (mirrors the desktop right-click below).
+    if (event.pointerType === "touch") {
+      const px = event.clientX, py = event.clientY;
+      lpTimer.current = setTimeout(() => { lpTimer.current = null; setMenuPos({ x: px, y: py }); }, 500);
+    }
   }
   function onImgPointerMove(event) {
+    if (lpTimer.current && dragRef.current
+        && (Math.abs(event.clientX - dragRef.current.x) > 10 || Math.abs(event.clientY - dragRef.current.y) > 10)) {
+      clearTimeout(lpTimer.current); lpTimer.current = null;
+    }
     // Pinch-zoom takes priority whenever two fingers are down.
     if (pinchRef.current && pointersRef.current.has(event.pointerId)) {
       pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
@@ -8259,6 +8270,7 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
     setPan({ x: dragRef.current.pan.x + (event.clientX - dragRef.current.x), y: dragRef.current.pan.y + (event.clientY - dragRef.current.y) });
   }
   function onImgPointerUp(event) {
+    if (lpTimer.current) { clearTimeout(lpTimer.current); lpTimer.current = null; }
     // Release this finger from the pinch tracker.
     if (pointersRef.current.has(event.pointerId)) pointersRef.current.delete(event.pointerId);
     if (pinchRef.current) {
@@ -8358,11 +8370,14 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
         {!blobUrl ? (
           <Spinner/>
         ) : isVideo ? (
-          <video src={blobUrl} controls autoPlay style={{ maxWidth: "94vw", maxHeight: "100%" }}/>
+          <video src={blobUrl} controls autoPlay
+                 onContextMenu={(e) => { e.preventDefault(); setMenuPos({ x: e.clientX, y: e.clientY }); }}
+                 style={{ maxWidth: "94vw", maxHeight: "100%" }}/>
         ) : (
           <img src={blobUrl} alt={current.text || "Photo"} draggable={false}
                onPointerDown={onImgPointerDown} onPointerMove={onImgPointerMove}
                onPointerUp={onImgPointerUp} onPointerCancel={onImgPointerUp}
+               onContextMenu={(e) => { e.preventDefault(); setMenuPos({ x: e.clientX, y: e.clientY }); }}
                style={{
                  maxWidth: "96vw", maxHeight: "100%", objectFit: "contain",
                  transform: `translate(${pan.x + (zoom <= 1 ? swipeDX : 0)}px, ${pan.y}px) scale(${zoom})`,
@@ -8399,6 +8414,19 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
           {onStar && <LbAction icon={I.star || I.pin} label="Star" onClick={() => onStar(current)}/>}
           {onDelete && <LbAction icon={I.trash} label="Delete" onClick={() => onDelete(current)}/>}
         </div>
+      )}
+
+      {/* Right-click / touch-and-hold context menu on the media */}
+      {menuPos && current && (
+        <ContextMenu x={menuPos.x} y={menuPos.y} onClose={() => setMenuPos(null)} items={[
+          ...(!isVideo ? [{ label: "Edit", icon: I.edit(G.sub, 16), onClick: () => { setMenuPos(null); openEditor(); } }] : []),
+          ...(onReply ? [{ label: "Reply", icon: I.reply(G.sub, 16), onClick: () => { setMenuPos(null); onReply(current); } }] : []),
+          ...(onForward ? [{ label: "Forward", icon: I.fwd(G.sub, 16), onClick: () => { setMenuPos(null); onForward(current); } }] : []),
+          ...(onShare ? [{ label: "Share", icon: (I.share || I.fwd)(G.sub, 16), onClick: () => { setMenuPos(null); onShare(current); } }] : []),
+          ...(onStar ? [{ label: "Star", icon: (I.star || I.pin)(G.sub, 16), onClick: () => { setMenuPos(null); onStar(current); } }] : []),
+          { label: "Download", icon: I.download(G.sub, 16), onClick: () => { setMenuPos(null); download(); } },
+          ...(onDelete ? [{ label: "Delete", icon: I.trash(G.red, 16), onClick: () => { setMenuPos(null); onDelete(current); } }] : []),
+        ]}/>
       )}
     </div>
   );
