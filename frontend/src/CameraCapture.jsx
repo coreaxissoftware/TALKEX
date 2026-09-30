@@ -53,7 +53,6 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
   const [error, setError] = useState("");
   const [retryTick, setRetryTick] = useState(0);
   const [flashOn, setFlashOn] = useState(false);
-  const [needsTap, setNeedsTap] = useState(false); // WebView truly won't autoplay — show a start overlay
   const [ready, setReady] = useState(false);       // true once the live preview is actually playing
   const [recent, setRecent] = useState([]);        // recent device media for the gallery strip (native)
 
@@ -89,7 +88,6 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
       // getUserMedia can otherwise reject with no popup when they aren't
       // granted yet, which looks like "the camera doesn't work". No-op on web.
       try { await ensurePermissions(["camera", "microphone"]); } catch { /* fall through to getUserMedia */ }
-      setNeedsTap(false);
       setReady(false);
       try {
         // Keep constraints SIMPLE — an over-specified request (a fixed 1080p, a
@@ -125,17 +123,12 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
         const video = videoRef.current;
         if (video) {
           video.srcObject = stream;
-          // Some Android WebViews take a few seconds to actually start rendering
-          // a MediaStream <video>. A "Starting camera…" overlay (below) covers
-          // the frozen poster meanwhile; here we keep nudging play() until it
-          // runs (onPlaying flips `ready`), and only fall back to a one-tap
-          // "start" overlay if it's still stuck after a long wait (~8s).
-          for (let i = 0; i < 32 && !cancelled; i++) {
-            try { await video.play(); } catch { /* keep retrying */ }
-            if (!video.paused) break;
-            await new Promise((r) => setTimeout(r, 250));
-          }
-          if (!cancelled && video.paused) setNeedsTap(true);
+          // Kick off playback (muted autoplay). The video is shown immediately —
+          // no gating on a "playing" event that some WebViews never fire (that
+          // was leaving the loader stuck forever). A short fallback below also
+          // clears the loader no matter what, so it can never hang.
+          try { await video.play(); } catch { /* onCanPlay/onPlaying will retry */ }
+          if (!cancelled) setTimeout(() => setReady(true), 1500);
         }
         setError("");
       } catch (problem) {
@@ -486,59 +479,33 @@ export default function CameraCapture({ onCapture, onClose, onGallery }) {
             <video ref={videoRef} playsInline muted autoPlay disablePictureInPicture
               controls={false}
               onLoadedMetadata={() => videoRef.current?.play().catch(() => {})}
-              onCanPlay={() => videoRef.current?.play().catch(() => {})}
-              onPlaying={() => { setReady(true); setNeedsTap(false); }}
-              onClick={() => { videoRef.current?.play().then(() => { setReady(true); setNeedsTap(false); }).catch(() => {}); }}
+              onCanPlay={() => { setReady(true); videoRef.current?.play().catch(() => {}); }}
+              onPlaying={() => setReady(true)}
+              onClick={() => { videoRef.current?.play().then(() => setReady(true)).catch(() => {}); }}
               style={{
                 width: "100%", height: "100%", objectFit: "cover",
                 transform: facing === "user" ? "scaleX(-1)" : "none",
                 // Live effect applied to the preview (baked into the capture too).
                 filter: FILTERS[effect]?.css !== "none" ? FILTERS[effect].css : "none",
-                // Hide the element (and its frozen poster) until it's actually
-                // playing — the loader below shows during the WebView warm-up.
-                opacity: ready ? 1 : 0,
               }}/>
             {/* VIDEO NOTE round mask — dims the corners so the framed circle is
                 clear (the recording is a centre square crop). */}
-            {mode === "note" && ready && (
+            {mode === "note" && (
               <div style={{
                 position: "absolute", inset: 0, zIndex: 1, pointerEvents: "none",
                 background: "radial-gradient(circle at 50% 50%, transparent 46%, rgba(0,0,0,0.72) 47%)",
               }}/>
             )}
 
-            {/* Warm-up loader — covers the WebView's frozen play-button poster
-                for the couple of seconds before the live stream starts. */}
-            {!ready && !needsTap && (
-              <div style={{
-                position: "absolute", inset: 0, zIndex: 2, background: "#000",
-                display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14,
-              }}>
+            {/* Small, NON-blocking warm-up spinner (never covers/hides the live
+                video, and auto-clears within ~1.5s so it can't get stuck). */}
+            {!ready && (
+              <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", zIndex: 2, pointerEvents: "none" }}>
                 <div style={{
-                  width: 44, height: 44, borderRadius: "50%",
-                  border: "3px solid #ffffff33", borderTopColor: "#fff",
+                  width: 40, height: 40, borderRadius: "50%",
+                  border: "3px solid #ffffff44", borderTopColor: "#fff",
                   animation: "txCamSpin 0.8s linear infinite",
                 }}/>
-                <div style={{ color: "#ffffffcc", fontSize: 13.5, fontWeight: 500 }}>Starting camera…</div>
-              </div>
-            )}
-
-            {/* If the WebView refused to autoplay the live stream, a single tap
-                (a real user gesture) always starts it — no more staring at a
-                frozen play-button poster. */}
-            {needsTap && (
-              <div onClick={() => { videoRef.current?.play().then(() => setNeedsTap(false)).catch(() => {}); }}
-                   style={{
-                     position: "absolute", inset: 0, zIndex: 2, display: "flex", flexDirection: "column",
-                     alignItems: "center", justifyContent: "center", gap: 12, background: "#000000aa", cursor: "pointer",
-                   }}>
-                <div style={{
-                  width: 74, height: 74, borderRadius: "50%", border: "3px solid #fff",
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                }}>
-                  <svg width="30" height="30" viewBox="0 0 24 24" fill="#fff"><path d="M8 5v14l11-7z"/></svg>
-                </div>
-                <div style={{ color: "#fff", fontSize: 14, fontWeight: 600 }}>Tap to start camera</div>
               </div>
             )}
 
