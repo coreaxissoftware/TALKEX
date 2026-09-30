@@ -1410,10 +1410,17 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
             </div>
             )}
 
-            {/* Angle tool → fine-rotation (straighten) dial — WhatsApp-style
-                curved ruler. */}
-            {tool === "angle" && (
-            <div style={{ position: "relative", height: 48, marginBottom: 8, overflow: "hidden" }}>
+            {/* Crop screen (WhatsApp) — straighten dial in the middle, a rotate
+                button on the left and an aspect-ratio button on the right. Shown
+                whenever the Crop or Angle tool is active. */}
+            {(tool === "crop" || tool === "angle") && (
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div onClick={() => setRotation((r) => (r + 90) % 360)} title="Rotate"
+                   style={{ flexShrink: 0, width: 42, height: 42, borderRadius: "50%", background: "#ffffff14",
+                            display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+                <RotateIcon color="#fff" size={20}/>
+              </div>
+            <div style={{ position: "relative", height: 48, flex: 1, overflow: "hidden" }}>
               <svg viewBox="0 0 340 48" width="100%" height="48" style={{ display: "block" }}>
                 {/* Arc path for the curved ruler */}
                 {Array.from({ length: 61 }, (_, i) => {
@@ -1458,6 +1465,13 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
                   cursor: "pointer", padding: "2px 6px", borderRadius: 8, background: "#ffffff12",
                 }}>Reset</div>
               )}
+            </div>
+              <div onClick={() => setTool("aspect")} title="Aspect ratio"
+                   style={{ flexShrink: 0, width: 42, height: 42, borderRadius: "50%",
+                            background: aspect.key !== "free" ? `${G.accent}33` : "#ffffff14",
+                            display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+                <AspectIcon color={aspect.key !== "free" ? G.accent : "#fff"} size={20}/>
+              </div>
             </div>
             )}
 

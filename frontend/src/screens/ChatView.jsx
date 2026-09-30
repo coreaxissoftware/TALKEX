@@ -8323,25 +8323,29 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
            backdropFilter: "blur(18px) saturate(1.3)",
            WebkitBackdropFilter: "blur(18px) saturate(1.3)",
          }}>
-      {/* Top bar — WhatsApp style: back · sender+time · edit · ⋮ menu */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "calc(8px + env(safe-area-inset-top)) 12px 8px", flexShrink: 0 }}>
-        <LbIconBtn onClick={onClose} title="Back">{I.back("#fff", 20)}</LbIconBtn>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, color: "#fff" }}>
-          {current && (
-            <Av av={senderLetter} color={senderColor} size={34} photoId={senderPhoto}/>
-          )}
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 14.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {senderName || "Media"}
-            </div>
-            <div style={{ fontSize: 12, color: "#ffffff99" }}>{current ? whenLabel(current.created_at) : ""}</div>
+      {/* Top bar — WhatsApp style: ← back · name+time · [edit ⋮] pill */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "calc(8px + env(safe-area-inset-top)) 14px 8px", flexShrink: 0 }}>
+        <div onClick={onClose} title="Back" style={{
+          width: 42, height: 42, borderRadius: "50%", background: "#00000066", cursor: "pointer", flexShrink: 0,
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>{I.back("#fff", 22)}</div>
+        <div style={{ flex: 1, minWidth: 0, color: "#fff" }}>
+          <div style={{ fontSize: 16, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {senderName || "Media"}
           </div>
+          <div style={{ fontSize: 12.5, color: "#ffffffb0", marginTop: 1 }}>{current ? whenLabel(current.created_at) : ""}</div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-          {!isVideo && <LbIconBtn onClick={openEditor} title="Edit">{I.edit("#fff", 19)}</LbIconBtn>}
-          <LbIconBtn onClick={() => setMenuPos({ x: (typeof window !== "undefined" ? window.innerWidth : 360) - 12, y: 56 })} title="More">
+        {/* edit + ⋮ grouped in one rounded pill (WhatsApp) */}
+        <div style={{ display: "flex", alignItems: "center", gap: 4, background: "#00000066", borderRadius: 24, padding: "3px 6px", flexShrink: 0 }}>
+          {!isVideo && (
+            <div onClick={openEditor} title="Edit" style={{ width: 36, height: 36, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+              {I.edit("#fff", 19)}
+            </div>
+          )}
+          <div onClick={() => setMenuPos({ x: (typeof window !== "undefined" ? window.innerWidth : 360) - 12, y: 60 })} title="More"
+               style={{ width: 36, height: 36, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
             {I.moreVertical ? I.moreVertical("#fff", 20) : "⋮"}
-          </LbIconBtn>
+          </div>
         </div>
       </div>
 
