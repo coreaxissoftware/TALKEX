@@ -1251,10 +1251,12 @@ export default function PhotoEditor({ file, onCancel, onDone, initialAspectKey, 
         WebkitBackdropFilter: "blur(20px) saturate(1.5)",
         borderBottom: "0.5px solid rgba(255,255,255,0.08)",
       }}>
-        <div onClick={onCancel} style={{
-          color: "#fff", fontSize: 14, fontWeight: 500, cursor: "pointer", padding: "6px 12px",
-          borderRadius: 20, background: "rgba(255,255,255,0.1)", flexShrink: 0,
-        }}>Cancel</div>
+        <div onClick={onCancel} title="Close" style={{
+          cursor: "pointer", width: 38, height: 38, borderRadius: "50%", flexShrink: 0,
+          background: "rgba(255,255,255,0.14)", display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </div>
         {/* Flat WhatsApp-style icon row — direct access to the primary tools
             (Crop / Filter / Text / Sticker / Draw / Tune) instead of tab
             groups. The underlying activeTab/tool machinery is unchanged; each

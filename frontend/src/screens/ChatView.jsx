@@ -8323,25 +8323,25 @@ function ChatMediaLightbox({ items, index, onIndexChange, onClose, me, members, 
            backdropFilter: "blur(18px) saturate(1.3)",
            WebkitBackdropFilter: "blur(18px) saturate(1.3)",
          }}>
-      {/* Top bar */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 16px", flexShrink: 0 }}>
+      {/* Top bar — WhatsApp style: back · sender+time · edit · ⋮ menu */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "calc(8px + env(safe-area-inset-top)) 12px 8px", flexShrink: 0 }}>
+        <LbIconBtn onClick={onClose} title="Back">{I.back("#fff", 20)}</LbIconBtn>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, color: "#fff" }}>
           {current && (
-            <Av av={senderLetter} color={senderColor} size={36} photoId={senderPhoto}/>
+            <Av av={senderLetter} color={senderColor} size={34} photoId={senderPhoto}/>
           )}
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <div style={{ fontSize: 14.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {senderName || "Media"}
             </div>
             <div style={{ fontSize: 12, color: "#ffffff99" }}>{current ? whenLabel(current.created_at) : ""}</div>
           </div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          {!isVideo && <LbIconBtn onClick={() => setZoom((z) => Math.max(1, +(z - 0.5).toFixed(2)))} title="Zoom out">−</LbIconBtn>}
-          {!isVideo && <LbIconBtn onClick={() => setZoom((z) => Math.min(6, +(z + 0.5).toFixed(2)))} title="Zoom in">+</LbIconBtn>}
-          {!isVideo && <LbIconBtn onClick={openEditor} title="Edit">{I.edit("#fff", 18)}</LbIconBtn>}
-          <LbIconBtn onClick={download} title="Download">{I.download("#fff", 18)}</LbIconBtn>
-          <LbIconBtn onClick={onClose} title="Close">×</LbIconBtn>
+        <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          {!isVideo && <LbIconBtn onClick={openEditor} title="Edit">{I.edit("#fff", 19)}</LbIconBtn>}
+          <LbIconBtn onClick={() => setMenuPos({ x: (typeof window !== "undefined" ? window.innerWidth : 360) - 12, y: 56 })} title="More">
+            {I.moreVertical ? I.moreVertical("#fff", 20) : "⋮"}
+          </LbIconBtn>
         </div>
       </div>
 
